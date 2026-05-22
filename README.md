@@ -23,7 +23,23 @@ Then open:
 http://localhost:5173
 ```
 
-The app works without Supabase by using browser local storage. Supabase project `kajifmxqfcceibwredjf` is prefilled as `https://kajifmxqfcceibwredjf.supabase.co`, and the browser-safe publishable key is configured. The schema has been applied; use the Settings tab to test the connection if sync looks wrong.
+The app requires Supabase and the local OpenAI coach server before play is enabled. Supabase project `kajifmxqfcceibwredjf` is prefilled as `https://kajifmxqfcceibwredjf.supabase.co`, and the browser-safe publishable key is configured. The schema has been applied; use the Settings tab to test the connection if sync looks wrong. If the app says engine analysis or move-quality columns are missing, re-run `supabase/schema.sql` so evals, best moves, principal variations, and quality cues can persist.
+
+## What The Platform Does Today
+
+The platform is a personal chess teacher rather than a generic chessboard.
+
+- Plays full legal games in the browser with `chess.js`.
+- Uses five placement games to establish a baseline and unlock personal coaching.
+- Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks.
+- Adapts opponent strength from placement score, recent results, and mistake severity.
+- Reviews learner moves with heuristics, Stockfish eval deltas, best alternatives, and principal variations.
+- Shows post-placement move-quality cues after each learner move while playing: best, excellent, good, book, inaccuracy, mistake, blunder, and missed win.
+- Highlights played and best moves in Review so the learner can compare choices visually.
+- Tracks recurring weaknesses and turns mistakes into practice positions.
+- Provides starter lessons and drills tied to common weakness categories.
+- Sends compact chess context to the local OpenAI coach endpoint for personalized explanations after placement.
+- Stores games and learning data locally, and syncs to Supabase when configured.
 
 ## OpenAI Setup
 
@@ -40,6 +56,7 @@ Edit `.env`:
 ```text
 OPENAI_API_KEY=replace-with-your-key
 OPENAI_MODEL=gpt-5.1
+HOST=127.0.0.1
 PORT=5173
 ```
 
@@ -72,6 +89,7 @@ After placement:
 - Recent wins push opponent strength slightly higher.
 - Recent losses or high-severity mistakes lower opponent strength slightly.
 - Practice difficulty stays tied to the weakness queue, not only to bot strength.
+- Learner moves receive visual quality cues after analysis completes, so feedback appears during play instead of only after the game.
 
 Current bot behavior:
 
@@ -93,6 +111,19 @@ Build a personal chess teacher for one user. The teacher should:
 - Turn mistakes into practice positions.
 
 This is a large product if built as a polished commercial platform, but it is manageable as a personal MVP when built in layers.
+
+## Ultimate Chess Teacher Target
+
+The app becomes an "ultimate chess teacher" when it can combine engine truth, personal history, and a serious training loop:
+
+- Engine-grounded review: reliable Stockfish analysis, best alternatives, principal variations, mate-aware scoring, and review screens that explain what changed after each important move.
+- Rich motif detection: forks, pins, skewers, discovered attacks, overloaded defenders, back-rank problems, trapped pieces, poor trades, and missed tactics.
+- Real learning loop: spaced repetition, retry queues from your own games, success/failure tracking, and difficulty progression.
+- Adaptive curriculum: opening repertoire pages, endgame modules, pawn-structure plans, lesson completion tracking, and lesson recommendations based on repeated personal mistakes.
+- Stronger player model: separate opening, tactics, calculation, endgame, conversion, and habit weaknesses with trend tracking over time.
+- Better teaching UX: arrows, highlights, variation replay, move trees, clear turning points, and coaching that asks useful questions instead of only lecturing.
+
+The analysis foundation is now in place. The next implementation priorities are deeper replay tools, a stronger curriculum loop, and more specific player modeling.
 
 ## How It Learns
 
@@ -120,7 +151,7 @@ The app learns tactical weaknesses from your positions:
 - It scans legal moves for checks, captures, promotions, threats, and forcing moves.
 - It detects missed candidate moves using tactical heuristics immediately.
 - When Stockfish is available, it can compare your move against engine best moves and evaluation swings.
-- It tags positions by motif: loose piece, fork, pin, skewer, discovered attack, overloaded defender, back-rank issue, mate threat, and poor trade.
+- It tags positions by motif: loose piece, missed mate, missed fork, pin, skewer, line tactic, discovered attack, overloaded defender, back-rank issue, mate threat, and poor trade.
 - It converts your mistakes into retryable exercises.
 
 The important part is that practice comes from your actual games first, not random puzzle feeds.
@@ -158,7 +189,7 @@ Practice priority is based on frequency, severity, and recency. A frequent small
 
 ### OpenAI Personal Coach
 
-When `OPENAI_API_KEY` is configured, the app sends a compact coaching context to `/api/coach`:
+When `OPENAI_API_KEY` is configured and the server can reach OpenAI, the app sends a compact coaching context to `/api/coach`:
 
 - Current FEN, PGN, side to move, phase, and opening.
 - Placement progress, estimated score, and current adaptive opponent strength.
@@ -178,6 +209,7 @@ OpenAI returns a personalized summary, plan, candidate explanations, weakness fo
 - Play five placement games that calibrate bot difficulty and unlock the personal coach.
 - Use Stockfish when available, with a heuristic fallback opponent when it is not.
 - Show legal move highlights.
+- Show post-placement move-quality cues after each learner move.
 - Track move history and PGN.
 - Detect common beginner/intermediate mistakes.
 - Generate candidate moves for the current position.
@@ -227,7 +259,7 @@ Configured project:
 Main tables:
 
 - `games`: one row per played game.
-- `moves`: move-by-move history, FENs, classifications, and tags.
+- `moves`: move-by-move history, FENs, classifications, tags, engine evals, best alternatives, principal variations, and move-quality cues.
 - `positions`: important positions extracted from games.
 - `weaknesses`: aggregate personal weakness profile.
 - `weakness_events`: each detected weakness occurrence.
@@ -248,7 +280,7 @@ The teacher should avoid dumping raw engine lines. The useful coaching flow is:
 5. Create a small practice task from the position.
 6. Update the weakness profile.
 
-The first implementation uses immediate heuristics and optional Stockfish support. Later versions should deepen this with engine evaluation deltas, richer tactic detection, and language-model explanations grounded in engine output.
+The current implementation combines immediate heuristics with Stockfish analysis when available. Later versions should deepen this with variation replay, richer tactic detection, and language-model explanations grounded in engine output.
 
 ## Curriculum Strategy
 
@@ -323,6 +355,8 @@ Manual checks:
 - Confirm illegal moves are rejected.
 - Confirm the engine or fallback opponent replies after player moves.
 - Confirm mistake tags appear after risky moves.
+- Confirm post-placement move-quality cues appear on learner moves and do not appear during placement games.
+- Confirm engine evals, best alternatives, short principal variations, and played/best move highlights appear in Review when Stockfish is available.
 - Confirm practice positions are generated from mistakes.
 - Confirm local profile updates after repeated mistakes.
 - Confirm Supabase configuration saves and sync attempts succeed after schema setup.
@@ -332,8 +366,23 @@ Future automated checks:
 - Known tactical FENs classify expected motifs.
 - Known opening lines map to expected opening names.
 - Supabase inserts use the expected payload shape.
+- Engine analysis fields normalize correctly, including mate scores.
 - Practice queue deduplicates repeated positions.
 - Engine adapter handles timeout and fallback.
+
+## What Is Left To Build
+
+The biggest remaining work is turning strong analysis into a complete training system:
+
+- Variation replay: clickable engine lines, arrows, step-through branches, and "show continuation" controls.
+- Stronger quality labels: reliable brilliant/great detection using sacrifice, only-move, and engine-verification criteria.
+- Deeper motif detection: discovered attacks, overloaded defenders, trapped pieces, back-rank weaknesses, deflection, decoy, and clearance.
+- Spaced repetition: scheduled retry queues, due dates, mastery states, and per-theme retention tracking.
+- Player model: separate ratings for openings, tactics, calculation, endgames, conversion, time management, and recurring habits.
+- Curriculum pages: opening repertoire, endgame modules, pawn-structure plans, lesson completion, and next-lesson recommendations.
+- Practice analytics: solve streaks, repeated miss tracking, trend charts, and improvement summaries.
+- Teaching polish: better arrows/highlights, mistake comparison cards, coach questions, and cleaner mobile/tablet layouts.
+- Data hardening: auth-ready Supabase policies, migrations, backup/restore, and more automated sync tests.
 
 ## Roadmap
 
@@ -349,11 +398,12 @@ Future automated checks:
 
 ### Phase 2: Stronger Analysis
 
-- Reliable bundled Stockfish assets.
-- Evaluation-before and evaluation-after comparison.
-- Better tactic motif detection.
-- Review screen with turning points.
-- More accurate blunder/mistake/inaccuracy labels.
+- Reliable bundled Stockfish assets with CDN and heuristic fallbacks.
+- Evaluation-before and evaluation-after comparison, including mate-aware scoring.
+- Persisted engine analysis fields for move review and long-term learning.
+- Best engine alternatives and short principal variations in the review screen.
+- Better tactic motif detection and more accurate blunder/mistake/inaccuracy labels.
+- Post-placement move-quality cues during play.
 
 ### Phase 3: Adaptive Curriculum
 
@@ -375,5 +425,5 @@ Future automated checks:
 
 - The current app is static and intentionally avoids a build step.
 - `index.html`, `styles.css`, and `app.js` are the whole runnable app.
-- Stockfish is loaded opportunistically from jsDelivr. If browser security or network conditions prevent it, the app falls back to a heuristic opponent.
+- Stockfish is loaded from bundled files in `vendor/stockfish` first, then jsDelivr. If both fail, the app falls back to a heuristic opponent.
 - Supabase credentials are stored in browser local storage for this personal MVP. Do not use this model for a public multi-user app without proper auth and security rules.

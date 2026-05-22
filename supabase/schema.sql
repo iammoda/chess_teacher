@@ -32,6 +32,21 @@ create table if not exists moves (
   created_at timestamptz not null default now()
 );
 
+alter table moves add column if not exists analysis_status text not null default 'unavailable';
+alter table moves add column if not exists engine_depth integer;
+alter table moves add column if not exists engine_source text;
+alter table moves add column if not exists eval_before integer;
+alter table moves add column if not exists eval_after integer;
+alter table moves add column if not exists eval_delta integer;
+alter table moves add column if not exists mate_before integer;
+alter table moves add column if not exists mate_after integer;
+alter table moves add column if not exists best_move_uci text;
+alter table moves add column if not exists best_move_san text;
+alter table moves add column if not exists principal_variation jsonb not null default '[]'::jsonb;
+alter table moves add column if not exists quality_key text;
+alter table moves add column if not exists quality_label text;
+alter table moves add column if not exists quality_reason text;
+
 create table if not exists positions (
   id uuid primary key default gen_random_uuid(),
   game_id uuid references games(id) on delete cascade,
@@ -109,4 +124,3 @@ values
   ('king-safety', 'King safety', 'king_safety', 'starter', 'Reduce king exposure before calculating attacks.', '["castling", "open files", "king shelter"]'::jsonb),
   ('trade-quality', 'Trade quality', 'poor_trade', 'starter', 'Evaluate what remains after captures and recaptures.', '["piece value", "recapture", "simplification"]'::jsonb)
 on conflict (id) do nothing;
-

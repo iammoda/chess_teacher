@@ -1,5 +1,6 @@
-import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.0.0/dist/esm/chess.js";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.105.4";
+import { Chess } from "./vendor/chess/chess.js";
+import { ANALYSIS_DEPTH, MOVE_QUALITIES, classifyByEval, classifyMoveQuality, normalizeEngineAnalysis } from "./lib/classify.mjs";
+import { StockfishEngine } from "./lib/stockfish-engine.mjs";
 
 const PIECES = {
   wp: "♙",
@@ -40,7 +41,9 @@ const STORAGE_KEYS = {
   supabase: "chess_teacher_supabase_v1",
 };
 
-const STOCKFISH_URL = "https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/stockfish-nnue-16-single.js";
+const LOCAL_STOCKFISH_BASE_URL = "/vendor/stockfish/";
+const STOCKFISH_CDN_BASE_URL = "https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/";
+const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.105.4?bundle";
 const SUPABASE_PROJECT_REF = "kajifmxqfcceibwredjf";
 const SUPABASE_URL = `https://${SUPABASE_PROJECT_REF}.supabase.co`;
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_MCwuWk-w1KTNSI-pjTGBsQ_hm7_hwBc";
@@ -48,6 +51,8 @@ const DEFAULT_SUPABASE_CONFIG = {
   url: SUPABASE_URL,
   anonKey: SUPABASE_PUBLISHABLE_KEY,
 };
+
+let supabaseModulePromise = null;
 
 const PLACEMENT_TARGET_GAMES = 5;
 const PLACEMENT_DEPTHS = [2, 4, 6, 8, 10];
@@ -212,6 +217,214 @@ const TRAINING_MODULES = [
   },
 ];
 
+const PRACTICE_MOTIFS = {
+  missed_mate: {
+    term: "checkmate",
+    definition: "Checkmate means the king is attacked and has no legal way to escape.",
+    plainGoal: "Find the forcing move that traps the king with no escape squares.",
+    scan: "Start with checks, then ask whether the king can move, capture, or block.",
+  },
+  missed_fork: {
+    term: "fork",
+    definition: "A fork is one move that attacks two important targets at the same time.",
+    plainGoal: "Find a move that attacks two important pieces at once.",
+    scan: "Look for knight, queen, or pawn moves that hit the king and another valuable piece.",
+  },
+  missed_pin: {
+    term: "pin",
+    definition: "A pin makes a piece hard to move because something more important is behind it.",
+    plainGoal: "Find a move that freezes a defender in front of the king.",
+    scan: "Use bishops, rooks, or queens to line up an enemy piece with its king.",
+  },
+  missed_skewer: {
+    term: "skewer",
+    definition: "A skewer attacks a valuable piece first, forcing it to move and exposing what sits behind it.",
+    plainGoal: "Find a check that pushes the king away from a piece behind it.",
+    scan: "Use a line piece to check the king and notice what is behind the king on that line.",
+  },
+  missed_capture: {
+    term: "loose piece",
+    definition: "A loose piece is not defended well enough, so a capture can win material.",
+    plainGoal: "Find the valuable piece that can be taken safely.",
+    scan: "Check captures first, then make sure your capturing piece cannot be won back for more.",
+  },
+  discovered_attack: {
+    term: "discovered attack",
+    definition: "A discovered attack happens when one piece moves away and opens a line for another piece.",
+    plainGoal: "Move one piece so another piece behind it suddenly attacks something valuable.",
+    scan: "Find your blocked bishop, rook, or queen, then move the blocker with tempo.",
+  },
+  king_safety: {
+    term: "defense",
+    definition: "Good defense stops the opponent's forcing idea before it becomes checkmate or material loss.",
+    plainGoal: "Stop the threat before it becomes checkmate.",
+    scan: "Ask what the opponent is threatening, then block it, capture it, or attack the attacking piece.",
+  },
+};
+
+const CURATED_PRACTICE_PUZZLES = [
+  {
+    id: "mate-back-rank-1",
+    source: "curated",
+    category: "missed_mate",
+    plainTitle: "No escape squares",
+    title: "Back-rank mate",
+    difficulty: 1,
+    playerColor: "w",
+    fen: "4r1k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1",
+    expectedMoves: ["e1e8"],
+    targetSquares: ["e8", "g8", "f7", "g7", "h7"],
+    hintSquares: ["e1", "e8"],
+    hintSteps: [
+      "Look at checks first.",
+      "The rook can reach the back rank.",
+      "The king's own pawns remove its escape squares.",
+    ],
+    successText: "Correct. The rook gives check and the king has no escape squares.",
+    missText: "Not yet. Start by checking every legal check.",
+  },
+  {
+    id: "mate-queen-king-1",
+    source: "curated",
+    category: "missed_mate",
+    plainTitle: "Protected queen",
+    title: "Queen and king mate",
+    difficulty: 1,
+    playerColor: "w",
+    fen: "6k1/8/6K1/8/8/8/8/5Q2 w - - 0 1",
+    expectedMoves: ["f1f7"],
+    targetSquares: ["f7", "g8"],
+    hintSquares: ["f1", "f7", "g6"],
+    hintSteps: [
+      "The queen needs protection when it checks.",
+      "Your king already protects f7.",
+      "Move the queen next to the king where it cannot be captured.",
+    ],
+    successText: "Correct. The queen is protected, and the black king has no safe square.",
+    missText: "Not yet. Look for a queen check protected by your king.",
+  },
+  {
+    id: "fork-knight-1",
+    source: "curated",
+    category: "missed_fork",
+    plainTitle: "Two targets",
+    title: "Knight fork",
+    difficulty: 1,
+    playerColor: "w",
+    fen: "q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1",
+    expectedMoves: ["d5c7"],
+    targetSquares: ["e8", "a8"],
+    hintSquares: ["d5", "c7"],
+    hintSteps: [
+      "Knights are good at attacking two separated targets.",
+      "Look for a move that gives check.",
+      "The same knight move also attacks the queen in the corner.",
+    ],
+    successText: "Correct. The knight checks the king and attacks the queen.",
+    missText: "Not yet. Try to move the knight with check.",
+  },
+  {
+    id: "pin-bishop-1",
+    source: "curated",
+    category: "missed_pin",
+    plainTitle: "Freeze the defender",
+    title: "Bishop pin",
+    difficulty: 1,
+    playerColor: "w",
+    fen: "4k3/8/2n5/8/8/8/8/4KB2 w - - 0 1",
+    expectedMoves: ["f1b5"],
+    targetSquares: ["c6", "e8"],
+    hintSquares: ["f1", "b5", "c6", "e8"],
+    hintSteps: [
+      "Line pieces can freeze defenders.",
+      "The bishop can aim through the knight toward the king.",
+      "Move the bishop to b5.",
+    ],
+    successText: "Correct. The knight is stuck in front of the king.",
+    missText: "Not yet. Look for a bishop move that lines up with the king.",
+  },
+  {
+    id: "skewer-rook-1",
+    source: "curated",
+    category: "missed_skewer",
+    plainTitle: "King in front",
+    title: "Rook skewer",
+    difficulty: 2,
+    playerColor: "w",
+    fen: "4q3/4k3/8/8/8/8/R7/6K1 w - - 0 1",
+    expectedMoves: ["a2e2"],
+    targetSquares: ["e7", "e8"],
+    hintSquares: ["a2", "e2", "e7", "e8"],
+    hintSteps: [
+      "Look for a checking move with the rook.",
+      "The king and queen are on the same file.",
+      "Move the rook to e2.",
+    ],
+    successText: "Correct. The king must move, and the queen behind it will be exposed.",
+    missText: "Not yet. Find the rook check on the same file as the king and queen.",
+  },
+  {
+    id: "loose-queen-1",
+    source: "curated",
+    category: "missed_capture",
+    plainTitle: "Win the loose queen",
+    title: "Loose queen",
+    difficulty: 1,
+    playerColor: "w",
+    fen: "4k3/4q3/8/8/8/8/8/4R1K1 w - - 0 1",
+    expectedMoves: ["e1e7"],
+    targetSquares: ["e7", "e8"],
+    hintSquares: ["e1", "e7"],
+    hintSteps: [
+      "Check captures before quiet moves.",
+      "The queen is on the same file as your rook.",
+      "Your rook can take the queen.",
+    ],
+    successText: "Correct. The rook wins the loose queen with check.",
+    missText: "Not yet. Look for a safe capture of a valuable piece.",
+  },
+  {
+    id: "discovered-attack-1",
+    source: "curated",
+    category: "discovered_attack",
+    plainTitle: "Open the line",
+    title: "Discovered attack",
+    difficulty: 2,
+    playerColor: "w",
+    fen: "4q1k1/8/2N5/1B6/8/8/8/4K3 w - - 0 1",
+    expectedMoves: ["c6e7"],
+    targetSquares: ["g8", "e8"],
+    hintSquares: ["c6", "e7", "b5", "e8"],
+    hintSteps: [
+      "One of your own pieces is blocking a bishop.",
+      "Move the blocker with check.",
+      "The bishop will then attack the queen.",
+    ],
+    successText: "Correct. The knight checks the king and opens the bishop's attack on the queen.",
+    missText: "Not yet. Move the blocking knight with tempo.",
+  },
+  {
+    id: "defense-scholars-1",
+    source: "curated",
+    category: "king_safety",
+    plainTitle: "Stop the threat",
+    title: "Defend mate threat",
+    difficulty: 1,
+    playerColor: "b",
+    fen: "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 1 2",
+    expectedMoves: ["g7g6", "b8c6"],
+    targetSquares: ["h5", "f7", "e5"],
+    hintSquares: ["h5", "f7", "g6", "c6"],
+    hintSteps: [
+      "White is aiming at f7.",
+      "You can attack the queen or defend the key square.",
+      "g6 or Nc6 both solve the immediate problem.",
+    ],
+    successText: "Correct. You stopped the early queen attack before it became mate.",
+    missText: "Not yet. First identify what White is threatening on f7.",
+  },
+];
+
 const INTERACTIVE_LESSONS = {
   "loose-pieces": {
     id: "lesson-loose-pieces",
@@ -336,12 +549,19 @@ const DEFAULT_SETTINGS = {
 
 const els = {
   board: document.querySelector("#board"),
-  engineStatus: document.querySelector("#engineStatus"),
-  storageStatus: document.querySelector("#storageStatus"),
   newGameButton: document.querySelector("#newGameButton"),
-  turnText: document.querySelector("#turnText"),
-  openingText: document.querySelector("#openingText"),
-  resultText: document.querySelector("#resultText"),
+  takeBackButton: document.querySelector("#takeBackButton"),
+  seatOpponent: document.querySelector("#seatOpponent"),
+  seatPlayer: document.querySelector("#seatPlayer"),
+  opponentSeatName: document.querySelector("#opponentSeatName"),
+  opponentSeatSub: document.querySelector("#opponentSeatSub"),
+  opponentProgressDots: document.querySelector("#opponentProgressDots"),
+  opponentAvatar: document.querySelector("#opponentAvatar"),
+  playerSeatSub: document.querySelector("#playerSeatSub"),
+  playerSeatPill: document.querySelector("#playerSeatPill"),
+  ctxHeadTitle: document.querySelector("#ctxHeadTitle"),
+  ctxHeadMeta: document.querySelector("#ctxHeadMeta"),
+  practiceBadge: document.querySelector("#practiceBadge"),
   tabs: [...document.querySelectorAll(".tab")],
   panels: [...document.querySelectorAll(".panel")],
   coachPanel: document.querySelector("#coachPanel"),
@@ -368,13 +588,23 @@ const state = {
   moves: [],
   currentGameId: crypto.randomUUID(),
   currentTab: "coach",
+  reviewPly: null,
   thinking: false,
   activeDrill: null,
   drillMessage: "",
+  practiceTrainer: {
+    attempts: 0,
+    hintIndex: 0,
+    status: "idle",
+    lastMoveUci: "",
+    scoreDelta: 0,
+    feedback: "",
+  },
   openAI: {
     configured: false,
+    online: false,
     model: "",
-    status: "Not checked",
+    status: "Checking OpenAI coach...",
   },
   aiCoach: {
     loading: false,
@@ -386,119 +616,10 @@ const state = {
   supabase: null,
   supabaseHealth: "",
   supabaseReachable: null,
+  supabaseAnalysisReachable: null,
+  supabaseQualityReachable: null,
   engine: null,
 };
-
-class StockfishEngine {
-  constructor(url) {
-    this.url = url;
-    this.worker = null;
-    this.ready = false;
-    this.pending = null;
-    this.bootResolve = null;
-    this.bootReject = null;
-  }
-
-  async init() {
-    if (!window.Worker) {
-      throw new Error("Workers unavailable");
-    }
-
-    const source = `
-      self.Module = {
-        locateFile: function(path) {
-          return "https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/" + path;
-        }
-      };
-      importScripts("${this.url}");
-    `;
-    const blob = new Blob([source], { type: "text/javascript" });
-    const workerUrl = URL.createObjectURL(blob);
-    this.worker = new Worker(workerUrl);
-    URL.revokeObjectURL(workerUrl);
-
-    this.worker.onmessage = (event) => this.handleMessage(String(event.data));
-    this.worker.onerror = () => {
-      this.ready = false;
-      if (this.bootReject) {
-        this.bootReject(new Error("Stockfish worker failed"));
-      }
-    };
-
-    const bootPromise = new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        reject(new Error("Stockfish readiness timed out"));
-      }, 5000);
-
-      this.bootResolve = () => {
-        window.clearTimeout(timeout);
-        resolve();
-      };
-      this.bootReject = (error) => {
-        window.clearTimeout(timeout);
-        reject(error);
-      };
-    });
-
-    this.post("uci");
-    window.setTimeout(() => this.post("isready"), 250);
-    await bootPromise;
-  }
-
-  post(command) {
-    if (this.worker) {
-      this.worker.postMessage(command);
-    }
-  }
-
-  handleMessage(line) {
-    if (line === "readyok" || line === "uciok") {
-      this.ready = true;
-      if (line === "readyok" && this.bootResolve) {
-        this.bootResolve();
-        this.bootResolve = null;
-        this.bootReject = null;
-      }
-    }
-
-    if (this.pending && line.startsWith("info ")) {
-      this.pending.info.push(line);
-    }
-
-    if (this.pending && line.startsWith("bestmove ")) {
-      const move = line.split(/\s+/)[1];
-      const pending = this.pending;
-      this.pending = null;
-      pending.resolve(move && move !== "(none)" ? move : null);
-    }
-  }
-
-  async bestMove(fen, depth) {
-    if (!this.ready || this.pending) {
-      return null;
-    }
-
-    return new Promise((resolve) => {
-      const timeout = window.setTimeout(() => {
-        if (this.pending) {
-          this.pending = null;
-          resolve(null);
-        }
-      }, 4500);
-
-      this.pending = {
-        info: [],
-        resolve: (move) => {
-          window.clearTimeout(timeout);
-          resolve(move);
-        },
-      };
-
-      this.post(`position fen ${fen}`);
-      this.post(`go depth ${depth}`);
-    });
-  }
-}
 
 function loadJson(key, fallback) {
   try {
@@ -520,6 +641,21 @@ function normalizeSupabaseConfig(config) {
     url: config?.url || DEFAULT_SUPABASE_CONFIG.url,
     anonKey: config?.anonKey || DEFAULT_SUPABASE_CONFIG.anonKey,
   };
+}
+
+async function loadSupabaseCreateClient() {
+  if (!supabaseModulePromise) {
+    supabaseModulePromise = import(SUPABASE_CLIENT_URL).catch((error) => {
+      supabaseModulePromise = null;
+      throw error;
+    });
+  }
+
+  const module = await supabaseModulePromise;
+  if (typeof module.createClient !== "function") {
+    throw new Error("Supabase client module did not expose createClient.");
+  }
+  return module.createClient;
 }
 
 function wait(ms) {
@@ -565,7 +701,130 @@ function getBoardSquares() {
   return ranks.flatMap((rank) => files.map((file) => `${file}${rank}`));
 }
 
+function isPracticeTrainerDrill(drill = state.activeDrill) {
+  return Boolean(drill?.isPracticeTrainer);
+}
+
+function getPracticeBoardCue(square) {
+  if (!isPracticeTrainerDrill()) return null;
+
+  const trainer = state.practiceTrainer || {};
+  const drill = state.activeDrill;
+  const classes = [];
+  let label = "";
+  let badge = "";
+  const lastMove = trainer.lastMoveUci || "";
+  const lastFrom = lastMove.slice(0, 2);
+  const lastTo = lastMove.slice(2, 4);
+  const showHintSquares = trainer.hintIndex >= 2 || trainer.status === "solved";
+
+  if (showHintSquares && drill.hintSquares?.includes(square)) {
+    classes.push("practice-hint-square");
+    label = "Hint square";
+  }
+
+  if (trainer.status === "solved" && drill.targetSquares?.includes(square)) {
+    classes.push("practice-target-square");
+    label = "Tactical target";
+  }
+
+  if (trainer.status === "solved" && lastMove && (square === lastFrom || square === lastTo)) {
+    classes.push("practice-answer-square");
+    label = square === lastTo ? "Correct move destination" : "Correct move origin";
+    if (square === lastTo) badge = "✓";
+  }
+
+  if (!classes.length && !badge) return null;
+  return {
+    className: classes.join(" "),
+    label,
+    badge,
+  };
+}
+
+function getMoveQuality(move) {
+  if (!move?.qualityKey) return null;
+  const key = String(move.qualityKey);
+  const display = MOVE_QUALITIES[key] || MOVE_QUALITIES.good;
+  return {
+    key,
+    label: move.qualityLabel || display.label,
+    symbol: move.qualitySymbol || display.symbol,
+    reason: move.qualityReason || display.reason,
+    tone: display.tone,
+  };
+}
+
+function qualityClassName(key) {
+  return `quality-${String(key || "good").replace(/[^a-z0-9_-]/gi, "")}`;
+}
+
+function getLatestPlayerMove() {
+  return [...state.moves].reverse().find((move) => move.role === "player") || null;
+}
+
+function getLiveMoveQualityCue() {
+  if (!isPlacementComplete() || state.activeDrill) return null;
+  const move = getLatestPlayerMove();
+  const quality = getMoveQuality(move);
+  return quality && move?.to ? { move, quality } : null;
+}
+
+function renderQualityBadgeHtml(move, extraClass = "") {
+  const quality = getMoveQuality(move);
+  if (!quality) return "";
+  const label = `${quality.label}: ${quality.reason}`;
+  return `<span class="move-quality-badge ${qualityClassName(quality.key)} ${extraClass}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(quality.symbol)}</span>`;
+}
+
+function animateBoardMove(move) {
+  if (!move?.from || !move?.to || !els.board?.parentElement) return false;
+  const fromSquare = els.board.querySelector(`[data-square="${move.from}"]`);
+  const toSquare = els.board.querySelector(`[data-square="${move.to}"]`);
+  const host = els.board.parentElement;
+  if (!fromSquare || !toSquare) return false;
+
+  const hostRect = host.getBoundingClientRect();
+  const fromRect = fromSquare.getBoundingClientRect();
+  const toRect = toSquare.getBoundingClientRect();
+  if (!fromRect.width || !toRect.width) return false;
+
+  const pieceGlyph = PIECES[move.color + (move.promotion || move.piece)] || fromSquare.querySelector(".piece")?.textContent || "";
+  if (!pieceGlyph) return false;
+
+  fromSquare.classList.add("animating-from");
+  toSquare.classList.add("animating-to");
+
+  const ghost = document.createElement("span");
+  ghost.className = `piece ${move.color} move-ghost`;
+  ghost.textContent = pieceGlyph;
+  ghost.style.width = `${fromRect.width}px`;
+  ghost.style.height = `${fromRect.height}px`;
+  ghost.style.left = `${fromRect.left - hostRect.left}px`;
+  ghost.style.top = `${fromRect.top - hostRect.top}px`;
+  host.append(ghost);
+
+  const dx = toRect.left - fromRect.left;
+  const dy = toRect.top - fromRect.top;
+  window.requestAnimationFrame(() => {
+    ghost.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+  window.setTimeout(() => ghost.remove(), 220);
+  return true;
+}
+
+function renderAfterMoveAnimation(animated, callback) {
+  const delay = animated ? 170 : 0;
+  window.setTimeout(() => {
+    renderAll();
+    callback?.();
+  }, delay);
+}
+
 function renderAll() {
+  if (state.currentTab === "practice" && areRequiredServicesReady()) {
+    ensurePracticeTrainer();
+  }
   renderBoard();
   renderGameMeta();
   renderCurrentPanel();
@@ -580,10 +839,25 @@ function renderAll() {
 function renderBoard() {
   els.board.innerHTML = "";
 
+  if (!areRequiredServicesReady()) {
+    els.board.innerHTML = `
+      <div class="service-board-gate">
+        <span>Required services</span>
+        <strong>Supabase and OpenAI must be online</strong>
+        <p>Use Settings or Check services to connect the database and personal coach.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const liveQualityCue = getLiveMoveQualityCue();
+
   for (const square of getBoardSquares()) {
     const fileIndex = FILES.indexOf(square[0]);
     const rankIndex = Number(square[1]) - 1;
     const piece = state.game.get(square);
+    const squareQuality = liveQualityCue?.move.to === square ? liveQualityCue.quality : null;
+    const practiceCue = getPracticeBoardCue(square);
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
@@ -592,9 +866,21 @@ function renderBoard() {
       state.selectedSquare === square ? "selected" : "",
       state.legalTargets.has(square) ? "target" : "",
       state.lastMove && (state.lastMove.from === square || state.lastMove.to === square) ? "last" : "",
+      squareQuality ? "quality-cued" : "",
+      squareQuality ? qualityClassName(squareQuality.key) : "",
+      practiceCue?.className || "",
     ].filter(Boolean).join(" ");
     button.dataset.square = square;
-    button.setAttribute("aria-label", square);
+    const ariaDetails = [
+      squareQuality ? `${squareQuality.label}: ${squareQuality.reason}` : "",
+      practiceCue?.label || "",
+    ].filter(Boolean).join(" ");
+    button.setAttribute("aria-label", ariaDetails ? `${square}. ${ariaDetails}` : square);
+    if (squareQuality || practiceCue?.label) {
+      button.title = [squareQuality ? `${squareQuality.label}: ${squareQuality.reason}` : "", practiceCue?.label || ""]
+        .filter(Boolean)
+        .join(" ");
+    }
 
     if (piece) {
       const span = document.createElement("span");
@@ -603,12 +889,34 @@ function renderBoard() {
       button.append(span);
     }
 
+    if (squareQuality) {
+      const badge = document.createElement("span");
+      badge.className = `move-quality-badge ${qualityClassName(squareQuality.key)}`;
+      badge.textContent = squareQuality.symbol;
+      badge.setAttribute("aria-hidden", "true");
+      button.append(badge);
+    }
+
+    if (practiceCue?.badge) {
+      const badge = document.createElement("span");
+      badge.className = "practice-square-badge";
+      badge.textContent = practiceCue.badge;
+      badge.setAttribute("aria-hidden", "true");
+      button.append(badge);
+    }
+
     const flipped = isBoardFlipped();
-    if (square[0] === (flipped ? "h" : "a") || square[1] === (flipped ? "8" : "1")) {
-      const coord = document.createElement("span");
-      coord.className = "coord";
-      coord.textContent = square;
-      button.append(coord);
+    if (square[0] === (flipped ? "h" : "a")) {
+      const rankCoord = document.createElement("span");
+      rankCoord.className = "coord rank";
+      rankCoord.textContent = square[1];
+      button.append(rankCoord);
+    }
+    if (square[1] === (flipped ? "8" : "1")) {
+      const fileCoord = document.createElement("span");
+      fileCoord.className = "coord file";
+      fileCoord.textContent = square[0];
+      button.append(fileCoord);
     }
 
     button.addEventListener("click", () => handleSquareClick(square));
@@ -616,34 +924,218 @@ function renderBoard() {
   }
 }
 
+function getPlayerSeatSubLabel() {
+  const moveNumber = Math.floor(state.moves.length / 2) + 1;
+  const playerColor = state.activeDrill?.playerColor || state.settings.playerColor;
+  return `${colorName(playerColor)} · move ${moveNumber}`;
+}
+
+const PLACEMENT_INTENSITY = ["light", "light", "balanced", "challenging", "strongest"];
+
+function getOpponentSeatLabels() {
+  if (state.activeDrill) {
+    if (isPracticeTrainerDrill()) {
+      return { name: "Practice Trainer", sub: state.activeDrill.plainTitle || state.activeDrill.type || "Puzzle" };
+    }
+    return { name: "Training Board", sub: state.activeDrill.type || "Drill" };
+  }
+  const progress = getPlacementProgress();
+  if (!progress.complete) {
+    const level = Math.min(progress.completed + 1, progress.target);
+    const intensity = PLACEMENT_INTENSITY[level - 1] || "light";
+    return { name: "Placement Opponent", sub: `Level ${level} of 5 · ${intensity}` };
+  }
+  const score = getEstimatedTrainingScore();
+  return { name: "Adaptive Opponent", sub: score ? `Adaptive · score ${score}` : "Adaptive" };
+}
+
+function fillProgressDots(container, completed, total = 5) {
+  if (!container) return;
+  const dots = container.querySelectorAll("i");
+  for (let i = 0; i < dots.length; i++) {
+    dots[i].classList.toggle("on", i < Math.min(total, completed));
+  }
+}
+
+function getStorageStatusLabel() {
+  if (state.supabaseReachable) return "Supabase ready";
+  if (state.supabase) return "Supabase configured";
+  if (state.supabaseConfig.url && !state.supabaseConfig.anonKey) return "Supabase key needed";
+  if (state.supabaseReachable === false) return "Supabase unavailable";
+  return "Supabase required";
+}
+
+function isSupabaseReady() {
+  return state.supabaseReachable === true;
+}
+
+function isOpenAIReady() {
+  return state.openAI.configured === true && state.openAI.online === true;
+}
+
+function areRequiredServicesReady() {
+  return isSupabaseReady() && isOpenAIReady();
+}
+
+function getRequiredServiceRows() {
+  return [
+    {
+      name: "Supabase",
+      ready: isSupabaseReady(),
+      detail: isSupabaseReady()
+        ? "Online and writable."
+        : state.supabaseHealth || (state.supabase ? "Checking database access..." : "Supabase must be configured and reachable."),
+    },
+    {
+      name: "OpenAI coach",
+      ready: isOpenAIReady(),
+      detail: isOpenAIReady()
+        ? `Online${state.openAI.model ? ` with ${state.openAI.model}` : ""}.`
+        : state.openAI.status || "OpenAI must be configured and reachable.",
+    },
+  ];
+}
+
+function renderRequiredServicesCard() {
+  const rows = getRequiredServiceRows().map((service) => `
+    <div class="service-row ${service.ready ? "ready" : "blocked"}">
+      <span class="service-dot"></span>
+      <div>
+        <strong>${escapeHtml(service.name)}</strong>
+        <p>${escapeHtml(service.detail)}</p>
+      </div>
+    </div>
+  `).join("");
+
+  return `
+    <article class="mini-card service-gate-card">
+      <span class="label">Required services</span>
+      <strong>Supabase and OpenAI must be online</strong>
+      <p>The chess teacher is intentionally locked until the database and personal coach are reachable.</p>
+      <div class="service-list">${rows}</div>
+      <div class="button-row">
+        <button id="checkRequiredServicesButton" type="button">Check services</button>
+        <button id="openSettingsButton" type="button">Settings</button>
+      </div>
+    </article>
+  `;
+}
+
+function bindRequiredServicesCard() {
+  document.querySelector("#checkRequiredServicesButton")?.addEventListener("click", verifyRequiredServices);
+  document.querySelector("#openSettingsButton")?.addEventListener("click", () => switchTab("settings"));
+}
+
+function renderLockedPanel(tab) {
+  const panel = {
+    coach: els.coachPanel,
+    review: els.reviewPanel,
+    practice: els.practicePanel,
+    profile: els.profilePanel,
+    lessons: els.lessonsPanel,
+  }[tab];
+
+  if (!panel) return false;
+  panel.innerHTML = `
+    <h2>${escapeHtml(tab)}</h2>
+    <div class="stack">
+      ${renderRequiredServicesCard()}
+    </div>
+  `;
+  bindRequiredServicesCard();
+  return true;
+}
+
 function renderGameMeta() {
-  els.turnText.textContent = state.activeDrill ? `${colorName(state.game.turn())} drill` : colorName(state.game.turn());
-  els.openingText.textContent = detectOpening().name;
-  els.resultText.textContent = state.activeDrill ? state.activeDrill.title : getResultLabel();
+  const progress = getPlacementProgress();
+  const servicesReady = areRequiredServicesReady();
 
-  const storageReady = Boolean(state.supabase);
-  const needsKey = Boolean(state.supabaseConfig.url && !state.supabaseConfig.anonKey);
-  els.storageStatus.textContent = state.supabaseReachable
-    ? "Supabase ready"
-    : storageReady
-      ? "Supabase configured"
-      : needsKey
-        ? "Supabase key needed"
-        : "Local storage";
-  els.storageStatus.className = state.supabaseReachable
-    ? "status-pill"
-    : storageReady || needsKey
-      ? "status-pill warn"
-      : "status-pill muted";
+  // Opponent seat
+  const opponentLabels = getOpponentSeatLabels();
+  els.opponentSeatName.textContent = opponentLabels.name;
+  els.opponentSeatSub.textContent = opponentLabels.sub;
+  if (els.opponentAvatar) {
+    els.opponentAvatar.textContent = state.activeDrill ? "T" : "N";
+  }
+  fillProgressDots(els.opponentProgressDots, progress.completed, progress.target);
 
-  const engineReady = state.engine?.ready;
-  els.engineStatus.textContent = getOpponentStatusLabel();
-  els.engineStatus.className = engineReady || state.activeDrill ? "status-pill" : "status-pill warn";
+  // Player seat
+  els.playerSeatSub.textContent = getPlayerSeatSubLabel();
+  const activePlayerColor = state.activeDrill?.playerColor || state.settings.playerColor;
+  const playerToMove = state.game.turn() === activePlayerColor;
+  els.playerSeatPill.classList.toggle("waiting", !servicesReady || !playerToMove);
+  els.playerSeatPill.innerHTML = `<span class="dot"></span> ${servicesReady ? (playerToMove ? "Your move" : "Opponent thinking") : "Services required"}`;
 
-  els.newGameButton.disabled = state.thinking;
+  // Seat turn indicator
+  els.seatOpponent.classList.toggle("turn", servicesReady && !playerToMove);
+  els.seatPlayer.classList.toggle("turn", servicesReady && playerToMove);
+
+  // Coach card ribbon dots (rendered inside the coach panel — query lazily)
+  const coachDots = document.querySelector(".coach-card .progress-dots.coach");
+  if (coachDots) {
+    fillProgressDots(coachDots, progress.completed, progress.target);
+  }
+
+  // Practice tab badge
+  if (els.practiceBadge) {
+    const count = state.practiceQueue.length;
+    els.practiceBadge.textContent = String(count);
+    els.practiceBadge.hidden = count === 0;
+  }
+
+  // Ctx-head reflects the current tab
+  updateCtxHead(state.currentTab);
+
+  els.newGameButton.disabled = !servicesReady || state.thinking || Boolean(state.activeDrill);
+  els.takeBackButton.disabled = !servicesReady || state.thinking || Boolean(state.activeDrill) || state.game.history().length < 2;
+}
+
+function updateCtxHead(tab) {
+  if (!els.ctxHeadTitle || !els.ctxHeadMeta) return;
+  const titles = {
+    coach: "Coach",
+    review: "Review",
+    practice: "Practice",
+    profile: "Profile",
+    lessons: "Lessons",
+    settings: "Settings",
+  };
+  els.ctxHeadTitle.textContent = titles[tab] || "";
+  els.ctxHeadMeta.textContent = ctxHeadMetaFor(tab);
+}
+
+function ctxHeadMetaFor(tab) {
+  const progress = getPlacementProgress();
+  switch (tab) {
+    case "coach":
+      return progress.complete ? "Adaptive" : `Placement · ${progress.completed} / ${progress.target}`;
+    case "review":
+      return state.moves.length ? `${state.moves.length} ${state.moves.length === 1 ? "ply" : "plies"}` : "";
+    case "practice": {
+      if (progress.complete) {
+        const stats = getPracticeStats();
+        return `Trainer · streak ${stats.streak}`;
+      }
+      const n = state.practiceQueue.length;
+      return n ? `${n} queued` : "Empty";
+    }
+    case "profile":
+      return "";
+    case "lessons":
+      return `${STARTER_LESSONS.length} lessons`;
+    case "settings":
+      return state.openAI.status || "";
+    default:
+      return "";
+  }
 }
 
 function renderCurrentPanel() {
+  if (!areRequiredServicesReady() && state.currentTab !== "settings") {
+    renderLockedPanel(state.currentTab);
+    return;
+  }
+
   if (state.currentTab === "coach") renderCoachPanel();
   if (state.currentTab === "review") renderReviewPanel();
   if (state.currentTab === "practice") renderPracticePanel();
@@ -654,6 +1146,22 @@ function renderCurrentPanel() {
 
 function renderCoachPanel() {
   if (state.activeDrill) {
+    if (isPracticeTrainerDrill()) {
+      els.coachPanel.innerHTML = `
+        <h2>Coach</h2>
+        <div class="stack">
+          <article class="mini-card practice-trainer-card">
+            <span class="label">Practice active</span>
+            <strong>${escapeHtml(state.activeDrill.plainTitle || "Find the idea")}</strong>
+            <p>${escapeHtml(state.drillMessage || state.activeDrill.plainGoal)}</p>
+            <button id="openPracticeTrainerButton" type="button">Open practice trainer</button>
+          </article>
+        </div>
+      `;
+      document.querySelector("#openPracticeTrainerButton")?.addEventListener("click", () => switchTab("practice"));
+      return;
+    }
+
     const target = getCurrentDrillTarget();
     els.coachPanel.innerHTML = `
       <h2>Coach</h2>
@@ -759,14 +1267,23 @@ function renderPositionBriefCard() {
 }
 
 function renderMoveReviewCard(move) {
-  const tags = move.tags.length
-    ? move.tags.map((tag) => `<span class="tag ${tag.severity >= 3 ? "danger" : "warn"}">${escapeHtml(tag.label)}</span>`).join("")
+  const quality = getMoveQuality(move);
+  const pendingQuality = move.qualityEligible && move.analysisStatus === "pending" && !quality;
+  const moveTags = move.tags || [];
+  const tags = moveTags.length
+    ? moveTags.map((tag) => `<span class="tag ${tag.severity >= 3 ? "danger" : "warn"}">${escapeHtml(tag.label)}</span>`).join("")
     : "<span class=\"tag good\">No issue tagged</span>";
+  const qualityPill = quality
+    ? `<span class="quality-pill ${qualityClassName(quality.key)}">${renderQualityBadgeHtml(move, "inline-quality-badge")}${escapeHtml(quality.label)}</span>`
+    : pendingQuality
+      ? "<span class=\"quality-pill quality-pending\">Analyzing</span>"
+      : "";
 
   return `
     <article class="mini-card">
       <strong>Move review: ${escapeHtml(move.san)}</strong>
-      <p>${escapeHtml(describeMoveImpact(move))}</p>
+      ${qualityPill ? `<div class="quality-summary">${qualityPill}</div>` : ""}
+      <p>${escapeHtml(quality?.reason || describeMoveImpact(move))}</p>
       <div class="tag-list">${tags}</div>
     </article>
   `;
@@ -1316,25 +1833,53 @@ function addPracticeFromLesson(lessonId) {
   switchTab("practice");
 }
 
-async function checkOpenAIHealth() {
+async function checkOpenAIHealth(options = {}) {
+  state.openAI.status = "Checking OpenAI coach...";
+  state.openAI.online = false;
+  if (options.render !== false) renderAll();
+
   try {
-    const response = await fetch("/api/health");
+    const response = await fetch("/api/health?check=1");
     if (!response.ok) throw new Error("Coach server is not responding.");
     const data = await response.json();
     state.openAI.configured = Boolean(data.openaiConfigured);
     state.openAI.model = data.model || "";
-    state.openAI.status = state.openAI.configured ? "Connected" : "Missing OPENAI_API_KEY";
-  } catch {
+    state.openAI.online = Boolean(data.openaiOnline);
+    state.openAI.status = state.openAI.online
+      ? "OpenAI coach online"
+      : state.openAI.configured
+        ? data.openaiError || "OpenAI coach is configured, but the API is not reachable."
+        : "Missing OPENAI_API_KEY";
+  } catch (error) {
     state.openAI.configured = false;
+    state.openAI.online = false;
     state.openAI.model = "";
-    state.openAI.status = "Start the Node server with npm start.";
+    state.openAI.status = error.message || "Start the Node server with npm start.";
   }
 
-  if (state.currentTab === "settings") {
-    renderSettingsPanel();
-  } else if (state.currentTab === "coach") {
-    renderCoachPanel();
+  if (options.render !== false) {
+    renderAll();
   }
+
+  return isOpenAIReady();
+}
+
+async function verifyRequiredServices() {
+  state.supabaseHealth = "Testing Supabase connection...";
+  state.openAI.status = "Checking OpenAI coach...";
+  state.openAI.online = false;
+  renderAll();
+
+  const [supabaseReady, openAIReady] = await Promise.all([
+    verifySupabaseConnection({ syncStart: true, render: false }),
+    checkOpenAIHealth({ render: false }),
+  ]);
+
+  renderAll();
+  if (supabaseReady && openAIReady && !state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
+    maybeEngineMove();
+  }
+  return supabaseReady && openAIReady;
 }
 
 async function requestAICoach(context) {
@@ -1427,6 +1972,16 @@ function buildCoachContext(context) {
       classification: move.classification,
       note: move.note,
       tags: move.tags,
+      quality: move.qualityLabel || "",
+      qualityReason: move.qualityReason || "",
+      analysisStatus: move.analysisStatus,
+      evalDelta: move.evalDelta,
+      evalBefore: move.evalBefore,
+      evalAfter: move.evalAfter,
+      mateBefore: move.mateBefore,
+      mateAfter: move.mateAfter,
+      bestMove: move.bestMoveSan || move.bestMoveUci || "",
+      principalVariation: move.principalVariation || [],
     })),
     lastPlayerMove,
     placement: {
@@ -1468,76 +2023,610 @@ function buildCoachContext(context) {
 }
 
 function renderReviewPanel() {
-  const rows = state.moves.map((move) => `
-    <div class="move-row">
-      <div>${move.ply}.</div>
-      <div class="move-san">${escapeHtml(move.san)}</div>
-      <div class="move-note">${escapeHtml(move.note || move.classification)}</div>
-    </div>
-  `).join("");
+  if (!state.moves.length) {
+    els.reviewPanel.innerHTML = `
+      <h2>Review</h2>
+      <p class="empty-state">No moves yet. Play a game to review it here.</p>
+    `;
+    return;
+  }
+
+  const selectedMove = state.reviewPly != null
+    ? state.moves.find((move) => move.ply === state.reviewPly)
+    : state.moves[state.moves.length - 1];
+  const boardFen = selectedMove ? selectedMove.afterFen : state.game.fen();
+  const turningPoints = getReviewTurningPoints();
+  const analysisCard = renderSelectedMoveAnalysis(selectedMove);
+
+  const rows = state.moves.map((move) => {
+    const isSelected = selectedMove && move.ply === selectedMove.ply;
+    const evalText = formatEvalDelta(move);
+    const quality = getMoveQuality(move);
+    const tagPills = (move.tags || []).map((tag) =>
+      `<span class="tag ${reviewTagClass(tag.severity)}">${escapeHtml(tag.label)}</span>`
+    ).join("");
+    const classText = quality ? quality.label : prettyClassification(move.classification);
+    const className = quality ? `quality-pill ${qualityClassName(quality.key)}` : reviewClassClass(move.classification);
+    return `
+      <div class="move-row ${isSelected ? "selected" : ""}" role="button" tabindex="0" data-ply="${move.ply}">
+        <div class="move-meta">
+          <span class="move-ply">${move.ply}.</span>
+          ${quality ? renderQualityBadgeHtml(move, "row-quality-badge") : ""}
+          <span class="move-san">${escapeHtml(move.san)}</span>
+          <span class="move-class ${className}">${escapeHtml(classText)}</span>
+          ${evalText ? `<span class="move-eval">${evalText}</span>` : ""}
+        </div>
+        ${move.note ? `<div class="move-note">${escapeHtml(move.note)}</div>` : ""}
+        ${tagPills ? `<div class="tag-list">${tagPills}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+
+  const turningPointHtml = turningPoints.length ? `
+    <article class="mini-card">
+      <strong>Turning points</strong>
+      <p>Your biggest centipawn drops this game.</p>
+      <div class="candidate-list">
+        ${turningPoints.map((point) => `
+          <button type="button" class="candidate turning-point" data-ply="${point.ply}">
+            ${point.ply}. ${escapeHtml(point.san)} <span class="move-eval">-${point.evalDelta}cp</span>
+          </button>
+        `).join("")}
+      </div>
+    </article>
+  ` : "";
+
+  const boardCard = renderReviewBoardCard(selectedMove, boardFen);
 
   els.reviewPanel.innerHTML = `
     <h2>Review</h2>
-    <div class="move-list">
-      ${rows || "<p class=\"empty-state\">No moves yet.</p>"}
+    <div class="stack">
+      ${boardCard}
+      ${analysisCard}
+      ${turningPointHtml}
+      <div class="move-list">${rows}</div>
+    </div>
+  `;
+
+  els.reviewPanel.querySelectorAll(".move-row[data-ply]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const ply = Number(row.dataset.ply);
+      state.reviewPly = state.reviewPly === ply ? null : ply;
+      renderReviewPanel();
+    });
+  });
+  els.reviewPanel.querySelectorAll(".turning-point[data-ply]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.reviewPly = Number(button.dataset.ply);
+      renderReviewPanel();
+    });
+  });
+}
+
+function renderReviewBoardCard(move, boardFen) {
+  if (!move) return "";
+
+  const quality = getMoveQuality(move);
+  const playedHighlights = buildMoveHighlights(move.uci, "played", quality?.key);
+  const bestHighlights = buildMoveHighlights(move.bestMoveUci, "best");
+  const showBestBoard = move.role === "player" && move.bestMoveUci && move.bestMoveUci !== move.uci;
+
+  return `
+    <article class="mini-card review-board-card">
+      <span class="label">Move view${quality ? ` · ${escapeHtml(quality.label)}` : move.evalDelta ? ` · -${move.evalDelta}cp` : ""}</span>
+      <div class="review-board-grid">
+        <div class="review-board-panel">
+          <span class="label">Played ${escapeHtml(move.ply)}. ${escapeHtml(move.san)}</span>
+          ${renderMiniBoard(boardFen, playedHighlights)}
+        </div>
+        ${showBestBoard ? `
+          <div class="review-board-panel">
+            <span class="label">Best ${escapeHtml(move.bestMoveSan || move.bestMoveUci)}</span>
+            ${renderMiniBoard(move.beforeFen, bestHighlights)}
+          </div>
+        ` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function buildMoveHighlights(uci, type, qualityKey = "") {
+  if (!uci || uci.length < 4) return {};
+  return {
+    [uci.slice(0, 2)]: { className: `${type}-from` },
+    [uci.slice(2, 4)]: { className: `${type}-to`, qualityKey },
+  };
+}
+
+function renderSelectedMoveAnalysis(move) {
+  if (!move || move.role !== "player") return "";
+  const quality = getMoveQuality(move);
+
+  if (move.analysisStatus === "pending") {
+    return `
+      <article class="mini-card">
+        <span class="label">Engine analysis</span>
+        <strong>Analysis pending</strong>
+        <p>Stockfish is evaluating the position before and after this move.</p>
+      </article>
+    `;
+  }
+
+  const hasAnalysis = move.analysisStatus === "complete" || typeof move.evalDelta === "number" || move.bestMoveUci;
+  if (!hasAnalysis) {
+    return `
+      <article class="mini-card">
+        <span class="label">${quality ? "Move quality" : "Engine analysis"}</span>
+        <strong>${quality ? escapeHtml(quality.label) : "Unavailable"}</strong>
+        <p>${escapeHtml(quality?.reason || "Stockfish was not available for this move, so the review is using heuristic tags only.")}</p>
+      </article>
+    `;
+  }
+
+  const bestMove = move.bestMoveSan || move.bestMoveUci || "No best move returned";
+  const bestText = !move.bestMoveUci
+    ? "Stockfish did not return a best alternative for this move."
+    : move.bestMoveUci === move.uci
+      ? `Stockfish also preferred ${bestMove}.`
+      : `Stockfish preferred ${bestMove} over ${move.san}.`;
+  const pv = formatPrincipalVariation(move.beforeFen, move.principalVariation || []);
+
+  return `
+    <article class="mini-card">
+      <span class="label">Engine analysis${move.engineSource ? ` · ${escapeHtml(move.engineSource)}` : ""}${move.engineDepth ? ` · depth ${move.engineDepth}` : ""}</span>
+      <strong>${quality ? escapeHtml(quality.label) : formatEvalDelta(move) || "No centipawn loss"}</strong>
+      <p>${escapeHtml(quality ? `${quality.reason} ${bestText}` : bestText)}</p>
+      <div class="candidate-list">
+        <span class="candidate">Before ${escapeHtml(formatEngineScore(move.evalBefore, move.mateBefore))}</span>
+        <span class="candidate">After ${escapeHtml(formatEngineScore(move.evalAfter, move.mateAfter))}</span>
+      </div>
+      ${pv ? `
+        <div class="candidate-list coach-candidates">
+          <div class="candidate-row">
+            <strong>PV</strong>
+            <span>${escapeHtml(pv)}</span>
+          </div>
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function formatEngineScore(scoreCp, mate) {
+  if (typeof mate === "number") return mate > 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
+  if (typeof scoreCp === "number") return `${scoreCp > 0 ? "+" : ""}${scoreCp}cp`;
+  return "n/a";
+}
+
+function formatPrincipalVariation(fen, pv) {
+  if (!Array.isArray(pv) || !pv.length) return "";
+  try {
+    const game = new Chess(fen);
+    const sans = [];
+    for (const uci of pv.slice(0, 6)) {
+      const move = game.move(moveFromUci(uci));
+      if (!move) break;
+      sans.push(move.san);
+    }
+    return sans.join(" ");
+  } catch {
+    return pv.slice(0, 6).join(" ");
+  }
+}
+
+function getReviewTurningPoints() {
+  return state.moves
+    .filter((move) => move.role === "player" && typeof move.evalDelta === "number" && move.evalDelta >= 100)
+    .slice()
+    .sort((a, b) => b.evalDelta - a.evalDelta)
+    .slice(0, 3)
+    .sort((a, b) => a.ply - b.ply);
+}
+
+function formatEvalDelta(move) {
+  if (typeof move.evalDelta !== "number" || move.evalDelta < 50) return "";
+  return `-${move.evalDelta}cp`;
+}
+
+function reviewClassClass(classification) {
+  if (classification === "blunder") return "class-blunder";
+  if (classification === "mistake") return "class-mistake";
+  if (classification === "inaccuracy") return "class-inaccuracy";
+  return "class-neutral";
+}
+
+function reviewTagClass(severity) {
+  if (severity >= 3) return "danger";
+  if (severity >= 2) return "warn";
+  return "";
+}
+
+function prettyClassification(classification) {
+  if (!classification || classification === "neutral") return "OK";
+  return classification[0].toUpperCase() + classification.slice(1);
+}
+
+function renderMiniBoard(fen, highlights = {}) {
+  const piecesField = fen.split(" ")[0];
+  const ranks = piecesField.split("/");
+  let html = '<div class="mini-board">';
+  for (let rank = 0; rank < 8; rank++) {
+    let file = 0;
+    for (const ch of ranks[rank]) {
+      if (/[1-8]/.test(ch)) {
+        const skip = Number(ch);
+        for (let k = 0; k < skip; k++) {
+          const dark = (rank + file) % 2 === 1;
+          const square = `${FILES[file]}${8 - rank}`;
+          html += renderMiniSquare(square, dark, "", "", highlights);
+          file++;
+        }
+      } else {
+        const color = ch === ch.toUpperCase() ? "w" : "b";
+        const dark = (rank + file) % 2 === 1;
+        const square = `${FILES[file]}${8 - rank}`;
+        const glyph = PIECES[color + ch.toLowerCase()] || "";
+        html += renderMiniSquare(square, dark, glyph, color, highlights);
+        file++;
+      }
+    }
+  }
+  html += "</div>";
+  return html;
+}
+
+function renderMiniSquare(square, dark, glyph, color, highlights) {
+  const highlight = highlights[square] || {};
+  const highlightClass = typeof highlight === "string" ? highlight : highlight.className || "";
+  const qualityKey = typeof highlight === "string" ? "" : highlight.qualityKey || "";
+  const quality = qualityKey ? MOVE_QUALITIES[qualityKey] || MOVE_QUALITIES.good : null;
+  const markerText = quality?.symbol || (highlightClass.endsWith("-to") ? (highlightClass.startsWith("best") ? "B" : "P") : "");
+  const marker = markerText ? `<span class="mini-marker ${quality ? qualityClassName(qualityKey) : ""}">${escapeHtml(markerText)}</span>` : "";
+  return `
+    <div class="mini-sq ${dark ? "dark" : "light"} ${highlightClass} ${quality ? qualityClassName(qualityKey) : ""}">
+      ${glyph ? `<span class="mini-piece piece ${color}">${glyph}</span>` : ""}
+      ${marker}
     </div>
   `;
 }
 
-function renderPracticePanel() {
-  const recommendedCategories = new Set(Object.keys(state.profile));
-  const modules = prioritizeTrainingModules();
-  const queuedPractice = state.practiceQueue
-    .slice(0, 10)
-    .sort((a, b) => getCategoryPriority(b.category) - getCategoryPriority(a.category));
-  const nextFocus = getNextTrainingFocus();
-  const drillStatus = state.activeDrill ? `
-    <article class="practice-card active-drill-card">
-      <span class="label">Active drill</span>
-      <strong>${escapeHtml(state.activeDrill.title)}</strong>
-      <p>${escapeHtml(state.drillMessage || state.activeDrill.objective)}</p>
+function getPracticeMotifGuide(category) {
+  const aliases = {
+    hanging_piece: "missed_capture",
+    poor_trade: "missed_capture",
+    candidate_moves: "missed_mate",
+    opening_principle: "king_safety",
+  };
+  return PRACTICE_MOTIFS[category] || PRACTICE_MOTIFS[aliases[category]] || {
+    term: "candidate move",
+    definition: "A candidate move is a move worth calculating before you decide.",
+    plainGoal: "Find the most forcing useful move in the position.",
+    scan: "Check checks, captures, threats, and the opponent's threat before choosing.",
+  };
+}
+
+function getPracticeCategoryPriority(category) {
+  const related = {
+    missed_capture: ["missed_capture", "hanging_piece", "poor_trade"],
+    missed_mate: ["missed_mate", "candidate_moves"],
+    missed_fork: ["missed_fork", "candidate_moves"],
+    missed_pin: ["missed_pin", "missed_line_tactic"],
+    missed_skewer: ["missed_skewer", "missed_line_tactic"],
+    discovered_attack: ["discovered_attack", "candidate_moves"],
+    king_safety: ["king_safety", "opening_principle"],
+  }[category] || [category];
+
+  return Math.max(0, ...related.map((item) => getCategoryPriority(item)));
+}
+
+function getPracticeSourceKey(puzzle) {
+  if (!puzzle) return "";
+  return puzzle.sourceKey || `practice:${puzzle.id}`;
+}
+
+function normalizePracticePuzzle(puzzle) {
+  if (!puzzle?.fen || !Array.isArray(puzzle.expectedMoves) || !puzzle.expectedMoves.length) return null;
+  const guide = getPracticeMotifGuide(puzzle.category);
+  return {
+    ...puzzle,
+    isPracticeTrainer: true,
+    source: puzzle.source || "curated",
+    sourceKey: getPracticeSourceKey(puzzle),
+    type: puzzle.type || "Practice puzzle",
+    term: puzzle.term || guide.term,
+    definition: puzzle.definition || guide.definition,
+    plainGoal: puzzle.plainGoal || guide.plainGoal,
+    scan: puzzle.scan || guide.scan,
+    objective: puzzle.plainGoal || guide.plainGoal,
+    hintSteps: Array.isArray(puzzle.hintSteps) && puzzle.hintSteps.length
+      ? puzzle.hintSteps
+      : [guide.scan],
+    targetSquares: Array.isArray(puzzle.targetSquares) ? puzzle.targetSquares : [],
+    hintSquares: Array.isArray(puzzle.hintSquares) ? puzzle.hintSquares : [],
+    expectedMoves: puzzle.expectedMoves.filter(Boolean),
+  };
+}
+
+function practiceItemToPuzzle(item) {
+  if (!item?.fen) return null;
+  const candidates = (item.candidates || []).filter((candidate) => candidate.uci);
+  if (!candidates.length) return null;
+
+  const guide = getPracticeMotifGuide(item.category);
+  const turn = item.fen.split(" ")[1] || state.settings.playerColor;
+  const bestCandidate = candidates[0];
+  return normalizePracticePuzzle({
+    id: `queue-${item.id}`,
+    source: "personal",
+    sourceKey: item.sourceKey,
+    queueItemId: item.id,
+    category: item.category,
+    plainTitle: plainPracticeTitleForCategory(item.category),
+    title: item.title || guide.term,
+    difficulty: 2,
+    playerColor: turn,
+    fen: item.fen,
+    expectedMoves: candidates.map((candidate) => candidate.uci),
+    targetSquares: candidates.map((candidate) => candidate.uci.slice(2, 4)).filter(Boolean),
+    hintSquares: bestCandidate?.uci ? [bestCandidate.uci.slice(0, 2), bestCandidate.uci.slice(2, 4)] : [],
+    plainGoal: plainPracticeGoalForItem(item),
+    hintSteps: [
+      item.note || guide.scan,
+      bestCandidate?.san ? `Compare the candidate ${bestCandidate.san}.` : guide.scan,
+      guide.definition,
+    ],
+    successText: "Correct. This fixes the pattern that came from your game.",
+    missText: "Not yet. Compare checks, captures, and threats from this exact position.",
+  });
+}
+
+function plainPracticeTitleForCategory(category) {
+  return {
+    missed_mate: "Trap the king",
+    missed_fork: "Two targets",
+    missed_pin: "Freeze a defender",
+    missed_skewer: "King in front",
+    missed_capture: "Win the loose piece",
+    hanging_piece: "Win the loose piece",
+    poor_trade: "Calculate the trade",
+    discovered_attack: "Open the line",
+    king_safety: "Stop the threat",
+    opening_principle: "Stop the threat",
+  }[category] || "Find the idea";
+}
+
+function plainPracticeGoalForItem(item) {
+  const guide = getPracticeMotifGuide(item.category);
+  if (item.playedMove) {
+    return `This came from your move ${item.playedMove}. Find the stronger idea in the position.`;
+  }
+  return item.prompt || guide.plainGoal;
+}
+
+function getRecentlySolvedPracticeKeys(limit = 12) {
+  return new Set(state.practiceHistory
+    .filter((item) => item.result === "solved")
+    .slice(0, limit)
+    .map((item) => item.sourceKey)
+    .filter(Boolean));
+}
+
+function selectNextPracticePuzzle(options = {}) {
+  const excludeKey = options.excludeKey || getPracticeSourceKey(state.activeDrill);
+  const personal = state.practiceQueue
+    .map(practiceItemToPuzzle)
+    .filter(Boolean)
+    .sort((a, b) => getPracticeCategoryPriority(b.category) - getPracticeCategoryPriority(a.category));
+  const personalPick = personal.find((puzzle) => getPracticeSourceKey(puzzle) !== excludeKey);
+  if (personalPick) return personalPick;
+
+  const solvedKeys = getRecentlySolvedPracticeKeys();
+  const curated = CURATED_PRACTICE_PUZZLES
+    .map(normalizePracticePuzzle)
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aSolved = solvedKeys.has(getPracticeSourceKey(a)) ? 1 : 0;
+      const bSolved = solvedKeys.has(getPracticeSourceKey(b)) ? 1 : 0;
+      return aSolved - bSolved
+        || getPracticeCategoryPriority(b.category) - getPracticeCategoryPriority(a.category)
+        || a.difficulty - b.difficulty
+        || a.plainTitle.localeCompare(b.plainTitle);
+    });
+
+  return curated.find((puzzle) => getPracticeSourceKey(puzzle) !== excludeKey && !solvedKeys.has(getPracticeSourceKey(puzzle)))
+    || curated.find((puzzle) => getPracticeSourceKey(puzzle) !== excludeKey)
+    || curated[0]
+    || null;
+}
+
+function resetPracticeTrainerState() {
+  state.practiceTrainer = {
+    attempts: 0,
+    hintIndex: 0,
+    status: "trying",
+    lastMoveUci: "",
+    scoreDelta: 0,
+    feedback: "",
+  };
+}
+
+function startPracticePuzzle(puzzle, options = {}) {
+  const normalized = normalizePracticePuzzle(puzzle);
+  if (!normalized) return false;
+
+  if (!state.activeDrill && options.saveCurrent !== false) {
+    saveCurrentGame();
+  }
+
+  state.activeDrill = structuredClone(normalized);
+  state.activeDrill.step = 0;
+  state.activeDrill.source = normalized.source;
+  state.drillMessage = normalized.plainGoal;
+  resetPracticeTrainerState();
+  state.game = normalized.fen === "start" ? new Chess() : new Chess(normalized.fen);
+  state.moves = [];
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+  state.lastMove = null;
+  state.thinking = false;
+  state.reviewPly = null;
+
+  if (options.render !== false) {
+    if (options.switchTab === false) {
+      renderAll();
+    } else {
+      switchTab("practice");
+    }
+  }
+
+  return true;
+}
+
+function ensurePracticeTrainer() {
+  if (!isPlacementComplete() || isPracticeTrainerDrill()) return false;
+  const next = selectNextPracticePuzzle();
+  return startPracticePuzzle(next, { render: false, switchTab: false });
+}
+
+function startNextPracticePuzzle() {
+  const next = selectNextPracticePuzzle({ excludeKey: getPracticeSourceKey(state.activeDrill) });
+  startPracticePuzzle(next, { render: true });
+}
+
+function retryPracticePuzzle() {
+  if (!isPracticeTrainerDrill()) return;
+  startPracticePuzzle(state.activeDrill, { render: true, saveCurrent: false });
+}
+
+function advancePracticeHint() {
+  if (!isPracticeTrainerDrill()) return;
+  const maxHints = state.activeDrill.hintSteps?.length || 0;
+  state.practiceTrainer.hintIndex = Math.min(maxHints, state.practiceTrainer.hintIndex + 1);
+  state.practiceTrainer.feedback = getCurrentPracticeHint() || state.activeDrill.scan;
+  state.drillMessage = state.practiceTrainer.feedback;
+  renderAll();
+}
+
+function getCurrentPracticeHint() {
+  const hintIndex = state.practiceTrainer?.hintIndex || 0;
+  if (!hintIndex) return "";
+  return state.activeDrill?.hintSteps?.[hintIndex - 1] || "";
+}
+
+function getPracticeStats() {
+  const solved = state.practiceHistory.filter((item) => item.result === "solved").length;
+  const missed = state.practiceHistory.filter((item) => item.result === "missed").length;
+  let streak = 0;
+  for (const item of state.practiceHistory) {
+    if (item.result !== "solved") break;
+    streak += 1;
+  }
+  return {
+    solved,
+    missed,
+    streak,
+    score: Math.max(0, solved * 10 - missed * 3),
+  };
+}
+
+function renderPracticeTrainer() {
+  if (!isPracticeTrainerDrill()) return "";
+
+  const puzzle = state.activeDrill;
+  const trainer = state.practiceTrainer;
+  const stats = getPracticeStats();
+  const solved = trainer.status === "solved";
+  const currentHint = getCurrentPracticeHint();
+  const revealTerm = solved || trainer.hintIndex >= (puzzle.hintSteps?.length || 1);
+  const feedback = trainer.feedback || state.drillMessage || puzzle.plainGoal;
+  const label = puzzle.source === "personal"
+    ? "Adaptive practice - from your games"
+    : `Adaptive practice - difficulty ${puzzle.difficulty || 1}`;
+  const heading = solved
+    ? `Solved: ${puzzle.term}`
+    : (puzzle.plainTitle || plainPracticeTitleForCategory(puzzle.category));
+  const canHint = !solved && trainer.hintIndex < (puzzle.hintSteps?.length || 0);
+
+  return `
+    <article class="mini-card practice-trainer-card ${solved ? "solved" : trainer.status === "missed" ? "missed" : ""}">
+      <span class="label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(heading)}</strong>
+      <p>${escapeHtml(feedback)}</p>
+      <div class="practice-trainer-stats">
+        <div>
+          <span class="label">Score</span>
+          <strong>${stats.score}${trainer.scoreDelta ? ` ${trainer.scoreDelta > 0 ? "+" : ""}${trainer.scoreDelta}` : ""}</strong>
+        </div>
+        <div>
+          <span class="label">Streak</span>
+          <strong>${stats.streak}</strong>
+        </div>
+        <div>
+          <span class="label">Tries</span>
+          <strong>${trainer.attempts}</strong>
+        </div>
+      </div>
       <div class="button-row">
+        ${solved ? `<button id="practiceNextButton" class="primary-action" type="button">Next puzzle</button>` : ""}
+        <button id="practiceHintButton" type="button"${canHint ? "" : " disabled"}>Hint</button>
+        <button id="practiceRetryButton" type="button">Retry</button>
         <button id="resumeGameButton" type="button">Resume game</button>
-        <button id="restartDrillButton" type="button">Restart drill</button>
       </div>
     </article>
-  ` : "";
-  const cards = queuedPractice.map((item) => `
+    <article class="mini-card practice-explain-card">
+      <span class="label">${revealTerm ? "Pattern learned" : "How to look"}</span>
+      <strong>${escapeHtml(revealTerm ? puzzle.term : "Scan the position")}</strong>
+      <p>${escapeHtml(revealTerm ? `${puzzle.definition} ${puzzle.scan}` : (currentHint || puzzle.scan))}</p>
+      ${solved ? `<div class="tag-list"><span class="tag good">Solved</span><span class="tag">${escapeHtml(puzzle.term)}</span></div>` : ""}
+    </article>
+  `;
+}
+
+function renderPracticePanel() {
+  const progress = getPlacementProgress();
+  if (!progress.complete) {
+    els.practicePanel.innerHTML = `
+      <h2>Practice</h2>
+      <div class="stack">
+        <article class="mini-card placement-card">
+          <span class="label">Practice trainer</span>
+          <strong>Unlocks after placement</strong>
+          <p>Finish ${progress.remaining} more placement game${progress.remaining === 1 ? "" : "s"} to unlock adaptive mate, fork, pin, skewer, loose-piece, and defense puzzles.</p>
+        </article>
+      </div>
+    `;
+    return;
+  }
+
+  ensurePracticeTrainer();
+
+  const queuedPractice = state.practiceQueue
+    .slice(0, 4)
+    .sort((a, b) => getCategoryPriority(b.category) - getCategoryPriority(a.category));
+  const nextFocus = getNextTrainingFocus();
+  const trainer = renderPracticeTrainer();
+  const personalCards = queuedPractice.map((item) => `
     <article class="practice-card">
       <span class="label">From your games - priority ${getCategoryPriority(item.category)}</span>
-      <strong>${escapeHtml(item.title)}</strong>
-      <p>${escapeHtml(buildPracticePrompt(item))}</p>
-      <div class="candidate-list coach-candidates">
-        ${item.candidates.map((candidate) => `
-          <div class="candidate-row">
-            <strong>${escapeHtml(candidate.san)}</strong>
-            <span>${escapeHtml(explainCandidateByUci(item.fen, candidate))}</span>
-          </div>
-        `).join("")}
-      </div>
+      <strong>${escapeHtml(plainPracticeTitleForCategory(item.category))}</strong>
+      <p>${escapeHtml(plainPracticeGoalForItem(item))}</p>
       <div class="button-row">
         <button type="button" data-practice-board="${item.id}">Practice on board</button>
-        <button type="button" data-practice="${item.id}" data-result="solved">Solved</button>
-        <button type="button" data-practice="${item.id}" data-result="missed">Missed</button>
-        <button type="button" data-practice="${item.id}" data-result="skipped">Skip</button>
       </div>
     </article>
   `).join("");
-  const moduleCards = modules.map((module) => {
-    const recommended = recommendedCategories.has(module.category);
-    return `
-      <button class="practice-card practice-select" type="button" data-start-drill="${escapeAttr(module.id)}">
-        <span class="label">${escapeHtml(module.type)}${recommended ? " - recommended" : ""} - priority ${module.priority}</span>
-        <strong>${escapeHtml(module.title)}</strong>
-        <p>${escapeHtml(module.objective)}</p>
-        <p>${escapeHtml(module.reason)}</p>
-      </button>
-    `;
-  }).join("");
+  const foundationCards = CURATED_PRACTICE_PUZZLES.map((puzzle) => `
+    <button class="practice-card practice-select" type="button" data-start-puzzle="${escapeAttr(puzzle.id)}">
+      <span class="label">Foundation - difficulty ${puzzle.difficulty}</span>
+      <strong>${escapeHtml(puzzle.plainTitle)}</strong>
+      <p>${escapeHtml(puzzle.plainGoal || getPracticeMotifGuide(puzzle.category).plainGoal)}</p>
+    </button>
+  `).join("");
 
   els.practicePanel.innerHTML = `
     <h2>Practice</h2>
     <div class="stack">
+      ${trainer}
       ${nextFocus ? `
         <article class="mini-card priority-card">
           <span class="label">Priority queue</span>
@@ -1545,25 +2634,24 @@ function renderPracticePanel() {
           <p>${escapeHtml(nextFocus.reason)}</p>
         </article>
       ` : ""}
-      ${drillStatus}
-      <h3>Recommended From Your Games</h3>
-      ${cards || "<p class=\"empty-state\">Mistake-based drills appear after the coach tags your games.</p>"}
-      <h3>Training Library</h3>
-      <div class="lesson-grid">${moduleCards}</div>
+      <h3>From Your Games</h3>
+      ${personalCards || "<p class=\"empty-state\">Personal practice positions appear after the coach tags your games.</p>"}
+      <h3>Foundation Skills</h3>
+      <div class="lesson-grid">${foundationCards}</div>
     </div>
   `;
 
-  els.practicePanel.querySelectorAll("[data-practice]").forEach((button) => {
-    button.addEventListener("click", () => markPractice(button.dataset.practice, button.dataset.result));
-  });
+  document.querySelector("#practiceHintButton")?.addEventListener("click", advancePracticeHint);
+  document.querySelector("#practiceRetryButton")?.addEventListener("click", retryPracticePuzzle);
+  document.querySelector("#practiceNextButton")?.addEventListener("click", startNextPracticePuzzle);
+  document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
   els.practicePanel.querySelectorAll("[data-practice-board]").forEach((button) => {
     button.addEventListener("click", () => startQueuedPractice(button.dataset.practiceBoard));
   });
-  els.practicePanel.querySelectorAll("[data-start-drill]").forEach((button) => {
-    button.addEventListener("click", () => startDrill(button.dataset.startDrill));
+  els.practicePanel.querySelectorAll("[data-start-puzzle]").forEach((button) => {
+    const puzzle = CURATED_PRACTICE_PUZZLES.find((item) => item.id === button.dataset.startPuzzle);
+    button.addEventListener("click", () => startPracticePuzzle(puzzle, { render: true }));
   });
-  document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
-  document.querySelector("#restartDrillButton")?.addEventListener("click", () => startDrill(state.activeDrill.id));
 }
 
 function renderProfilePanel() {
@@ -1675,6 +2763,7 @@ function renderSettingsPanel() {
   els.settingsPanel.innerHTML = `
     <h2>Settings</h2>
     <div class="settings-grid">
+      ${renderRequiredServicesCard()}
       <article class="mini-card">
         <strong>Bot difficulty</strong>
         <p>${progress.complete
@@ -1683,12 +2772,13 @@ function renderSettingsPanel() {
       </article>
       <article class="mini-card">
         <strong>OpenAI personal coach</strong>
-        <p>${state.openAI.configured ? `Connected through the local server${state.openAI.model ? ` using ${escapeHtml(state.openAI.model)}` : ""}.` : "Not connected. Add OPENAI_API_KEY to .env, then restart the Node server."}</p>
+        <p>${isOpenAIReady() ? `Online through the local server${state.openAI.model ? ` using ${escapeHtml(state.openAI.model)}` : ""}.` : escapeHtml(state.openAI.status || "Not connected. Add OPENAI_API_KEY to .env, then restart the Node server.")}</p>
         <button id="testOpenAIButton" type="button">Test OpenAI coach</button>
       </article>
       <article class="mini-card">
         <strong>Supabase sync</strong>
-        <p>${state.supabaseReachable ? "Connected. Games, moves, practice, and profile events can sync." : "Configured. Use the test button if sync looks wrong."}</p>
+        <p class="sync-status-row"><span class="label">Storage</span> ${escapeHtml(getStorageStatusLabel())}</p>
+        <p>${state.supabaseReachable ? "Connected. Games, moves, practice, and profile events can sync." : "Required. The app stays locked until Supabase is reachable and writable."}</p>
         ${state.supabaseHealth ? `<p>${escapeHtml(state.supabaseHealth)}</p>` : ""}
       </article>
       <label class="field">
@@ -1725,13 +2815,16 @@ function renderSettingsPanel() {
     </div>
   `;
 
-  document.querySelector("#saveSettingsButton").addEventListener("click", saveSettingsFromPanel);
+  bindRequiredServicesCard();
+  document.querySelector("#saveSettingsButton").addEventListener("click", () => saveSettingsFromPanel());
   document.querySelector("#testOpenAIButton").addEventListener("click", checkOpenAIHealth);
   document.querySelector("#testSupabaseButton").addEventListener("click", testSupabaseConnection);
   document.querySelector("#resetLocalButton").addEventListener("click", resetLocalData);
 }
 
 function handleSquareClick(square) {
+  if (!areRequiredServicesReady()) return;
+
   const playerColor = state.activeDrill ? state.activeDrill.playerColor : state.settings.playerColor;
   if (state.thinking || state.game.isGameOver() || state.game.turn() !== playerColor) {
     return;
@@ -1760,14 +2853,15 @@ function handleSquareClick(square) {
   const move = state.game.move({ from: state.selectedSquare, to: square, promotion: "q" });
 
   if (move) {
-    clearSelection();
     if (state.activeDrill) {
+      clearSelection({ render: false });
       handleDrillMove(move, beforeFen);
       return;
     }
+    const animated = animateBoardMove(move);
+    clearSelection({ render: false });
     recordMove(move, beforeFen, "player");
-    renderAll();
-    maybeEngineMove();
+    renderAfterMoveAnimation(animated, maybeEngineMove);
     return;
   }
 
@@ -1780,13 +2874,15 @@ function selectSquare(square) {
   renderBoard();
 }
 
-function clearSelection() {
+function clearSelection(options = {}) {
   state.selectedSquare = null;
   state.legalTargets = new Set();
-  renderBoard();
+  if (options.render !== false) renderBoard();
 }
 
 async function maybeEngineMove() {
+  if (!areRequiredServicesReady()) return;
+
   if (state.game.isGameOver() || state.game.turn() === state.settings.playerColor) {
     await finalizeIfGameOver();
     return;
@@ -1794,6 +2890,7 @@ async function maybeEngineMove() {
 
   state.thinking = true;
   renderGameMeta();
+  let engineAnimationDelay = 0;
 
   try {
     await wait(180);
@@ -1817,6 +2914,7 @@ async function maybeEngineMove() {
       const beforeFen = state.game.fen();
       const played = state.game.move(move);
       if (played) {
+        engineAnimationDelay = animateBoardMove(played) ? 170 : 0;
         recordMove(played, beforeFen, "engine");
         break;
       }
@@ -1826,6 +2924,7 @@ async function maybeEngineMove() {
   } finally {
     state.thinking = false;
     await finalizeIfGameOver();
+    if (engineAnimationDelay) await wait(engineAnimationDelay);
     renderAll();
   }
 }
@@ -1837,6 +2936,11 @@ function moveFromUci(uci) {
     to: uci.slice(2, 4),
     promotion: uci[4] || "q",
   };
+}
+
+function moveToUci(move) {
+  if (!move?.from || !move?.to) return "";
+  return `${move.from}${move.to}${move.promotion || ""}`;
 }
 
 function chooseFallbackMove(fen, depth = getCurrentBotDepth()) {
@@ -1871,6 +2975,22 @@ function recordMove(move, beforeFen, role) {
     classification: "neutral",
     tags: [],
     note: "",
+    analysisStatus: role === "player" && state.engine?.ready ? "pending" : "unavailable",
+    qualityEligible: role === "player" && !state.activeDrill && isPlacementComplete(),
+    qualityKey: "",
+    qualityLabel: "",
+    qualityReason: "",
+    qualitySymbol: "",
+    engineDepth: null,
+    engineSource: "",
+    evalBefore: null,
+    evalAfter: null,
+    mateBefore: null,
+    mateAfter: null,
+    evalDelta: null,
+    bestMoveUci: "",
+    bestMoveSan: "",
+    principalVariation: [],
     createdAt: new Date().toISOString(),
   };
 
@@ -1881,6 +3001,9 @@ function recordMove(move, beforeFen, role) {
     record.note = analysis.note;
     updateWeaknessProfile(record);
     maybeCreatePractice(record, analysis.candidates);
+    if (record.qualityEligible && !state.engine?.ready) {
+      updateMoveQuality(record);
+    }
   } else {
     record.note = "Engine reply.";
   }
@@ -1888,7 +3011,86 @@ function recordMove(move, beforeFen, role) {
   state.moves.push(record);
   state.lastMove = { from: move.from, to: move.to };
   saveCurrentGame();
-  syncMove(record);
+  const moveSyncPromise = syncMove(record);
+
+  if (role === "player" && state.engine?.ready) {
+    enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise);
+  } else if (record.qualityKey) {
+    moveSyncPromise.then(() => syncMoveAnalysis(record)).catch((error) => console.warn("Move quality sync failed", error));
+  }
+}
+
+function updateMoveQuality(record) {
+  if (!record?.qualityEligible) return null;
+  const quality = classifyMoveQuality({
+    evalDelta: record.evalDelta,
+    classification: record.classification,
+    tags: record.tags || [],
+    playedUci: record.uci,
+    bestMoveUci: record.bestMoveUci,
+    openingKnown: isKnownOpeningMove(record),
+    mateBefore: record.mateBefore,
+    mateAfter: record.mateAfter,
+  });
+
+  record.qualityKey = quality.key;
+  record.qualityLabel = quality.label;
+  record.qualityReason = quality.reason;
+  record.qualitySymbol = quality.symbol;
+  return quality;
+}
+
+function isKnownOpeningMove(record) {
+  if (!record || getPhase(record.beforeFen || state.game.fen()) !== "opening") return false;
+  const moves = state.moves.some((move) => move.id === record.id) ? state.moves : [...state.moves, record];
+  const sequence = moves
+    .filter((move) => move.ply <= record.ply)
+    .map((move) => normalizeSan(move.san));
+
+  return OPENING_BOOK.some((opening) => {
+    if (sequence.length > opening.moves.length) return false;
+    return sequence.every((san, index) => san === normalizeSan(opening.moves[index] || ""));
+  });
+}
+
+async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise) {
+  if (!state.engine?.ready) return;
+  try {
+    const before = await state.engine.evaluatePosition(beforeFen, ANALYSIS_DEPTH);
+    const after = await state.engine.evaluatePosition(afterFen, ANALYSIS_DEPTH);
+    const bestMoveSan = before.bestMove ? uciToSan(beforeFen, before.bestMove) : "";
+    const analysis = normalizeEngineAnalysis({
+      before,
+      after,
+      depth: ANALYSIS_DEPTH,
+      bestMoveSan,
+    });
+
+    Object.assign(record, analysis);
+    if (record.evalDelta !== null) {
+      record.classification = classifyByEval(record.evalDelta, record.classification);
+    }
+    updateMoveQuality(record);
+
+    saveCurrentGame();
+    await moveSyncPromise;
+    await syncMoveAnalysis(record);
+    renderBoard();
+    if (state.currentTab === "coach" || state.currentTab === "review") {
+      renderCurrentPanel();
+    }
+  } catch (error) {
+    record.analysisStatus = "unavailable";
+    updateMoveQuality(record);
+    saveCurrentGame();
+    await moveSyncPromise;
+    await syncMoveAnalysis(record);
+    renderBoard();
+    if (state.currentTab === "coach" || state.currentTab === "review") {
+      renderCurrentPanel();
+    }
+    console.warn("Move enrichment failed", error);
+  }
 }
 
 function analyzePlayerMove(beforeFen, playedMove, afterFen) {
@@ -1909,6 +3111,9 @@ function analyzePlayerMove(beforeFen, playedMove, afterFen) {
       note: `Consider forcing moves like ${best.san}.`,
     });
   }
+
+  const tactic = detectMissedTacticalOpportunity(before, playedMove);
+  if (tactic) tags.push(tactic);
 
   if (phase === "opening") {
     const openingTag = detectOpeningIssue(before, playedMove);
@@ -1979,6 +3184,10 @@ function scoreMove(game, move) {
   if (isCenterSquare(move.to)) score += 0.8;
   if (isMoveHanging(clone, move.color, move.to)) score -= movingValue >= 3 ? 4 : 1.5;
   if (createsImmediateThreat(clone, move.color)) score += 1.4;
+  const fork = describeForkMove(game, move);
+  if (fork) score += fork.severity >= 3 ? 8 : 4;
+  const lineTactic = describeLineTacticMove(game, move);
+  if (lineTactic) score += lineTactic.severity >= 3 ? 7 : 3.5;
 
   return score;
 }
@@ -2176,6 +3385,230 @@ function detectKingSafetyIssue(game, color) {
   return null;
 }
 
+function detectMissedTacticalOpportunity(before, playedMove) {
+  const playedUci = moveToUci(playedMove);
+  const legalMoves = before.moves({ verbose: true });
+  if (moveCreatesCheckmate(before, playedMove)) return null;
+
+  const playedTactics = describeMoveTactics(before, playedMove);
+
+  const mateMove = legalMoves.find((move) => moveCreatesCheckmate(before, move));
+  if (mateMove && moveToUci(mateMove) !== playedUci) {
+    return {
+      category: "missed_mate",
+      label: "Missed mate",
+      severity: 3,
+      note: `${mateMove.san} was checkmate. Start every forcing scan with checks.`,
+    };
+  }
+
+  const opportunities = legalMoves
+    .filter((move) => moveToUci(move) !== playedUci)
+    .flatMap((move) => describeMoveTactics(before, move))
+    .filter((tactic) => !playedTactics.some((played) => played.category === tactic.category))
+    .sort((a, b) => b.severity - a.severity || b.priority - a.priority);
+
+  const best = opportunities[0];
+  if (!best) return null;
+
+  return {
+    category: best.category,
+    label: best.label,
+    severity: best.severity,
+    note: best.note,
+  };
+}
+
+function describeMoveTactics(game, move) {
+  return [
+    describeForkMove(game, move),
+    describeLineTacticMove(game, move),
+    describeLoosePieceCapture(game, move),
+  ].filter(Boolean);
+}
+
+function moveCreatesCheckmate(game, move) {
+  try {
+    const clone = new Chess(game.fen());
+    clone.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    return clone.isCheckmate();
+  } catch {
+    return false;
+  }
+}
+
+function describeForkMove(game, move) {
+  try {
+    const clone = new Chess(game.fen());
+    clone.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    const piece = clone.get(move.to);
+    if (!piece || piece.color !== move.color) return null;
+
+    const targets = getAttackedTargetsByPiece(clone, piece, move.to, opposite(move.color));
+    if (targets.length < 2) return null;
+
+    const includesKing = targets.some((target) => target.type === "k");
+    const materialTargets = targets.filter((target) => target.type !== "k");
+    const bestMaterial = Math.max(0, ...materialTargets.map((target) => target.value));
+    const targetScore = targets.reduce((sum, target) => sum + target.value, 0);
+    if (!includesKing && targetScore < 8) return null;
+
+    const severity = includesKing && bestMaterial >= 5 ? 3 : 2;
+    const targetText = formatTacticalTargets(targets);
+    return {
+      category: "missed_fork",
+      label: "Missed fork",
+      severity,
+      priority: targetScore + (includesKing ? 20 : 0),
+      note: `${move.san} would fork ${targetText}. Look for moves that attack two targets at once.`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function describeLineTacticMove(game, move) {
+  try {
+    const clone = new Chess(game.fen());
+    clone.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    const piece = clone.get(move.to);
+    if (!piece || piece.color !== move.color || !["b", "r", "q"].includes(piece.type)) return null;
+
+    const tactic = findLineTactic(clone, move.to, piece);
+    if (!tactic) return null;
+
+    return {
+      category: tactic.category,
+      label: tactic.label,
+      severity: tactic.severity,
+      priority: tactic.priority,
+      note: `${move.san} would ${tactic.note}. Use line pieces to find pins, skewers, and overloaded pieces.`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function describeLoosePieceCapture(game, move) {
+  if (!move.captured || (PIECE_VALUES[move.captured] || 0) < 5) return null;
+
+  try {
+    const clone = new Chess(game.fen());
+    clone.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    const movedPiece = clone.get(move.to);
+    if (!movedPiece) return null;
+
+    const capturedValue = PIECE_VALUES[move.captured] || 0;
+    const movedValue = PIECE_VALUES[movedPiece.type] || 0;
+    const canBeRecaptured = attacksSquare(clone.fen(), opposite(move.color), move.to);
+    if (canBeRecaptured && movedValue >= capturedValue) return null;
+
+    return {
+      category: "missed_capture",
+      label: "Missed loose piece",
+      severity: capturedValue >= 9 ? 3 : 2,
+      priority: capturedValue,
+      note: `${move.san} would win a ${pieceName(move.captured)}. Check captures on loose major pieces before quiet moves.`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getAttackedTargetsByPiece(game, piece, from, targetColor) {
+  const targets = [];
+  for (const rank of RANKS) {
+    for (const file of FILES) {
+      const square = `${file}${rank}`;
+      const target = game.get(square);
+      if (target?.color === targetColor && target.type !== "p" && pieceAttacksSquare(game, piece, from, square)) {
+        targets.push({
+          square,
+          type: target.type,
+          value: target.type === "k" ? 20 : PIECE_VALUES[target.type] || 0,
+        });
+      }
+    }
+  }
+  return targets.sort((a, b) => b.value - a.value);
+}
+
+function formatTacticalTargets(targets) {
+  return targets
+    .slice(0, 3)
+    .map((target) => target.type === "k" ? `the king on ${target.square}` : `the ${pieceName(target.type)} on ${target.square}`)
+    .join(" and ");
+}
+
+function findLineTactic(game, from, piece) {
+  const directions = getSlidingDirections(piece.type);
+  let best = null;
+
+  for (const [df, dr] of directions) {
+    const seen = getPiecesOnRay(game, from, df, dr);
+    if (seen.length < 2) continue;
+
+    const [front, back] = seen;
+    if (front.piece.color !== opposite(piece.color) || back.piece.color !== opposite(piece.color)) continue;
+
+    let tactic = null;
+    if (back.piece.type === "k" && front.piece.type !== "k") {
+      tactic = {
+        category: "missed_pin",
+        label: "Missed pin",
+        severity: PIECE_VALUES[front.piece.type] >= 3 ? 3 : 2,
+        priority: 15 + (PIECE_VALUES[front.piece.type] || 0),
+        note: `pin the ${pieceName(front.piece.type)} on ${front.square} to the king`,
+      };
+    } else if (front.piece.type === "k" && (PIECE_VALUES[back.piece.type] || 0) >= 5) {
+      tactic = {
+        category: "missed_skewer",
+        label: "Missed skewer",
+        severity: 3,
+        priority: 16 + (PIECE_VALUES[back.piece.type] || 0),
+        note: `skewer the king and win the ${pieceName(back.piece.type)} on ${back.square}`,
+      };
+    } else if ((PIECE_VALUES[front.piece.type] || 0) >= 5 && (PIECE_VALUES[back.piece.type] || 0) >= 3) {
+      tactic = {
+        category: "missed_line_tactic",
+        label: "Missed line tactic",
+        severity: 2,
+        priority: (PIECE_VALUES[front.piece.type] || 0) + (PIECE_VALUES[back.piece.type] || 0),
+        note: `line up the ${pieceName(front.piece.type)} on ${front.square} with the ${pieceName(back.piece.type)} on ${back.square}`,
+      };
+    }
+
+    if (tactic && (!best || tactic.priority > best.priority)) best = tactic;
+  }
+
+  return best;
+}
+
+function getSlidingDirections(pieceType) {
+  const diagonals = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+  const straights = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  if (pieceType === "b") return diagonals;
+  if (pieceType === "r") return straights;
+  if (pieceType === "q") return [...diagonals, ...straights];
+  return [];
+}
+
+function getPiecesOnRay(game, from, df, dr) {
+  const pieces = [];
+  let file = FILES.indexOf(from[0]) + df;
+  let rank = RANKS.indexOf(from[1]) + dr;
+
+  while (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+    const square = `${FILES[file]}${RANKS[rank]}`;
+    const piece = game.get(square);
+    if (piece) pieces.push({ square, piece });
+    file += df;
+    rank += dr;
+  }
+
+  return pieces;
+}
+
 function findKing(game, color) {
   for (const rank of RANKS) {
     for (const file of FILES) {
@@ -2316,22 +3749,7 @@ function startLesson(lessonId) {
 function startQueuedPractice(id) {
   const item = state.practiceQueue.find((entry) => entry.id === id);
   if (!item) return;
-
-  const turn = item.fen.split(" ")[1] || state.settings.playerColor;
-  const queuedDrill = {
-    id: `queue-${item.id}`,
-    title: item.title,
-    type: "Personal drill",
-    category: item.category,
-    playerColor: turn,
-    fen: item.fen,
-    objective: buildPracticePrompt(item),
-    expectedMoves: item.candidates.map((candidate) => candidate.uci).filter(Boolean),
-    successText: "Correct. This is now marked solved in your practice queue.",
-    queueItemId: item.id,
-  };
-
-  startTrainingSession(queuedDrill, "personal");
+  startPracticePuzzle(practiceItemToPuzzle(item), { render: true });
 }
 
 function startTrainingSession(drill, source) {
@@ -2354,12 +3772,19 @@ function startTrainingSession(drill, source) {
 function resumeSavedGame() {
   state.activeDrill = null;
   state.drillMessage = "";
+  resetPracticeTrainerState();
+  state.practiceTrainer.status = "idle";
   restoreActiveGame();
   switchTab("coach");
   renderAll();
 }
 
 async function handleDrillMove(move, beforeFen) {
+  if (isPracticeTrainerDrill()) {
+    await handlePracticeTrainerMove(move, beforeFen);
+    return;
+  }
+
   const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
   const target = getCurrentDrillTarget();
 
@@ -2399,6 +3824,69 @@ async function handleDrillMove(move, beforeFen) {
   }
 
   completeDrill(beforeFen);
+}
+
+async function handlePracticeTrainerMove(move, beforeFen) {
+  const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
+  const puzzle = state.activeDrill;
+  const trainer = state.practiceTrainer;
+  const solved = (puzzle.expectedMoves || []).includes(playedUci);
+  trainer.attempts += 1;
+
+  if (!solved) {
+    state.game.undo();
+    trainer.status = "missed";
+    trainer.scoreDelta = -3;
+    if (!trainer.hintIndex && puzzle.hintSteps?.length) {
+      trainer.hintIndex = 1;
+    }
+    const hint = getCurrentPracticeHint();
+    trainer.feedback = `${puzzle.missText || "Not yet."}${hint ? ` ${hint}` : ""}`;
+    state.drillMessage = trainer.feedback;
+    recordPracticeHistory(puzzle, "missed", beforeFen, playedUci);
+    await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "missed", playedUci);
+    renderAll();
+    return;
+  }
+
+  state.lastMove = { from: move.from, to: move.to };
+  trainer.status = "solved";
+  trainer.lastMoveUci = playedUci;
+  trainer.scoreDelta = trainer.attempts === 1 && !trainer.hintIndex ? 10 : 6;
+  trainer.feedback = puzzle.successText || "Correct.";
+  state.drillMessage = trainer.feedback;
+  recordPracticeHistory(puzzle, "solved", beforeFen, playedUci);
+
+  if (puzzle.queueItemId) {
+    state.practiceQueue = state.practiceQueue.filter((item) => item.id !== puzzle.queueItemId);
+    saveJson(STORAGE_KEYS.practice, state.practiceQueue);
+  }
+
+  await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "solved", playedUci);
+  renderAll();
+}
+
+function getPracticeAttemptPayload(puzzle, fen) {
+  return {
+    sourceKey: getPracticeSourceKey(puzzle),
+    fen,
+    candidates: (puzzle.expectedMoves || []).map((uci) => ({ uci })),
+  };
+}
+
+function recordPracticeHistory(puzzle, result, fen, chosenMove = "") {
+  state.practiceHistory = [{
+    id: crypto.randomUUID(),
+    sourceKey: getPracticeSourceKey(puzzle),
+    title: puzzle.title || puzzle.term || puzzle.plainTitle,
+    category: puzzle.category,
+    fen,
+    result,
+    chosenMove,
+    expectedMoves: puzzle.expectedMoves || [],
+    attemptedAt: new Date().toISOString(),
+  }, ...state.practiceHistory].slice(0, 100);
+  saveJson(STORAGE_KEYS.practiceHistory, state.practiceHistory);
 }
 
 function getCurrentDrillTarget() {
@@ -2554,27 +4042,41 @@ function restoreActiveGame() {
   }
 }
 
-function setupSupabase() {
+async function setupSupabase() {
   const { url, anonKey } = state.supabaseConfig;
   if (!url || !anonKey) {
     state.supabase = null;
-    state.supabaseReachable = null;
-    return;
+    state.supabaseReachable = false;
+    state.supabaseAnalysisReachable = false;
+    state.supabaseQualityReachable = false;
+    state.supabaseHealth = "Supabase URL and publishable key are required.";
+    return false;
   }
 
   try {
+    const createClient = await loadSupabaseCreateClient();
     state.supabase = createClient(url, anonKey);
     state.supabaseReachable = null;
-  } catch {
+    state.supabaseAnalysisReachable = null;
+    state.supabaseQualityReachable = null;
+    renderGameMeta();
+    return true;
+  } catch (error) {
+    console.warn("Supabase client could not load", error);
     state.supabase = null;
-    state.supabaseReachable = null;
+    state.supabaseReachable = false;
+    state.supabaseAnalysisReachable = false;
+    state.supabaseQualityReachable = false;
+    state.supabaseHealth = "Supabase client could not load.";
+    renderGameMeta();
+    return false;
   }
 }
 
 async function syncGameStart() {
-  if (!state.supabase) return;
+  if (!state.supabase) return false;
   const opening = detectOpening();
-  await safeSupabase(() => state.supabase.from("games").upsert({
+  return await safeSupabase(() => state.supabase.from("games").upsert({
     id: state.currentGameId,
     started_at: state.startedAt,
     player_color: state.settings.playerColor,
@@ -2585,6 +4087,94 @@ async function syncGameStart() {
     pgn: "",
     status: "in_progress",
   }));
+}
+
+async function verifySupabaseConnection(options = {}) {
+  if (!state.supabase) {
+    const loaded = await setupSupabase();
+    if (!loaded) {
+      if (!state.supabaseHealth) state.supabaseHealth = "Supabase is required before the app can be used.";
+      state.supabaseReachable = false;
+      state.supabaseAnalysisReachable = false;
+      state.supabaseQualityReachable = false;
+      if (options.render !== false) renderAll();
+      return false;
+    }
+  }
+
+  state.supabaseHealth = "Testing Supabase connection...";
+  if (options.render !== false) renderAll();
+
+  try {
+    const { error: gamesError } = await state.supabase.from("games").select("id", { count: "exact", head: true });
+    if (gamesError) throw new Error(`games table: ${formatSupabaseError(gamesError)}`);
+
+    const { error: movesError } = await state.supabase.from("moves").select("id", { count: "exact", head: true });
+    if (movesError) throw new Error(`moves table: ${formatSupabaseError(movesError)}`);
+
+    const { error: analysisError } = await state.supabase.from("moves").select("analysis_status", { count: "exact", head: true });
+    state.supabaseAnalysisReachable = !analysisError;
+    const { error: qualityError } = await state.supabase.from("moves").select("quality_key", { count: "exact", head: true });
+    state.supabaseQualityReachable = !qualityError;
+    const schemaWarnings = [
+      analysisError ? `engine analysis columns are not available yet: ${formatOptionalColumnError(analysisError, "analysis_status")}` : "",
+      qualityError ? `move quality columns are not available yet: ${formatOptionalColumnError(qualityError, "quality_key")}` : "",
+    ].filter(Boolean);
+    const analysisWarning = schemaWarnings.length
+      ? ` ${schemaWarnings.join(" ")}. Apply supabase/schema.sql to persist review data.`
+      : "";
+
+    if (options.syncStart !== false) {
+      const saved = await syncGameStart();
+      if (!saved) {
+        state.supabaseHealth = "Supabase is reachable, but saving the active game failed.";
+        state.supabaseReachable = false;
+        if (options.render !== false) renderAll();
+        return false;
+      }
+    }
+
+    state.supabaseHealth = `Supabase is online and writable.${analysisWarning}`;
+    state.supabaseReachable = true;
+    if (options.render !== false) renderAll();
+    return true;
+  } catch (error) {
+    state.supabaseHealth = `Supabase is required, but it is not reachable: ${formatSupabaseError(error)}`;
+    state.supabaseReachable = false;
+    state.supabaseAnalysisReachable = false;
+    state.supabaseQualityReachable = false;
+    if (options.render !== false) renderAll();
+    return false;
+  }
+}
+
+function formatSupabaseError(error) {
+  if (!error) return "unknown error";
+  if (typeof error === "string") return error;
+
+  const parts = [
+    error.message,
+    error.details,
+    error.hint,
+    error.code ? `code ${error.code}` : "",
+  ].filter(Boolean);
+
+  if (parts.length) return parts.join(" ");
+
+  try {
+    const serialized = JSON.stringify(error);
+    return serialized && serialized !== "{}" ? serialized : "unknown error";
+  } catch {
+    return "unknown error";
+  }
+}
+
+function formatOptionalColumnError(error, column) {
+  const formatted = formatSupabaseError(error);
+  if (!formatted || formatted === "unknown error" || formatted === "{\"message\":\"\"}") {
+    return `${column} column is missing`;
+  }
+  return formatted;
 }
 
 async function syncGameEnd(result) {
@@ -2620,6 +4210,39 @@ async function syncMove(record) {
     tags: record.tags,
     note: record.note,
   }));
+}
+
+async function syncMoveAnalysis(record) {
+  if (!state.supabase) return;
+  const payload = {
+    classification: record.classification,
+    tags: record.tags,
+    note: record.note,
+  };
+
+  if (state.supabaseAnalysisReachable === true) {
+    Object.assign(payload, {
+      analysis_status: record.analysisStatus,
+      engine_depth: record.engineDepth,
+      engine_source: record.engineSource,
+      eval_before: record.evalBefore,
+      eval_after: record.evalAfter,
+      eval_delta: record.evalDelta,
+      mate_before: record.mateBefore,
+      mate_after: record.mateAfter,
+      best_move_uci: record.bestMoveUci,
+      best_move_san: record.bestMoveSan,
+      principal_variation: record.principalVariation || [],
+    });
+  }
+
+  if (state.supabaseQualityReachable === true) {
+    payload.quality_key = record.qualityKey || null;
+    payload.quality_label = record.qualityLabel || null;
+    payload.quality_reason = record.qualityReason || null;
+  }
+
+  await safeSupabase(() => state.supabase.from("moves").update(payload).eq("id", record.id));
 }
 
 async function syncWeakness(tag, record, aggregate) {
@@ -2660,12 +4283,12 @@ async function syncPosition(record, item) {
   }));
 }
 
-async function syncPracticeAttempt(item, result) {
+async function syncPracticeAttempt(item, result, chosenMove = null) {
   if (!state.supabase) return;
   await safeSupabase(() => state.supabase.from("practice_attempts").insert({
     source_key: item.sourceKey,
     fen: item.fen,
-    chosen_move: null,
+    chosen_move: chosenMove,
     expected_moves: item.candidates,
     result,
   }));
@@ -2680,49 +4303,29 @@ async function safeSupabase(operation) {
     return true;
   } catch (error) {
     console.warn("Supabase sync failed", error);
-    state.supabaseReachable = false;
     renderGameMeta();
     return false;
   }
 }
 
 async function testSupabaseConnection() {
-  saveSettingsFromPanel();
+  await saveSettingsFromPanel({ syncStart: false });
 
-  if (!state.supabase) {
-    state.supabaseHealth = "Supabase is not configured.";
-    renderSettingsPanel();
-    renderGameMeta();
-    return;
-  }
-
-  state.supabaseHealth = "Testing Supabase connection...";
-  renderSettingsPanel();
-
-  try {
-    const { error } = await state.supabase.from("games").select("id", { count: "exact", head: true });
-    if (error) throw error;
-    state.supabaseHealth = "Supabase is connected and the games table is reachable.";
-    state.supabaseReachable = true;
-  } catch (error) {
-    state.supabaseHealth = `Supabase client is configured, but the schema is not reachable yet: ${error.message || "unknown error"}`;
-    state.supabaseReachable = false;
-  }
-
-  renderSettingsPanel();
-  renderGameMeta();
+  await verifySupabaseConnection({ syncStart: true });
 }
 
-function saveSettingsFromPanel() {
+async function saveSettingsFromPanel(options = {}) {
   state.settings.playerColor = document.querySelector("#playerColorInput").value;
   state.settings.coachMode = document.querySelector("#coachModeInput").value;
   state.supabaseConfig.url = document.querySelector("#supabaseUrlInput").value.trim();
   state.supabaseConfig.anonKey = document.querySelector("#supabaseKeyInput").value.trim();
   saveJson(STORAGE_KEYS.settings, state.settings);
   saveJson(STORAGE_KEYS.supabase, state.supabaseConfig);
-  setupSupabase();
   renderAll();
-  syncGameStart();
+
+  const connected = await setupSupabase();
+  if (!connected) return false;
+  return await verifySupabaseConnection({ syncStart: options.syncStart !== false, render: true });
 }
 
 function resetLocalData() {
@@ -2739,20 +4342,29 @@ function resetLocalData() {
   state.localGames = [];
   state.placement = structuredClone(DEFAULT_PLACEMENT);
   state.placementCardDismissed = false;
+  state.activeDrill = null;
+  state.drillMessage = "";
+  resetPracticeTrainerState();
+  state.practiceTrainer.status = "idle";
   renderAll();
 }
 
 function newGame() {
+  if (!areRequiredServicesReady()) return;
+
   state.game = new Chess();
   state.selectedSquare = null;
   state.legalTargets = new Set();
   state.lastMove = null;
   state.moves = [];
+  state.reviewPly = null;
   state.currentGameId = crypto.randomUUID();
   state.startedAt = new Date().toISOString();
   state.thinking = false;
   state.activeDrill = null;
   state.drillMessage = "";
+  resetPracticeTrainerState();
+  state.practiceTrainer.status = "idle";
   saveCurrentGame();
   syncGameStart();
   renderAll();
@@ -2762,10 +4374,37 @@ function newGame() {
   }
 }
 
+function onClickTakeBack() {
+  if (!areRequiredServicesReady()) return;
+  if (state.thinking || state.activeDrill || state.game.history().length < 2) return;
+
+  state.game.undo();
+  state.game.undo();
+  state.moves = state.moves.slice(0, -2);
+
+  const tail = state.moves[state.moves.length - 1];
+  state.lastMove = tail ? { from: tail.from, to: tail.to } : null;
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+
+  saveCurrentGame();
+  renderAll();
+
+  if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
+    maybeEngineMove();
+  }
+}
+
 function switchTab(tab) {
   state.currentTab = tab;
+  const boardChanged = tab === "practice" && areRequiredServicesReady() && ensurePracticeTrainer();
   els.tabs.forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
   els.panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
+  updateCtxHead(tab);
+  if (tab === "practice" || boardChanged) {
+    renderBoard();
+    renderGameMeta();
+  }
   renderCurrentPanel();
 }
 
@@ -2783,18 +4422,31 @@ function escapeAttr(value) {
 }
 
 async function initEngine() {
-  try {
-    const engine = new StockfishEngine(STOCKFISH_URL);
-    await engine.init();
-    state.engine = engine;
-  } catch {
-    state.engine = null;
+  const sources = [
+    { baseUrl: LOCAL_STOCKFISH_BASE_URL, label: "local" },
+    { baseUrl: STOCKFISH_CDN_BASE_URL, label: "cdn" },
+  ];
+
+  for (const source of sources) {
+    const engine = new StockfishEngine(source);
+    try {
+      await engine.init();
+      state.engine = engine;
+      renderGameMeta();
+      return;
+    } catch (error) {
+      console.warn(`Stockfish ${source.label} engine failed`, error);
+      engine.destroy();
+    }
   }
+
+  state.engine = null;
   renderGameMeta();
 }
 
 function bindEvents() {
   els.newGameButton.addEventListener("click", newGame);
+  els.takeBackButton.addEventListener("click", onClickTakeBack);
   els.tabs.forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
   });
@@ -2805,14 +4457,12 @@ function boot() {
   normalizePlacementState();
   state.startedAt = new Date().toISOString();
   restoreActiveGame();
-  setupSupabase();
   bindEvents();
   renderAll();
-  syncGameStart();
-  checkOpenAIHealth();
+  verifyRequiredServices();
   initEngine();
 
-  if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
+  if (areRequiredServicesReady() && !state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
     maybeEngineMove();
   }
 }

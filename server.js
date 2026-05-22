@@ -2,19 +2,42 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { URL } = require("url");
+const {
+  validateCoachPayload,
+  normalizeCoachResponse,
+  extractOutputText,
+  buildCoachPrompt,
+} = require("./lib/coach-helpers");
 
 const ROOT = __dirname;
 
 loadEnvFile();
 
+const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 5173);
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.1";
 const MAX_BODY_BYTES = 1_000_000;
+const COACH_TIMEOUT_MS = 30_000;
+const OPENAI_HEALTH_TIMEOUT_MS = 8_000;
+const COACH_RATE_LIMIT = { windowMs: 60_000, max: 12 };
+const coachRequestLog = new Map();
+const PUBLIC_FILES = new Set([
+  "index.html",
+  "app.js",
+  "styles.css",
+  "lib/classify.mjs",
+  "lib/stockfish-engine.mjs",
+  "vendor/chess/chess.js",
+  "vendor/stockfish/stockfish-nnue-16-single.js",
+  "vendor/stockfish/stockfish-nnue-16-single.wasm",
+]);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".wasm": "application/wasm",
   ".json": "application/json; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
   ".sql": "text/plain; charset=utf-8",
@@ -24,15 +47,25 @@ const MIME_TYPES = {
   ".svg": "image/svg+xml",
 };
 
-const server = http.createServer(async (req, res) => {
+function createServer() {
+  return http.createServer(handleRequest);
+}
+
+async function handleRequest(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, {
+      const payload = {
         openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
         model: OPENAI_MODEL,
-      });
+      };
+
+      if (url.searchParams.get("check") === "1") {
+        Object.assign(payload, await checkOpenAIStatus());
+      }
+
+      sendJson(res, 200, payload);
       return;
     }
 
@@ -51,12 +84,15 @@ const server = http.createServer(async (req, res) => {
     console.error(error);
     sendJson(res, 500, { error: "Internal server error" });
   }
-});
+}
 
-server.listen(PORT, () => {
-  console.log(`Chess teacher running at http://localhost:${PORT}`);
-  console.log(process.env.OPENAI_API_KEY ? `OpenAI coach enabled with ${OPENAI_MODEL}` : "OpenAI coach disabled: set OPENAI_API_KEY in .env or the shell.");
-});
+if (require.main === module) {
+  const server = createServer();
+  server.listen(PORT, HOST, () => {
+    console.log(`Chess teacher running at http://${HOST}:${PORT}`);
+    console.log(process.env.OPENAI_API_KEY ? `OpenAI coach enabled with ${OPENAI_MODEL}` : "OpenAI coach disabled: set OPENAI_API_KEY in .env or the shell.");
+  });
+}
 
 function loadEnvFile() {
   const envPath = path.join(ROOT, ".env");
@@ -82,9 +118,7 @@ function loadEnvFile() {
 }
 
 function serveStatic(pathname, req, res) {
-  const cleanPath = decodeURIComponent(pathname.split("?")[0]);
-  const relativePath = cleanPath === "/" ? "index.html" : cleanPath.replace(/^\/+/, "");
-  const filePath = path.resolve(ROOT, relativePath);
+  const filePath = resolvePublicFile(pathname);
 
   if (!filePath.startsWith(ROOT) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     sendJson(res, 404, { error: "Not found" });
@@ -105,6 +139,87 @@ function serveStatic(pathname, req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
+function resolvePublicFile(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(String(pathname || "").split("?")[0]);
+  } catch {
+    return "";
+  }
+
+  const rawRelativePath = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
+  const relativePath = path.posix.normalize(rawRelativePath.replaceAll("\\", "/"));
+  const pathParts = relativePath.split("/");
+
+  if (
+    relativePath === "." ||
+    relativePath.startsWith("../") ||
+    relativePath.includes("/../") ||
+    pathParts.some((part) => part.startsWith("."))
+  ) {
+    return "";
+  }
+
+  if (!PUBLIC_FILES.has(relativePath)) return "";
+  return path.resolve(ROOT, relativePath);
+}
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const cutoff = now - COACH_RATE_LIMIT.windowMs;
+  const recent = (coachRequestLog.get(ip) || []).filter((time) => time > cutoff);
+  if (recent.length >= COACH_RATE_LIMIT.max) {
+    coachRequestLog.set(ip, recent);
+    return true;
+  }
+  recent.push(now);
+  coachRequestLog.set(ip, recent);
+  return false;
+}
+
+async function checkOpenAIStatus() {
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      openaiOnline: false,
+      openaiError: "OPENAI_API_KEY is not set.",
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENAI_HEALTH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(OPENAI_MODEL)}`, {
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      return {
+        openaiOnline: false,
+        openaiError: data.error?.message || `OpenAI returned HTTP ${response.status}.`,
+      };
+    }
+
+    return {
+      openaiOnline: true,
+      openaiError: "",
+    };
+  } catch (error) {
+    return {
+      openaiOnline: false,
+      openaiError: error.name === "AbortError"
+        ? "OpenAI health check timed out."
+        : "Could not reach OpenAI.",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function handleCoachRequest(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     sendJson(res, 200, {
@@ -118,19 +233,65 @@ async function handleCoachRequest(req, res) {
     return;
   }
 
-  const payload = await readJsonBody(req);
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      input: buildCoachPrompt(payload),
-      max_output_tokens: 900,
-    }),
-  });
+  const ip = req.socket.remoteAddress || "unknown";
+  if (isRateLimited(ip)) {
+    sendJson(res, 429, {
+      configured: true,
+      error: "Too many coach requests in a short window. Wait a moment and try again.",
+    });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      configured: true,
+      error: error.message === "Request body too large"
+        ? "Coach request was too large."
+        : "Coach request was not valid JSON.",
+    });
+    return;
+  }
+
+  const validationError = validateCoachPayload(payload);
+  if (validationError) {
+    sendJson(res, 400, { configured: true, error: validationError });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), COACH_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        input: buildCoachPrompt(payload),
+        max_output_tokens: 2400,
+        reasoning: { effort: "low" },
+        text: { format: { type: "json_object" } },
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    const aborted = error.name === "AbortError";
+    sendJson(res, aborted ? 504 : 502, {
+      configured: true,
+      error: aborted
+        ? "The coach took too long to respond. Try again."
+        : "Could not reach the coaching service.",
+    });
+    return;
+  }
+  clearTimeout(timeout);
 
   const data = await response.json();
   if (!response.ok) {
@@ -143,74 +304,6 @@ async function handleCoachRequest(req, res) {
 
   const text = extractOutputText(data);
   sendJson(res, 200, normalizeCoachResponse(text));
-}
-
-function buildCoachPrompt(payload) {
-  return `You are a personal chess teacher for one user.
-
-Your job is to tailor coaching to how this user plays, not give generic chess advice.
-Use the provided current position, recent moves, candidate moves, tagged mistakes, profile, practice history, and selected lesson/drill.
-
-Rules:
-- Do not invent illegal moves. Candidate moves are provided by the app; prefer explaining those.
-- If the user repeatedly makes a mistake, explicitly connect today's advice to that pattern.
-- Teach the plan: what the player should look for, why it matters, and what to practice next.
-- Keep language direct and concrete.
-- Return only valid JSON with this exact shape:
-{
-  "configured": true,
-  "summary": "1-2 sentence personalized read of the current moment",
-  "plan": "2-4 sentence plan tailored to this user's games",
-  "candidate_explanations": [{"move":"SAN or UCI","reason":"why this move should be considered"}],
-  "weakness_focus": "one recurring weakness or strength to focus on",
-  "practice_recommendations": ["specific drill or lesson", "specific drill or lesson"]
-}
-
-Context:
-${JSON.stringify(payload, null, 2)}`;
-}
-
-function extractOutputText(data) {
-  if (data.output_text) return data.output_text;
-  const parts = [];
-  for (const item of data.output || []) {
-    for (const content of item.content || []) {
-      if (content.text) parts.push(content.text);
-    }
-  }
-  return parts.join("\n").trim();
-}
-
-function normalizeCoachResponse(text) {
-  try {
-    const parsed = JSON.parse(stripJsonFence(text));
-    return {
-      configured: true,
-      summary: String(parsed.summary || "No summary returned."),
-      plan: String(parsed.plan || ""),
-      candidate_explanations: Array.isArray(parsed.candidate_explanations) ? parsed.candidate_explanations.slice(0, 5) : [],
-      weakness_focus: String(parsed.weakness_focus || ""),
-      practice_recommendations: Array.isArray(parsed.practice_recommendations) ? parsed.practice_recommendations.slice(0, 4) : [],
-    };
-  } catch {
-    return {
-      configured: true,
-      summary: text || "OpenAI returned an empty response.",
-      plan: "",
-      candidate_explanations: [],
-      weakness_focus: "",
-      practice_recommendations: [],
-    };
-  }
-}
-
-function stripJsonFence(text) {
-  return String(text || "")
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
 }
 
 function readJsonBody(req) {
@@ -241,3 +334,9 @@ function sendJson(res, status, payload) {
   });
   res.end(JSON.stringify(payload));
 }
+
+module.exports = {
+  createServer,
+  handleRequest,
+  resolvePublicFile,
+};

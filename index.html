@@ -4,63 +4,91 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Personal Chess Teacher</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Personal Chess Teacher</p>
-          <h1>Training Board</h1>
+    <div class="shell">
+      <aside class="rail" aria-label="Primary navigation">
+        <div class="rail-brand">
+          <div class="rail-mark">P</div>
+          <h1><small>Personal Chess</small>Teacher</h1>
         </div>
-        <div class="status-row" aria-live="polite">
-          <span id="engineStatus" class="status-pill">Engine starting</span>
-          <span id="storageStatus" class="status-pill muted">Local storage</span>
-        </div>
-      </header>
 
-      <main class="workspace">
-        <section class="board-area" aria-label="Chess board and game controls">
-          <div class="control-bar">
-            <button id="newGameButton" type="button">New game</button>
+        <div class="rail-section">Train</div>
+        <button class="nav-item tab active" type="button" data-tab="coach"><span class="nav-mono">C</span><span class="nav-label">Coach</span></button>
+        <button class="nav-item tab" type="button" data-tab="review"><span class="nav-mono">R</span><span class="nav-label">Review</span></button>
+        <button class="nav-item tab" type="button" data-tab="practice"><span class="nav-mono">P</span><span class="nav-label">Practice</span><span class="nav-badge" id="practiceBadge" hidden>0</span></button>
+
+        <div class="rail-section">You</div>
+        <button class="nav-item tab" type="button" data-tab="profile"><span class="nav-mono">P</span><span class="nav-label">Profile</span></button>
+        <button class="nav-item tab" type="button" data-tab="lessons"><span class="nav-mono">L</span><span class="nav-label">Lessons</span></button>
+        <button class="nav-item tab" type="button" data-tab="settings"><span class="nav-mono">S</span><span class="nav-label">Settings</span></button>
+
+        <div class="rail-foot">
+          v 0.4 &middot; local game<br>
+          autosaving to Supabase
+        </div>
+      </aside>
+
+      <main class="stage" aria-label="Chess board">
+        <div class="seat opponent" id="seatOpponent">
+          <div class="avatar" id="opponentAvatar">N</div>
+          <div class="who">
+            <span class="name" id="opponentSeatName">Placement Opponent</span>
+            <span class="sub" id="opponentSeatSub">Level 1 of 5 &middot; light</span>
           </div>
+          <div class="seat-spacer"></div>
+          <div class="seat-meta">
+            <span class="progress-dots" id="opponentProgressDots" aria-label="Placement progress">
+              <i></i><i></i><i></i><i></i><i></i>
+            </span>
+          </div>
+        </div>
 
+        <div class="board-host">
           <div id="board" class="board" aria-label="Interactive chess board"></div>
+        </div>
 
-          <div class="game-footer">
-            <div>
-              <p class="label">Turn</p>
-              <p id="turnText" class="metric">White</p>
-            </div>
-            <div>
-              <p class="label">Opening</p>
-              <p id="openingText" class="metric">Starting position</p>
-            </div>
-            <div>
-              <p class="label">Result</p>
-              <p id="resultText" class="metric">In progress</p>
-            </div>
+        <div class="seat player" id="seatPlayer">
+          <div class="avatar">M</div>
+          <div class="who">
+            <span class="name">You</span>
+            <span class="sub" id="playerSeatSub">White &middot; move 1</span>
           </div>
-        </section>
+          <div class="seat-spacer"></div>
+          <div class="seat-meta">
+            <span class="pill" id="playerSeatPill"><span class="dot"></span> Your move</span>
+          </div>
+        </div>
+      </main>
 
-        <aside class="teacher-panel" aria-label="Teacher panel">
-          <nav class="tabs" aria-label="Teacher views">
-            <button class="tab active" type="button" data-tab="coach">Coach</button>
-            <button class="tab" type="button" data-tab="review">Review</button>
-            <button class="tab" type="button" data-tab="practice">Practice</button>
-            <button class="tab" type="button" data-tab="profile">Profile</button>
-            <button class="tab" type="button" data-tab="lessons">Lessons</button>
-            <button class="tab" type="button" data-tab="settings">Settings</button>
-          </nav>
+      <aside class="context" aria-label="Teacher panel">
+        <header class="ctx-head">
+          <h2 id="ctxHeadTitle">Coach</h2>
+          <span class="meta" id="ctxHeadMeta"></span>
+        </header>
 
+        <div class="ctx-body">
           <section id="coachPanel" class="panel active" data-panel="coach"></section>
           <section id="reviewPanel" class="panel" data-panel="review"></section>
           <section id="practicePanel" class="panel" data-panel="practice"></section>
           <section id="profilePanel" class="panel" data-panel="profile"></section>
           <section id="lessonsPanel" class="panel" data-panel="lessons"></section>
           <section id="settingsPanel" class="panel" data-panel="settings"></section>
-        </aside>
-      </main>
+        </div>
+
+        <footer class="ctx-foot">
+          <button class="ico-btn" id="takeBackButton" type="button" title="Undo your last move so the coach can show what else you could have played">
+            &#x21B6;
+            <span class="lbl">Take back</span>
+          </button>
+          <div class="spacer"></div>
+          <button class="new-btn" id="newGameButton" type="button">New game</button>
+        </footer>
+      </aside>
     </div>
 
     <script type="module" src="./app.js"></script>
