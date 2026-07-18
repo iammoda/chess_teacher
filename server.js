@@ -3,11 +3,12 @@ const http = require("http");
 const path = require("path");
 const { URL } = require("url");
 const {
-  validateCoachPayload,
-  normalizeCoachResponse,
+  validateChatPayload,
+  reasoningEffortForEvent,
+  buildChatInput,
+  normalizeChatResponse,
   extractOutputText,
-  buildCoachPrompt,
-} = require("./lib/coach-helpers");
+} = require("./lib/coach-chat");
 
 const ROOT = __dirname;
 
@@ -19,17 +20,28 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.1";
 const MAX_BODY_BYTES = 1_000_000;
 const COACH_TIMEOUT_MS = 30_000;
 const OPENAI_HEALTH_TIMEOUT_MS = 8_000;
-const COACH_RATE_LIMIT = { windowMs: 60_000, max: 12 };
+const COACH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
 const coachRequestLog = new Map();
 const PUBLIC_FILES = new Set([
   "index.html",
   "app.js",
   "styles.css",
+  "assets/squirrel.svg",
+  "assets/squirrel_chess.svg",
+  "lib/board-drag.mjs",
+  "lib/coach-client.mjs",
   "lib/classify.mjs",
+  "lib/repertoire.mjs",
+  "lib/review-model.mjs",
+  "lib/skill-rating.mjs",
+  "lib/srs.mjs",
+  "lib/skill-model.mjs",
   "lib/stockfish-engine.mjs",
   "vendor/chess/chess.js",
   "vendor/stockfish/stockfish-nnue-16-single.js",
   "vendor/stockfish/stockfish-nnue-16-single.wasm",
+  ...["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"]
+    .map((piece) => `vendor/pieces/merida/${piece}.svg`),
 ]);
 
 const MIME_TYPES = {
@@ -59,6 +71,7 @@ async function handleRequest(req, res) {
       const payload = {
         openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
         model: OPENAI_MODEL,
+        remoteHistoryEraseEnabled: isFeatureEnabled("ENABLE_REMOTE_HISTORY_ERASE"),
       };
 
       if (url.searchParams.get("check") === "1") {
@@ -69,8 +82,8 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/api/coach") {
-      await handleCoachRequest(req, res);
+    if (req.method === "POST" && url.pathname === "/api/coach/chat") {
+      await handleCoachChatRequest(req, res);
       return;
     }
 
@@ -84,6 +97,10 @@ async function handleRequest(req, res) {
     console.error(error);
     sendJson(res, 500, { error: "Internal server error" });
   }
+}
+
+function isFeatureEnabled(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
 }
 
 if (require.main === module) {
@@ -220,15 +237,14 @@ async function checkOpenAIStatus() {
   }
 }
 
-async function handleCoachRequest(req, res) {
+async function handleCoachChatRequest(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     sendJson(res, 200, {
       configured: false,
-      summary: "OpenAI is not connected yet.",
-      plan: "Create a local .env file with OPENAI_API_KEY, then restart the Node server.",
-      candidate_explanations: [],
-      weakness_focus: "The app is currently using only local heuristics.",
-      practice_recommendations: ["Keep playing games so the local profile can collect mistakes."],
+      message: "The coach is offline. Add OPENAI_API_KEY to .env and restart the server to talk.",
+      question: null,
+      offer_rethink: false,
+      memory_note: null,
     });
     return;
   }
@@ -255,7 +271,7 @@ async function handleCoachRequest(req, res) {
     return;
   }
 
-  const validationError = validateCoachPayload(payload);
+  const validationError = validateChatPayload(payload);
   if (validationError) {
     sendJson(res, 400, { configured: true, error: validationError });
     return;
@@ -273,9 +289,9 @@ async function handleCoachRequest(req, res) {
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
-        input: buildCoachPrompt(payload),
-        max_output_tokens: 2400,
-        reasoning: { effort: "low" },
+        input: buildChatInput(payload),
+        max_output_tokens: 900,
+        reasoning: { effort: reasoningEffortForEvent(payload.event) },
         text: { format: { type: "json_object" } },
       }),
       signal: controller.signal,
@@ -303,7 +319,7 @@ async function handleCoachRequest(req, res) {
   }
 
   const text = extractOutputText(data);
-  sendJson(res, 200, normalizeCoachResponse(text));
+  sendJson(res, 200, normalizeChatResponse(text));
 }
 
 function readJsonBody(req) {

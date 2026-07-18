@@ -116,6 +116,45 @@ create table if not exists practice_attempts (
   created_at timestamptz not null default now()
 );
 
+create table if not exists reasoning_traces (
+  id uuid primary key default gen_random_uuid(),
+  game_id uuid,
+  ply integer,
+  fen text,
+  san text,
+  question text,
+  answer text,
+  coach_takeaway text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists coach_memory (
+  id uuid primary key default gen_random_uuid(),
+  note text not null,
+  source text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists skill_ratings (
+  dimension text primary key,
+  rating integer,
+  perf real,
+  samples integer not null default 0,
+  confidence real not null default 0,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists repertoire_progress (
+  line_id text primary key,
+  opening_id text,
+  ease real not null default 2.5,
+  interval_days integer not null default 0,
+  due_at timestamptz,
+  reps integer not null default 0,
+  lapses integer not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 insert into lessons (id, title, category, level, summary, concepts)
 values
   ('loose-pieces', 'Loose pieces', 'hanging_piece', 'starter', 'Train undefended pieces before tactics begin.', '["undefended pieces", "attacked pieces", "candidate moves"]'::jsonb),

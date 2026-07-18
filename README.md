@@ -6,7 +6,7 @@ The app does not try to learn chess from scratch. It combines proven chess tools
 
 - `chess.js` handles legal moves, PGN, FEN, and game state.
 - Stockfish is used when available for engine-grade move selection and analysis.
-- Supabase stores long-term games, positions, weaknesses, lessons, and practice history.
+- Supabase stores long-term games, positions, weaknesses, Skill Lab practice, and practice history.
 - The coaching layer learns your habits from your games and turns repeated issues into drills.
 
 ## Current Implementation
@@ -23,22 +23,24 @@ Then open:
 http://localhost:5173
 ```
 
-The app requires Supabase and the local OpenAI coach server before play is enabled. Supabase project `kajifmxqfcceibwredjf` is prefilled as `https://kajifmxqfcceibwredjf.supabase.co`, and the browser-safe publishable key is configured. The schema has been applied; use the Settings tab to test the connection if sync looks wrong. If the app says engine analysis or move-quality columns are missing, re-run `supabase/schema.sql` so evals, best moves, principal variations, and quality cues can persist.
+Play always works locally (chess.js + bundled Stockfish). The conversational coach needs the local OpenAI server; Supabase adds long-term history sync. Supabase project `kajifmxqfcceibwredjf` is prefilled as `https://kajifmxqfcceibwredjf.supabase.co`, and the browser-safe publishable key is configured. The schema has been applied; use the Settings tab to test the connection if sync looks wrong. If the app says engine analysis or move-quality columns are missing, re-run `supabase/schema.sql` so evals, best moves, principal variations, and quality cues can persist.
 
 ## What The Platform Does Today
 
 The platform is a personal chess teacher rather than a generic chessboard.
 
-- Plays full legal games in the browser with `chess.js`.
-- Uses five placement games to establish a baseline and unlock personal coaching.
-- Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks.
-- Adapts opponent strength from placement score, recent results, and mistake severity.
+- Plays full legal games in the browser with `chess.js`, with drag-and-drop or click-to-move on SVG pieces (Merida set).
+- Uses one quick calibration game to establish a baseline, then calibrates continuously from every graded move.
+- Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks; opponent strength is Elo-limited (`UCI_LimitStrength`) for human-like play.
+- Adapts opponent strength from a per-dimension skill model (tactics, openings, endgames, calculation), recent results, and mistake severity.
 - Reviews learner moves with heuristics, Stockfish eval deltas, best alternatives, and principal variations.
-- Shows post-placement move-quality cues after each learner move while playing: best, excellent, good, book, inaccuracy, mistake, blunder, and missed win.
+- Shows post-calibration move-quality cues after each learner move while playing: best, excellent, good, book, inaccuracy, mistake, blunder, and missed win.
 - Highlights played and best moves in Review so the learner can compare choices visually.
 - Tracks recurring weaknesses and turns mistakes into practice positions.
-- Provides starter lessons and drills tied to common weakness categories.
-- Sends compact chess context to the local OpenAI coach endpoint for personalized explanations after placement.
+- Provides Skill Labs for focused tactics, mixed recognition, and retry positions from the learner's own games.
+- Talks with you during games through a conversational coach: proactive comments at key moments, questions about your thinking (stored as reasoning traces), durable memory notes, and a coach-offered rethink on serious blunders instead of a free undo.
+- Runs a guided post-game review: the coach picks 2-3 key moments, asks what you were thinking, then teaches.
+- Trains openings from a built-in repertoire (12 openings, every learner move explained) with SM-2-lite spaced repetition on both opening lines and mistake drills.
 - Stores games and learning data locally, and syncs to Supabase when configured.
 
 ## OpenAI Setup
@@ -58,6 +60,7 @@ OPENAI_API_KEY=replace-with-your-key
 OPENAI_MODEL=gpt-5.1
 HOST=127.0.0.1
 PORT=5173
+ENABLE_REMOTE_HISTORY_ERASE=false
 ```
 
 Start the app:
@@ -68,34 +71,25 @@ npm start
 
 The Node server serves the app and exposes `/api/coach`. The browser sends chess context to that endpoint; the server adds the API key and calls OpenAI.
 
-## Placement And Bot Difficulty
+## Calibration And Bot Difficulty
 
-The app now starts with placement instead of pretending it knows the player immediately.
+The app starts with a single calibration game instead of a five-game placement wall.
 
-Placement uses the first five completed games. Internally, the opponent steps up across those games:
+During that first game the coach watches silently: no hints, no commentary, no quality badges. It records the result, move classifications, mistake severity, and average centipawn loss when Stockfish grading is available.
 
-- Game 1: very light opponent
-- Game 2: light opponent
-- Game 3: balanced opponent
-- Game 4: challenging opponent
-- Game 5: strongest placement test
+After the calibration game:
 
-During those games, the app records result, player color, opening, opponent strength, move classifications, tagged mistakes, and mistake severity. The OpenAI personal coach stays locked until placement is complete so advice is based on real history instead of a single move.
-
-After placement:
-
-- The app estimates a training score from placement performance and mistake severity.
-- Opponent strength becomes adaptive instead of manually chosen.
-- Recent wins push opponent strength slightly higher.
-- Recent losses or high-severity mistakes lower opponent strength slightly.
-- Practice difficulty stays tied to the weakness queue, not only to bot strength.
-- Learner moves receive visual quality cues after analysis completes, so feedback appears during play instead of only after the game.
+- The app seeds a per-dimension skill model (tactics, openings, endgames, calculation) from the calibration score.
+- Every graded move afterwards updates the relevant dimensions with an exponentially weighted average, so calibration never stops.
+- Game results nudge ratings toward the expected score against the opponent's Elo.
+- Recent wins push opponent strength slightly higher; recent losses lower it.
+- Learner moves receive visual quality cues after analysis completes.
 
 Current bot behavior:
 
-- If Stockfish loads, the app asks Stockfish for a move at the current placement/adaptive strength.
+- If Stockfish loads, the app limits its strength with `UCI_LimitStrength`/`UCI_Elo` (and `Skill Level` at the low end) so weak settings blunder like people instead of playing shallow-but-perfect chess.
 - If Stockfish does not load, the heuristic engine ranks legal moves and chooses from a wider or narrower candidate pool based on that same strength.
-- The main UI does not expose depth controls; the app controls opponent strength from placement and player history.
+- The main UI does not expose depth controls; the app controls opponent strength from the skill model and player history.
 
 ## Product Goal
 
@@ -119,7 +113,7 @@ The app becomes an "ultimate chess teacher" when it can combine engine truth, pe
 - Engine-grounded review: reliable Stockfish analysis, best alternatives, principal variations, mate-aware scoring, and review screens that explain what changed after each important move.
 - Rich motif detection: forks, pins, skewers, discovered attacks, overloaded defenders, back-rank problems, trapped pieces, poor trades, and missed tactics.
 - Real learning loop: spaced repetition, retry queues from your own games, success/failure tracking, and difficulty progression.
-- Adaptive curriculum: opening repertoire pages, endgame modules, pawn-structure plans, lesson completion tracking, and lesson recommendations based on repeated personal mistakes.
+- Adaptive curriculum: opening repertoire pages, endgame modules, pawn-structure plans, Skill Lab progress, and recommendations based on repeated personal mistakes.
 - Stronger player model: separate opening, tactics, calculation, endgame, conversion, and habit weaknesses with trend tracking over time.
 - Better teaching UX: arrows, highlights, variation replay, move trees, clear turning points, and coaching that asks useful questions instead of only lecturing.
 
@@ -189,35 +183,34 @@ Practice priority is based on frequency, severity, and recency. A frequent small
 
 ### OpenAI Personal Coach
 
-When `OPENAI_API_KEY` is configured and the server can reach OpenAI, the app sends a compact coaching context to `/api/coach`:
+When `OPENAI_API_KEY` is configured and the server can reach OpenAI, the app runs a conversational coach through `/api/coach/chat`. Each request carries:
 
-- Current FEN, PGN, side to move, phase, and opening.
-- Placement progress, estimated score, and current adaptive opponent strength.
-- Legal candidate moves generated by `chess.js`.
-- Recent moves with notes, classifications, and tags.
-- Recurring weakness profile.
-- Practice queue and practice history.
-- Selected lesson or active drill.
-- Available practice modules.
+- The compacted chat transcript for the current game.
+- Coach memory: durable notes about how you think plus recent reasoning traces (your answers to "what was your plan?").
+- The per-dimension skill snapshot with next-level guidance per dimension.
+- Top recurring weaknesses.
+- Current FEN, recent moves, phase, opening, and the triggering moment (blunder, turning point, review moment) with engine data.
+- App-generated candidate moves, so the model never invents illegal moves.
 
-OpenAI returns a personalized summary, plan, candidate explanations, weakness focus, and practice recommendations. That response is centered on how you actually play rather than generic lesson text, and it unlocks after the placement games provide enough evidence.
+The coach replies conversationally, can ask you one question at a time (answers are stored as reasoning traces), offers a rethink before the bot replies to a serious blunder, and drives the guided post-game review. It stays silent during the calibration game.
 
 ## MVP Features
 
 - Play a full chess game in the browser.
 - Choose player color.
-- Play five placement games that calibrate bot difficulty and unlock the personal coach.
+- Play one calibration game that seeds the skill model and unlocks the personal coach.
 - Use Stockfish when available, with a heuristic fallback opponent when it is not.
 - Show legal move highlights.
-- Show post-placement move-quality cues after each learner move.
+- Show post-calibration move-quality cues after each learner move.
 - Track move history and PGN.
 - Detect common beginner/intermediate mistakes.
 - Generate candidate moves for the current position.
 - Create practice positions from mistakes.
 - Show a weakness profile.
-- Include starter lessons tied to common weakness categories.
+- Include Skill Labs tied to common weakness categories.
 - Store data locally by default.
 - Sync games, moves, positions, weaknesses, and practice attempts to Supabase when configured.
+- Erase local history from Settings; optionally expose a test-only Supabase history wipe with `ENABLE_REMOTE_HISTORY_ERASE=true`.
 
 ## Architecture
 
@@ -282,14 +275,14 @@ The teacher should avoid dumping raw engine lines. The useful coaching flow is:
 
 The current implementation combines immediate heuristics with Stockfish analysis when available. Later versions should deepen this with variation replay, richer tactic detection, and language-model explanations grounded in engine output.
 
-## Curriculum Strategy
+## Skill Lab Strategy
 
-The app is curriculum-ready from day one, but it does not start with a full lesson authoring studio.
+The app is curriculum-ready, but the primary teaching surface is not a generic lesson library. It uses Skill Labs: focused board training for one skill, mixed recognition, and game-transfer retries from the user's own games.
 
 Included now:
 
-- Starter lessons for common chess improvement areas.
-- Weakness-linked lesson recommendations.
+- Focused labs for checkmates, forks, pins, skewers, discoveries, loose pieces, king safety, opening development, trade quality, and candidate moves.
+- Weakness-linked Skill Lab recommendations.
 - Practice positions generated from personal games.
 - Basic repetition through the practice queue.
 
@@ -297,33 +290,33 @@ Deferred:
 
 - Full lesson editor.
 - Rich branching move trees.
-- Lesson versioning.
 - Large curated course library.
 - Polished authoring workflow.
 
 This sequencing keeps the app focused on becoming a useful personal teacher first.
 
-## Lessons Versus Practice
+## Skill Labs Versus Practice
 
-Lessons and practice are intentionally different.
+Skill Labs and Practice are intentionally different.
 
-- Lessons explain a concept, connect it to your recent games, and can launch an interactive board lesson.
-- Practice is where you drill the skill on the board until you can execute it.
+- Skill Labs let the learner intentionally train one idea, such as forks, then advance to mixed recognition and positions from their own games.
+- Practice is the adaptive daily queue: personal mistakes first, then foundation drills.
 
-This follows the pattern used by major chess trainers: Chess.com Practice separates openings, drills, master games, and custom positions, while lessons teach concepts and include challenges. Lichess Practice organizes concrete drills by checkmates, tactics, pawn endgames, and rook endgames.
+This keeps teaching close to the board. The app still has concept text, but it appears just in time inside Coach, Review, Skill Labs, and Practice rather than as a browsing-heavy course catalog.
 
-Current practice modules:
+Current Skill Lab foundations:
 
-- Four-move checkmate
-- Defending four-move checkmate
-- Queen and king checkmate
-- Back-rank mate
-- Italian Game development
-- Queen's Gambit development
+- Checkmates
+- Forks
+- Pins and line tactics
+- Skewers
+- Discovered attacks
+- Loose pieces and trades
+- King safety and opening development
 
-Recommended practice is still personalized from your games first. The general library fills in foundational skills like checkmating patterns, opening traps, tactics, and opening plans.
+Recommended practice is still personalized from your games first. The foundation boards fill in tactical and opening habits when there are not enough personal positions yet.
 
-The app keeps a priority queue for lessons and practice. Priority is based on:
+The app keeps a priority queue for Skill Labs and practice. Priority is based on:
 
 - Recurring weakness count and severity.
 - Recent mistakes from the current game.
@@ -331,20 +324,7 @@ The app keeps a priority queue for lessons and practice. Priority is based on:
 - Practice positions waiting from your own games.
 - Solved practice, which lowers priority for that category.
 
-Clicking a lesson selects it and shows why it matters now. Starting the interactive lesson changes the board position and walks you through the move. Clicking a practice tile starts that drill directly on the board.
-
-## Starter Lessons
-
-The app includes lightweight starter lessons for:
-
-- Loose pieces
-- Checks, captures, and threats
-- Opening principles
-- King safety
-- Poor trades
-- Candidate moves
-
-Each lesson is tied to one or more weakness categories so the coach can recommend it after real games.
+Clicking a Skill Lab selects it and shows why it matters now. Focus boards isolate the pattern, mixed boards test recognition, and game-transfer boards retry positions from review.
 
 ## Testing Plan
 
@@ -355,7 +335,7 @@ Manual checks:
 - Confirm illegal moves are rejected.
 - Confirm the engine or fallback opponent replies after player moves.
 - Confirm mistake tags appear after risky moves.
-- Confirm post-placement move-quality cues appear on learner moves and do not appear during placement games.
+- Confirm post-calibration move-quality cues appear on learner moves and do not appear during the calibration game.
 - Confirm engine evals, best alternatives, short principal variations, and played/best move highlights appear in Review when Stockfish is available.
 - Confirm practice positions are generated from mistakes.
 - Confirm local profile updates after repeated mistakes.
@@ -403,7 +383,7 @@ The biggest remaining work is turning strong analysis into a complete training s
 - Persisted engine analysis fields for move review and long-term learning.
 - Best engine alternatives and short principal variations in the review screen.
 - Better tactic motif detection and more accurate blunder/mistake/inaccuracy labels.
-- Post-placement move-quality cues during play.
+- Post-calibration move-quality cues during play.
 
 ### Phase 3: Adaptive Curriculum
 

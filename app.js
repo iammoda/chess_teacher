@@ -1,21 +1,32 @@
 import { Chess } from "./vendor/chess/chess.js";
 import { ANALYSIS_DEPTH, MOVE_QUALITIES, classifyByEval, classifyMoveQuality, normalizeEngineAnalysis } from "./lib/classify.mjs";
+import { SKILL_CATALOG, getSkillById, getSkillCategories, getSkillForCategory } from "./lib/skill-model.mjs";
 import { StockfishEngine } from "./lib/stockfish-engine.mjs";
+import { attachDragHandlers } from "./lib/board-drag.mjs";
+import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, sendCoachChat } from "./lib/coach-client.mjs";
+import {
+  SKILL_DIMENSIONS,
+  DIMENSION_LABELS,
+  createEmptySkillState,
+  seedSkillStateFromScore,
+  applyMoveToSkillState,
+  applyGameResultToSkillState,
+  overallRating,
+  skillSnapshot,
+} from "./lib/skill-rating.mjs";
+import { selectKeyMoments } from "./lib/review-model.mjs";
+import { REPERTOIRE, getOpeningById, getLineById, learnerPlaysAt } from "./lib/repertoire.mjs";
+import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrade, selectDue, nextDueLabel } from "./lib/srs.mjs";
 
-const PIECES = {
-  wp: "♙",
-  wn: "♘",
-  wb: "♗",
-  wr: "♖",
-  wq: "♕",
-  wk: "♔",
-  bp: "♟",
-  bn: "♞",
-  bb: "♝",
-  br: "♜",
-  bq: "♛",
-  bk: "♚",
-};
+const PIECE_SPRITE_BASE = "/vendor/pieces/merida/";
+
+function pieceSpriteUrl(color, type) {
+  return `${PIECE_SPRITE_BASE}${color}${type.toUpperCase()}.svg`;
+}
+
+function pieceImageHtml(color, type, className = "piece") {
+  return `<img class="${className} ${color}" src="${pieceSpriteUrl(color, type)}" alt="" draggable="false">`;
+}
 
 const PIECE_VALUES = {
   p: 1,
@@ -28,6 +39,8 @@ const PIECE_VALUES = {
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
+const CAPTURE_ORDER = ["q", "r", "b", "n", "p"];
+const MOVE_ANIMATION_MS = 240;
 
 const STORAGE_KEYS = {
   settings: "chess_teacher_settings_v1",
@@ -36,8 +49,11 @@ const STORAGE_KEYS = {
   practice: "chess_teacher_practice_v1",
   practiceHistory: "chess_teacher_practice_history_v1",
   games: "chess_teacher_games_v1",
-  placement: "chess_teacher_placement_v1",
-  placementCardDismissed: "chess_teacher_placement_card_dismissed_v1",
+  calibration: "chess_teacher_calibration_v1",
+  skill: "chess_teacher_skill_v1",
+  repertoire: "chess_teacher_repertoire_v1",
+  coachChat: "chess_teacher_coach_chat_v1",
+  coachMemory: "chess_teacher_coach_memory_v1",
   supabase: "chess_teacher_supabase_v1",
 };
 
@@ -54,13 +70,18 @@ const DEFAULT_SUPABASE_CONFIG = {
 
 let supabaseModulePromise = null;
 
-const PLACEMENT_TARGET_GAMES = 5;
-const PLACEMENT_DEPTHS = [2, 4, 6, 8, 10];
-const DEFAULT_PLACEMENT = {
-  games: [],
-  completedGameIds: [],
+const CALIBRATION_DEPTH = 6;
+const DEFAULT_CALIBRATION = {
+  done: false,
+  gameId: null,
   estimatedScore: null,
   completedAt: null,
+};
+
+// Pre-calibration storage keys, migrated then removed on boot.
+const LEGACY_STORAGE_KEYS = {
+  placement: "chess_teacher_placement_v1",
+  placementCardDismissed: "chess_teacher_placement_card_dismissed_v1",
 };
 
 const STARTER_LESSONS = [
@@ -542,23 +563,47 @@ const OPENING_BOOK = [
 ];
 
 const DEFAULT_SETTINGS = {
+  displayName: "You",
   playerColor: "w",
   engineDepth: 5,
   coachMode: "post_game",
 };
 
+const SKILL_LAB_MODES = [
+  {
+    id: "focus",
+    label: "Focus",
+    description: "Every board trains the selected skill so the pattern is easy to see.",
+  },
+  {
+    id: "mixed",
+    label: "Mixed",
+    description: "Scan without a label and decide which forcing idea matters first.",
+  },
+  {
+    id: "game_transfer",
+    label: "From games",
+    description: "Retry positions pulled from your own mistakes and review notes.",
+  },
+];
+
+let boardDrag = null;
+
 const els = {
   board: document.querySelector("#board"),
   newGameButton: document.querySelector("#newGameButton"),
-  takeBackButton: document.querySelector("#takeBackButton"),
   seatOpponent: document.querySelector("#seatOpponent"),
   seatPlayer: document.querySelector("#seatPlayer"),
   opponentSeatName: document.querySelector("#opponentSeatName"),
   opponentSeatSub: document.querySelector("#opponentSeatSub"),
-  opponentProgressDots: document.querySelector("#opponentProgressDots"),
   opponentAvatar: document.querySelector("#opponentAvatar"),
+  opponentSeatPill: document.querySelector("#opponentSeatPill"),
+  opponentCaptureTray: document.querySelector("#opponentCaptureTray"),
+  playerSeatName: document.querySelector("#playerSeatName"),
+  playerAvatar: document.querySelector("#playerAvatar"),
   playerSeatSub: document.querySelector("#playerSeatSub"),
   playerSeatPill: document.querySelector("#playerSeatPill"),
+  playerCaptureTray: document.querySelector("#playerCaptureTray"),
   ctxHeadTitle: document.querySelector("#ctxHeadTitle"),
   ctxHeadMeta: document.querySelector("#ctxHeadMeta"),
   practiceBadge: document.querySelector("#practiceBadge"),
@@ -568,7 +613,6 @@ const els = {
   reviewPanel: document.querySelector("#reviewPanel"),
   practicePanel: document.querySelector("#practicePanel"),
   profilePanel: document.querySelector("#profilePanel"),
-  lessonsPanel: document.querySelector("#lessonsPanel"),
   settingsPanel: document.querySelector("#settingsPanel"),
 };
 
@@ -579,17 +623,29 @@ const state = {
   practiceQueue: loadJson(STORAGE_KEYS.practice, []),
   practiceHistory: loadJson(STORAGE_KEYS.practiceHistory, []),
   localGames: loadJson(STORAGE_KEYS.games, []),
-  placement: loadJson(STORAGE_KEYS.placement, DEFAULT_PLACEMENT),
-  placementCardDismissed: loadJson(STORAGE_KEYS.placementCardDismissed, false),
+  calibration: loadJson(STORAGE_KEYS.calibration, DEFAULT_CALIBRATION),
+  skill: loadJson(STORAGE_KEYS.skill, null),
+  // { myOpenings: [openingId], lines: { [lineId]: { srs, reps, perfect } } }
+  repertoire: loadJson(STORAGE_KEYS.repertoire, { myOpenings: [], lines: {} }),
+  openingDrill: null,
+  coachChat: loadJson(STORAGE_KEYS.coachChat, { gameId: null, messages: [] }),
+  coachMemory: loadJson(STORAGE_KEYS.coachMemory, { notes: [], traces: [] }),
+  coachThinking: false,
+  coachError: "",
+  pendingCoachQuestion: null,
+  proactive: { count: 0, lastCommentPly: 0, turningPointUsed: false, praiseCount: 0 },
+  rethink: { active: false, record: null, remaining: 2, resolve: null, stage: "ask" },
   selectedSquare: null,
-  selectedLessonId: null,
+  selectedSkillId: null,
   legalTargets: new Set(),
   lastMove: null,
   moves: [],
   currentGameId: crypto.randomUUID(),
   currentTab: "coach",
   reviewPly: null,
+  guidedReview: null,
   thinking: false,
+  pendingBoardRender: false,
   activeDrill: null,
   drillMessage: "",
   practiceTrainer: {
@@ -600,17 +656,19 @@ const state = {
     scoreDelta: 0,
     feedback: "",
   },
+  featureFlags: {
+    remoteHistoryEraseEnabled: false,
+  },
+  historyErase: {
+    busy: false,
+    status: "",
+    error: "",
+  },
   openAI: {
     configured: false,
     online: false,
     model: "",
     status: "Checking OpenAI coach...",
-  },
-  aiCoach: {
-    loading: false,
-    error: "",
-    data: null,
-    context: "",
   },
   supabaseConfig: normalizeSupabaseConfig(loadJson(STORAGE_KEYS.supabase, DEFAULT_SUPABASE_CONFIG)),
   supabase: null,
@@ -764,7 +822,7 @@ function getLatestPlayerMove() {
 }
 
 function getLiveMoveQualityCue() {
-  if (!isPlacementComplete() || state.activeDrill) return null;
+  if (!isCalibrationComplete() || state.activeDrill) return null;
   const move = getLatestPlayerMove();
   const quality = getMoveQuality(move);
   return quality && move?.to ? { move, quality } : null;
@@ -777,27 +835,46 @@ function renderQualityBadgeHtml(move, extraClass = "") {
   return `<span class="move-quality-badge ${qualityClassName(quality.key)} ${extraClass}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(quality.symbol)}</span>`;
 }
 
+function toTitleCaseLabel(value) {
+  const normalized = String(value ?? "").trim().replaceAll("_", " ").replace(/\s+/g, " ");
+  if (!normalized) return "";
+  return normalized.split(" ").map((token) => {
+    if (!token) return "";
+    if (token.toUpperCase() === token && /[A-Z]/.test(token)) return token;
+    if (/\d/.test(token)) return token;
+    if (token.toLowerCase() === "n/a") return "N/A";
+    return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+  }).join(" ");
+}
+
+function formatCountLabel(count, singular, plural = `${singular}s`) {
+  const total = Number.isFinite(Number(count)) ? Number(count) : 0;
+  return `${total} ${toTitleCaseLabel(total === 1 ? singular : plural)}`;
+}
+
 function animateBoardMove(move) {
-  if (!move?.from || !move?.to || !els.board?.parentElement) return false;
+  if (!move?.from || !move?.to || !els.board?.parentElement) return Promise.resolve(false);
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return Promise.resolve(false);
   const fromSquare = els.board.querySelector(`[data-square="${move.from}"]`);
   const toSquare = els.board.querySelector(`[data-square="${move.to}"]`);
   const host = els.board.parentElement;
-  if (!fromSquare || !toSquare) return false;
+  if (!fromSquare || !toSquare) return Promise.resolve(false);
 
   const hostRect = host.getBoundingClientRect();
   const fromRect = fromSquare.getBoundingClientRect();
   const toRect = toSquare.getBoundingClientRect();
-  if (!fromRect.width || !toRect.width) return false;
+  if (!fromRect.width || !toRect.width) return Promise.resolve(false);
 
-  const pieceGlyph = PIECES[move.color + (move.promotion || move.piece)] || fromSquare.querySelector(".piece")?.textContent || "";
-  if (!pieceGlyph) return false;
+  const pieceType = move.promotion || move.piece;
+  if (!pieceType || !move.color) return Promise.resolve(false);
 
+  els.board.classList.add("animating");
   fromSquare.classList.add("animating-from");
   toSquare.classList.add("animating-to");
 
   const ghost = document.createElement("span");
   ghost.className = `piece ${move.color} move-ghost`;
-  ghost.textContent = pieceGlyph;
+  ghost.innerHTML = pieceImageHtml(move.color, pieceType);
   ghost.style.width = `${fromRect.width}px`;
   ghost.style.height = `${fromRect.height}px`;
   ghost.style.left = `${fromRect.left - hostRect.left}px`;
@@ -806,23 +883,37 @@ function animateBoardMove(move) {
 
   const dx = toRect.left - fromRect.left;
   const dy = toRect.top - fromRect.top;
-  window.requestAnimationFrame(() => {
-    ghost.style.transform = `translate(${dx}px, ${dy}px)`;
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      ghost.remove();
+      fromSquare.classList.remove("animating-from");
+      toSquare.classList.remove("animating-to");
+      els.board.classList.remove("animating");
+      resolve(true);
+    };
+
+    ghost.addEventListener("transitionend", finish, { once: true });
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        ghost.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+      });
+    });
+    window.setTimeout(finish, MOVE_ANIMATION_MS + 80);
   });
-  window.setTimeout(() => ghost.remove(), 220);
-  return true;
 }
 
-function renderAfterMoveAnimation(animated, callback) {
-  const delay = animated ? 170 : 0;
-  window.setTimeout(() => {
-    renderAll();
-    callback?.();
-  }, delay);
+async function renderAfterMoveAnimation(animation, callback) {
+  await animation;
+  renderAll();
+  await callback?.();
 }
 
 function renderAll() {
-  if (state.currentTab === "practice" && areRequiredServicesReady()) {
+  if (state.currentTab === "practice") {
     ensurePracticeTrainer();
   }
   renderBoard();
@@ -832,30 +923,26 @@ function renderAll() {
   saveJson(STORAGE_KEYS.profile, state.profile);
   saveJson(STORAGE_KEYS.practice, state.practiceQueue);
   saveJson(STORAGE_KEYS.practiceHistory, state.practiceHistory);
-  saveJson(STORAGE_KEYS.placement, state.placement);
-  saveJson(STORAGE_KEYS.placementCardDismissed, state.placementCardDismissed);
+  saveJson(STORAGE_KEYS.calibration, state.calibration);
 }
 
 function renderBoard() {
-  els.board.innerHTML = "";
-
-  if (!areRequiredServicesReady()) {
-    els.board.innerHTML = `
-      <div class="service-board-gate">
-        <span>Required services</span>
-        <strong>Supabase and OpenAI must be online</strong>
-        <p>Use Settings or Check services to connect the database and personal coach.</p>
-      </div>
-    `;
+  if (boardDrag?.isDragging()) {
+    state.pendingBoardRender = true;
     return;
   }
+  state.pendingBoardRender = false;
+  els.board.innerHTML = "";
 
   const liveQualityCue = getLiveMoveQualityCue();
+  const selectedPiece = state.selectedSquare ? state.game.get(state.selectedSquare) : null;
 
   for (const square of getBoardSquares()) {
     const fileIndex = FILES.indexOf(square[0]);
     const rankIndex = Number(square[1]) - 1;
     const piece = state.game.get(square);
+    const legalTarget = state.legalTargets.has(square);
+    const targetCapture = legalTarget && selectedPiece && piece && piece.color !== selectedPiece.color;
     const squareQuality = liveQualityCue?.move.to === square ? liveQualityCue.quality : null;
     const practiceCue = getPracticeBoardCue(square);
     const button = document.createElement("button");
@@ -864,14 +951,20 @@ function renderBoard() {
       "square",
       (fileIndex + rankIndex) % 2 === 0 ? "dark" : "light",
       state.selectedSquare === square ? "selected" : "",
-      state.legalTargets.has(square) ? "target" : "",
-      state.lastMove && (state.lastMove.from === square || state.lastMove.to === square) ? "last" : "",
+      legalTarget ? "target" : "",
+      targetCapture ? "target-capture" : "",
+      state.lastMove?.from === square ? "last-from" : "",
+      state.lastMove?.to === square ? "last-to" : "",
       squareQuality ? "quality-cued" : "",
       squareQuality ? qualityClassName(squareQuality.key) : "",
       practiceCue?.className || "",
     ].filter(Boolean).join(" ");
     button.dataset.square = square;
     const ariaDetails = [
+      state.selectedSquare === square ? "Selected piece" : "",
+      legalTarget ? (targetCapture ? "Legal capture" : "Legal move") : "",
+      state.lastMove?.from === square ? "Last move started here" : "",
+      state.lastMove?.to === square ? "Last move ended here" : "",
       squareQuality ? `${squareQuality.label}: ${squareQuality.reason}` : "",
       practiceCue?.label || "",
     ].filter(Boolean).join(" ");
@@ -883,10 +976,12 @@ function renderBoard() {
     }
 
     if (piece) {
-      const span = document.createElement("span");
-      span.className = `piece ${piece.color}`;
-      span.textContent = PIECES[piece.color + piece.type];
-      button.append(span);
+      const img = document.createElement("img");
+      img.className = `piece ${piece.color}`;
+      img.src = pieceSpriteUrl(piece.color, piece.type);
+      img.alt = "";
+      img.draggable = false;
+      button.append(img);
     }
 
     if (squareQuality) {
@@ -930,7 +1025,18 @@ function getPlayerSeatSubLabel() {
   return `${colorName(playerColor)} · move ${moveNumber}`;
 }
 
-const PLACEMENT_INTENSITY = ["light", "light", "balanced", "challenging", "strongest"];
+function normalizeDisplayName(name) {
+  const normalized = String(name || "").trim().replace(/\s+/g, " ");
+  return normalized.slice(0, 32) || DEFAULT_SETTINGS.displayName;
+}
+
+function getDisplayName() {
+  return normalizeDisplayName(state.settings.displayName);
+}
+
+function getAvatarLabel(name = getDisplayName()) {
+  return normalizeDisplayName(name).slice(0, 1).toUpperCase() || "Y";
+}
 
 function getOpponentSeatLabels() {
   if (state.activeDrill) {
@@ -939,22 +1045,61 @@ function getOpponentSeatLabels() {
     }
     return { name: "Training Board", sub: state.activeDrill.type || "Drill" };
   }
-  const progress = getPlacementProgress();
-  if (!progress.complete) {
-    const level = Math.min(progress.completed + 1, progress.target);
-    const intensity = PLACEMENT_INTENSITY[level - 1] || "light";
-    return { name: "Placement Opponent", sub: `Level ${level} of 5 · ${intensity}` };
+  if (!isCalibrationComplete()) {
+    return { name: "Calibration MoBot", sub: "First game · finding your level" };
   }
   const score = getEstimatedTrainingScore();
-  return { name: "Adaptive Opponent", sub: score ? `Adaptive · score ${score}` : "Adaptive" };
+  return { name: "Adaptive MoBot", sub: score ? `Adaptive · score ${score}` : "Adaptive" };
 }
 
-function fillProgressDots(container, completed, total = 5) {
-  if (!container) return;
-  const dots = container.querySelectorAll("i");
-  for (let i = 0; i < dots.length; i++) {
-    dots[i].classList.toggle("on", i < Math.min(total, completed));
+function sortCapturedPieces(pieces) {
+  return [...pieces].sort((a, b) => {
+    const valueDiff = (PIECE_VALUES[b.type] || 0) - (PIECE_VALUES[a.type] || 0);
+    if (valueDiff) return valueDiff;
+    return CAPTURE_ORDER.indexOf(a.type) - CAPTURE_ORDER.indexOf(b.type);
+  });
+}
+
+function getCapturedPieces() {
+  const playerColor = state.activeDrill?.playerColor || state.settings.playerColor;
+  const capturedByPlayer = [];
+  const capturedByOpponent = [];
+
+  for (const move of state.moves) {
+    if (!move.captured) continue;
+    const capturedPiece = {
+      type: move.captured,
+      color: opposite(move.color),
+      value: PIECE_VALUES[move.captured] || 0,
+    };
+    if (move.color === playerColor) {
+      capturedByPlayer.push(capturedPiece);
+    } else {
+      capturedByOpponent.push(capturedPiece);
+    }
   }
+
+  return {
+    player: sortCapturedPieces(capturedByPlayer),
+    opponent: sortCapturedPieces(capturedByOpponent),
+  };
+}
+
+function getMaterialBalance(captures = getCapturedPieces()) {
+  const playerValue = captures.player.reduce((sum, piece) => sum + piece.value, 0);
+  const opponentValue = captures.opponent.reduce((sum, piece) => sum + piece.value, 0);
+  return playerValue - opponentValue;
+}
+
+function renderCapturedTray(label, pieces, balanceText = "") {
+  const pieceHtml = pieces.map((piece) => `
+    <span class="captured-piece ${piece.color}" aria-label="${escapeAttr(colorName(piece.color))} ${escapeAttr(pieceName(piece.type))}">${pieceImageHtml(piece.color, piece.type, "captured-piece-img")}</span>
+  `).join("");
+  return `
+    <span class="capture-label">${escapeHtml(toTitleCaseLabel(label))}</span>
+    <span class="captured-pieces">${pieceHtml || `<span class="capture-empty">${escapeHtml(toTitleCaseLabel("No captures"))}</span>`}</span>
+    ${balanceText ? `<span class="material-balance">${escapeHtml(balanceText)}</span>` : ""}
+  `;
 }
 
 function getStorageStatusLabel() {
@@ -973,8 +1118,8 @@ function isOpenAIReady() {
   return state.openAI.configured === true && state.openAI.online === true;
 }
 
-function areRequiredServicesReady() {
-  return isSupabaseReady() && isOpenAIReady();
+function isCoachAvailable() {
+  return isOpenAIReady();
 }
 
 function getRequiredServiceRows() {
@@ -1009,9 +1154,9 @@ function renderRequiredServicesCard() {
 
   return `
     <article class="mini-card service-gate-card">
-      <span class="label">Required services</span>
-      <strong>Supabase and OpenAI must be online</strong>
-      <p>The chess teacher is intentionally locked until the database and personal coach are reachable.</p>
+      <span class="label">Services</span>
+      <strong>Coach and sync status</strong>
+      <p>Play always works locally. The personal coach needs OpenAI; long-term history sync needs Supabase.</p>
       <div class="service-list">${rows}</div>
       <div class="button-row">
         <button id="checkRequiredServicesButton" type="button">Check services</button>
@@ -1026,55 +1171,71 @@ function bindRequiredServicesCard() {
   document.querySelector("#openSettingsButton")?.addEventListener("click", () => switchTab("settings"));
 }
 
-function renderLockedPanel(tab) {
-  const panel = {
-    coach: els.coachPanel,
-    review: els.reviewPanel,
-    practice: els.practicePanel,
-    profile: els.profilePanel,
-    lessons: els.lessonsPanel,
-  }[tab];
-
-  if (!panel) return false;
-  panel.innerHTML = `
-    <h2>${escapeHtml(tab)}</h2>
-    <div class="stack">
-      ${renderRequiredServicesCard()}
-    </div>
+function renderCoachOfflineBanner() {
+  if (isCoachAvailable()) return "";
+  return `
+    <article class="mini-card coach-offline-banner">
+      <span class="label">Coach offline</span>
+      <p>Playing with local analysis only. ${escapeHtml(state.openAI.status || "Connect OpenAI in Settings for personal coaching.")}</p>
+    </article>
   `;
-  bindRequiredServicesCard();
-  return true;
 }
 
 function renderGameMeta() {
-  const progress = getPlacementProgress();
-  const servicesReady = areRequiredServicesReady();
+  const activePlayerColor = state.activeDrill?.playerColor || state.settings.playerColor;
+  const playerToMove = state.game.turn() === activePlayerColor;
+  const gameOver = state.game.isGameOver();
+  const captures = getCapturedPieces();
+  const materialBalance = getMaterialBalance(captures);
 
   // Opponent seat
   const opponentLabels = getOpponentSeatLabels();
   els.opponentSeatName.textContent = opponentLabels.name;
   els.opponentSeatSub.textContent = opponentLabels.sub;
   if (els.opponentAvatar) {
-    els.opponentAvatar.textContent = state.activeDrill ? "T" : "N";
+    els.opponentAvatar.textContent = state.activeDrill ? "LAB" : "MO";
   }
-  fillProgressDots(els.opponentProgressDots, progress.completed, progress.target);
 
   // Player seat
+  if (els.playerSeatName) {
+    els.playerSeatName.textContent = getDisplayName();
+  }
+  if (els.playerAvatar) {
+    els.playerAvatar.textContent = getAvatarLabel();
+  }
   els.playerSeatSub.textContent = getPlayerSeatSubLabel();
-  const activePlayerColor = state.activeDrill?.playerColor || state.settings.playerColor;
-  const playerToMove = state.game.turn() === activePlayerColor;
-  els.playerSeatPill.classList.toggle("waiting", !servicesReady || !playerToMove);
-  els.playerSeatPill.innerHTML = `<span class="dot"></span> ${servicesReady ? (playerToMove ? "Your move" : "Opponent thinking") : "Services required"}`;
+  const playerPillText = gameOver
+    ? "Game Over"
+    : playerToMove
+      ? "Your Turn"
+      : "Waiting";
+  const opponentPillText = gameOver
+    ? "Game Over"
+    : playerToMove
+      ? "Waiting"
+      : (state.thinking ? "Opponent Thinking" : "Opponent Turn");
+  els.playerSeatPill.classList.toggle("active", !gameOver && playerToMove);
+  els.playerSeatPill.classList.toggle("waiting", gameOver || !playerToMove);
+  els.playerSeatPill.innerHTML = `<span class="dot"></span> ${escapeHtml(toTitleCaseLabel(playerPillText))}`;
+  if (els.opponentSeatPill) {
+    els.opponentSeatPill.classList.toggle("active", !gameOver && !playerToMove);
+    els.opponentSeatPill.classList.toggle("waiting", gameOver || playerToMove);
+    els.opponentSeatPill.innerHTML = `<span class="dot"></span> ${escapeHtml(toTitleCaseLabel(opponentPillText))}`;
+  }
+  if (els.playerCaptureTray) {
+    els.playerCaptureTray.classList.toggle("empty", captures.player.length === 0);
+    els.playerCaptureTray.innerHTML = renderCapturedTray("You captured", captures.player, materialBalance > 0 ? `+${materialBalance}` : "");
+  }
+  if (els.opponentCaptureTray) {
+    els.opponentCaptureTray.classList.toggle("empty", captures.opponent.length === 0);
+    els.opponentCaptureTray.innerHTML = renderCapturedTray("They captured", captures.opponent, materialBalance < 0 ? `+${Math.abs(materialBalance)}` : "");
+  }
 
   // Seat turn indicator
-  els.seatOpponent.classList.toggle("turn", servicesReady && !playerToMove);
-  els.seatPlayer.classList.toggle("turn", servicesReady && playerToMove);
-
-  // Coach card ribbon dots (rendered inside the coach panel — query lazily)
-  const coachDots = document.querySelector(".coach-card .progress-dots.coach");
-  if (coachDots) {
-    fillProgressDots(coachDots, progress.completed, progress.target);
-  }
+  els.seatOpponent.classList.toggle("turn", !gameOver && !playerToMove);
+  els.seatPlayer.classList.toggle("turn", !gameOver && playerToMove);
+  els.seatOpponent.classList.toggle("inactive-turn", !gameOver && playerToMove);
+  els.seatPlayer.classList.toggle("inactive-turn", !gameOver && !playerToMove);
 
   // Practice tab badge
   if (els.practiceBadge) {
@@ -1086,8 +1247,7 @@ function renderGameMeta() {
   // Ctx-head reflects the current tab
   updateCtxHead(state.currentTab);
 
-  els.newGameButton.disabled = !servicesReady || state.thinking || Boolean(state.activeDrill);
-  els.takeBackButton.disabled = !servicesReady || state.thinking || Boolean(state.activeDrill) || state.game.history().length < 2;
+  els.newGameButton.disabled = state.thinking || Boolean(state.activeDrill);
 }
 
 function updateCtxHead(tab) {
@@ -1097,7 +1257,6 @@ function updateCtxHead(tab) {
     review: "Review",
     practice: "Practice",
     profile: "Profile",
-    lessons: "Lessons",
     settings: "Settings",
   };
   els.ctxHeadTitle.textContent = titles[tab] || "";
@@ -1105,14 +1264,14 @@ function updateCtxHead(tab) {
 }
 
 function ctxHeadMetaFor(tab) {
-  const progress = getPlacementProgress();
+  const calibrated = isCalibrationComplete();
   switch (tab) {
     case "coach":
-      return progress.complete ? "Adaptive" : `Placement · ${progress.completed} / ${progress.target}`;
+      return calibrated ? "Adaptive" : "Calibration game";
     case "review":
       return state.moves.length ? `${state.moves.length} ${state.moves.length === 1 ? "ply" : "plies"}` : "";
     case "practice": {
-      if (progress.complete) {
+      if (calibrated) {
         const stats = getPracticeStats();
         return `Trainer · streak ${stats.streak}`;
       }
@@ -1121,8 +1280,6 @@ function ctxHeadMetaFor(tab) {
     }
     case "profile":
       return "";
-    case "lessons":
-      return `${STARTER_LESSONS.length} lessons`;
     case "settings":
       return state.openAI.status || "";
     default:
@@ -1131,16 +1288,10 @@ function ctxHeadMetaFor(tab) {
 }
 
 function renderCurrentPanel() {
-  if (!areRequiredServicesReady() && state.currentTab !== "settings") {
-    renderLockedPanel(state.currentTab);
-    return;
-  }
-
   if (state.currentTab === "coach") renderCoachPanel();
   if (state.currentTab === "review") renderReviewPanel();
   if (state.currentTab === "practice") renderPracticePanel();
   if (state.currentTab === "profile") renderProfilePanel();
-  if (state.currentTab === "lessons") renderLessonsPanel();
   if (state.currentTab === "settings") renderSettingsPanel();
 }
 
@@ -1179,75 +1330,119 @@ function renderCoachPanel() {
             `).join("")}
           </div>
         </article>
-        ${renderAICoachCard("drill")}
       </div>
     `;
-    bindAICoachButton("drill");
     return;
   }
 
-  const candidates = rankCandidateMoves(state.game.fen()).slice(0, 5);
-  const lastPlayerMove = [...state.moves].reverse().find((move) => move.role === "player");
-  const shouldShowCandidates = isPlacementComplete() || state.game.isCheck();
-  const candidateRows = candidates.slice(0, 3).map((move) => `
-    <div class="candidate-row">
-      <strong>${escapeHtml(move.san)}</strong>
-      <span>${escapeHtml(explainCandidateMove(state.game.fen(), move))}</span>
-    </div>
-  `).join("");
+  if (!isCalibrationComplete()) {
+    els.coachPanel.innerHTML = `
+      <h2>Coach</h2>
+      <div class="stack">
+        <article class="mini-card calibration-card">
+          <span class="label">Calibration game</span>
+          <strong>Play one game so I can meet you</strong>
+          <p>I'm watching quietly — no hints, no commentary. Play the moves you would normally play. When this game ends, coaching, move feedback, and adaptive difficulty all unlock.</p>
+        </article>
+        ${renderCoachOfflineBanner()}
+      </div>
+    `;
+    return;
+  }
 
   els.coachPanel.innerHTML = `
     <h2>Coach</h2>
-    <div class="stack">
-      ${renderPlacementCard()}
-      ${renderPositionBriefCard()}
-      ${shouldShowCandidates ? `<article class="mini-card">
-        <strong>Candidate moves</strong>
-        <p>${escapeHtml(getCandidateMovePrompt())}</p>
-        <div class="candidate-list coach-candidates">
-          ${candidateRows || "<p class=\"empty-state\">No legal moves.</p>"}
-        </div>
-      </article>` : ""}
-      ${lastPlayerMove ? renderMoveReviewCard(lastPlayerMove) : ""}
-      ${renderAICoachCard("position")}
+    <div class="coach-chat">
+      ${renderCoachOfflineBanner()}
+      ${renderRethinkCard()}
+      <div class="coach-chat-log" id="coachChatLog" aria-live="polite">
+        ${renderChatMessages()}
+      </div>
+      <form class="coach-chat-form" id="coachChatForm">
+        <input
+          id="coachChatInput"
+          type="text"
+          autocomplete="off"
+          placeholder="${state.pendingCoachQuestion ? "Answer the coach..." : "Ask your coach anything..."}"
+          ${isCoachAvailable() ? "" : "disabled"}
+        >
+        <button type="submit" ${isCoachAvailable() && !state.coachThinking ? "" : "disabled"}>Send</button>
+      </form>
     </div>
   `;
-  bindPlacementDismiss();
-  bindAICoachButton("position");
+  bindCoachChat();
+  scrollChatToBottom();
 }
 
-function renderPlacementCard() {
-  if (state.placementCardDismissed) return "";
-
-  const progress = getPlacementProgress();
-  const score = getEstimatedTrainingScore();
-
-  if (progress.complete) {
-    return `
-      <article class="mini-card placement-card dismissible-card">
-        <button class="dismiss-card-button" type="button" data-dismiss-placement aria-label="Hide placement card">x</button>
-        <span class="label">Player model</span>
-        <strong>Personal coach unlocked</strong>
-        <p>Your first ${progress.target} completed games set the starting score${score ? ` at ${score}` : ""}. Bot strength now adapts from recent results, mistake severity, and practice outcomes.</p>
-      </article>
-    `;
+function renderChatMessages() {
+  const messages = getCurrentChatMessages();
+  if (!messages.length) {
+    return `<p class="empty-state coach-chat-empty">I'm here for the whole game — I'll speak up at important moments, and you can ask me anything: plans, threats, what to study.</p>`;
   }
+  const rows = messages.map((message) => `
+    <div class="chat-message ${message.role === "user" ? "from-user" : "from-coach"} ${message.isQuestion ? "coach-question" : ""}">
+      ${escapeHtml(message.content)}
+    </div>
+  `).join("");
+  const thinking = state.coachThinking
+    ? '<div class="chat-message from-coach chat-thinking"><span></span><span></span><span></span></div>'
+    : "";
+  const error = state.coachError
+    ? `<div class="chat-message chat-error">${escapeHtml(state.coachError)}</div>`
+    : "";
+  return rows + thinking + error;
+}
 
+function scrollChatToBottom() {
+  const log = document.querySelector("#coachChatLog");
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function bindCoachChat() {
+  document.querySelector("#coachChatForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#coachChatInput");
+    const text = input?.value.trim();
+    if (!text || state.coachThinking) return;
+    input.value = "";
+    handleUserChatMessage(text);
+  });
+  bindRethinkCard();
+}
+
+function renderSkillFocusCard() {
+  if (!isCalibrationComplete()) return "";
+  const focus = getNextTrainingFocus();
+  if (!focus) return "";
+  const skill = getSkillById(focus.skillId);
+  if (!skill) return "";
+  const counts = getSkillLabCounts(skill);
   return `
-    <article class="mini-card placement-card dismissible-card">
-      <button class="dismiss-card-button" type="button" data-dismiss-placement aria-label="Hide placement card">x</button>
-      <span class="label">Placement</span>
-      <strong>Game ${progress.completed + 1} of ${progress.target}</strong>
-      <p>Finish ${progress.remaining} more completed game${progress.remaining === 1 ? "" : "s"} to unlock the personal coach. The opponent adjusts automatically while the app watches results, openings, and mistake patterns.</p>
+    <article class="mini-card skill-focus-card">
+      <span class="label">Today's skill focus</span>
+      <strong>${escapeHtml(skill.label)}</strong>
+      <p>${escapeHtml(focus.reason)}</p>
+      <div class="tag-list">
+        <span class="tag">${escapeHtml(formatCountLabel(counts.focus, "focus board", "focus boards"))}</span>
+        <span class="tag">${escapeHtml(formatCountLabel(counts.game_transfer, "from your game", "from your games"))}</span>
+      </div>
+      <div class="button-row">
+        <button class="primary-action" type="button" data-open-skill-lab="${escapeAttr(skill.id)}">Open skill lab</button>
+        <button type="button" data-start-focus-lab="${escapeAttr(skill.id)}">Start focus board</button>
+      </div>
     </article>
   `;
 }
 
-function bindPlacementDismiss() {
-  document.querySelector("[data-dismiss-placement]")?.addEventListener("click", () => {
-    state.placementCardDismissed = true;
-    saveJson(STORAGE_KEYS.placementCardDismissed, state.placementCardDismissed);
-    renderCoachPanel();
+function bindSkillFocusButtons(root = document) {
+  root.querySelectorAll("[data-open-skill-lab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedSkillId = button.dataset.openSkillLab;
+      switchTab("practice");
+    });
+  });
+  root.querySelectorAll("[data-start-focus-lab]").forEach((button) => {
+    button.addEventListener("click", () => startSkillLab(button.dataset.startFocusLab, "focus"));
   });
 }
 
@@ -1259,7 +1454,7 @@ function renderPositionBriefCard() {
       <p>${escapeHtml(brief.body)}</p>
       ${brief.details.length ? `
         <div class="tag-list">
-          ${brief.details.map((detail) => `<span class="tag">${escapeHtml(detail)}</span>`).join("")}
+          ${brief.details.map((detail) => `<span class="tag">${escapeHtml(toTitleCaseLabel(detail))}</span>`).join("")}
         </div>
       ` : ""}
     </article>
@@ -1271,32 +1466,40 @@ function renderMoveReviewCard(move) {
   const pendingQuality = move.qualityEligible && move.analysisStatus === "pending" && !quality;
   const moveTags = move.tags || [];
   const tags = moveTags.length
-    ? moveTags.map((tag) => `<span class="tag ${tag.severity >= 3 ? "danger" : "warn"}">${escapeHtml(tag.label)}</span>`).join("")
-    : "<span class=\"tag good\">No issue tagged</span>";
+    ? moveTags.map((tag) => `<span class="tag ${tag.severity >= 3 ? "danger" : "warn"}">${escapeHtml(toTitleCaseLabel(formatTagTerm(tag)))}</span>`).join("")
+    : `<span class="tag good">${escapeHtml(toTitleCaseLabel("No issue tagged"))}</span>`;
   const qualityPill = quality
-    ? `<span class="quality-pill ${qualityClassName(quality.key)}">${renderQualityBadgeHtml(move, "inline-quality-badge")}${escapeHtml(quality.label)}</span>`
+    ? `<span class="quality-pill ${qualityClassName(quality.key)}">${renderQualityBadgeHtml(move, "inline-quality-badge")}${escapeHtml(toTitleCaseLabel(quality.label))}</span>`
     : pendingQuality
-      ? "<span class=\"quality-pill quality-pending\">Analyzing</span>"
+      ? `<span class="quality-pill quality-pending">${escapeHtml(toTitleCaseLabel("Analyzing"))}</span>`
       : "";
+  const reviewLines = formatMoveReviewTeaching(move, quality);
+  const explanations = moveTags.map((tag) => `
+    <div class="candidate-row teaching-row">
+      <strong>${escapeHtml(formatTagTerm(tag))}</strong>
+      <span>${escapeHtml(explainMoveTag(tag, move))}</span>
+    </div>
+  `).join("");
 
   return `
     <article class="mini-card">
-      <strong>Move review: ${escapeHtml(move.san)}</strong>
+      <strong>You played ${escapeHtml(move.san)}</strong>
       ${qualityPill ? `<div class="quality-summary">${qualityPill}</div>` : ""}
-      <p>${escapeHtml(quality?.reason || describeMoveImpact(move))}</p>
+      ${reviewLines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
       <div class="tag-list">${tags}</div>
+      ${explanations ? `<div class="candidate-list coach-candidates">${explanations}</div>` : ""}
     </article>
   `;
 }
 
 function getCandidateMovePrompt() {
   if (state.game.isGameOver()) return "The game is complete. Review the move list to find the turning point.";
-  if (state.game.isCheck()) return "You are in check. Compare king moves, captures of the checking piece, and blocks.";
+  if (state.game.isCheck()) return "You are in check. Candidate moves are the legal replies: king moves, captures of the checking piece, and blocks.";
   const lastEngineMove = [...state.moves].reverse().find((move) => move.role === "engine");
   if (lastEngineMove) {
-    return `After ${lastEngineMove.san}, first ask what changed, then compare the forcing candidates below.`;
+    return `A candidate move is a move worth checking before deciding. After ${lastEngineMove.san}, ask what changed, then compare the forcing options below.`;
   }
-  return "Before choosing, compare forcing moves and one improving move from the current board.";
+  return "A candidate move is a move worth checking before deciding. Compare forcing moves and one improving move from the current board.";
 }
 
 function getPositionBrief() {
@@ -1319,24 +1522,55 @@ function getPositionBrief() {
   const lastEngineMove = [...state.moves].reverse().find((move) => move.role === "engine");
   const threat = getOpponentThreatSummary();
   const opening = detectOpening();
-  const details = [getPhase(state.game), opening.name].filter(Boolean);
+  const details = [
+    formatPhaseLabel(getPhase(state.game)),
+    shouldShowOpeningContext(opening) ? "opening context" : "",
+  ].filter(Boolean);
 
   if (lastEngineMove) {
     const impact = describeMoveImpact(lastEngineMove);
+    const body = [
+      impact,
+      threat ? `Check whether ${colorName(opposite(state.settings.playerColor))} is threatening ${threat}.` : "",
+      formatOpeningContext(opening),
+    ].filter(Boolean).join(" ");
     return {
       title: `Position after ${lastEngineMove.san}`,
-      body: threat ? `${impact} Main danger to check: ${threat}.` : impact,
+      body,
       details,
     };
   }
 
   return {
     title: "Starting position",
-    body: isPlacementComplete()
+    body: isCalibrationComplete()
       ? "Choose a first move that fits the opening you want to practice. The coach will adapt the plan from your game history."
-      : "Play the move you would normally choose. Placement is measuring habits first; after each move, the coach will review what changed.",
-    details,
+      : "Play the move you would normally choose. This calibration game measures your habits; the coach unlocks when it ends.",
+    details: details.filter((detail) => detail !== "opening context"),
   };
+}
+
+function formatPhaseLabel(phase) {
+  if (phase === "opening") return "opening";
+  if (phase === "middlegame") return "middlegame";
+  if (phase === "endgame") return "endgame";
+  return "";
+}
+
+function shouldShowOpeningContext(opening) {
+  return Boolean(opening?.name && !["Starting position", "Unbooked line"].includes(opening.name));
+}
+
+function formatOpeningContext(opening) {
+  if (!opening?.name) return "";
+  if (opening.name === "Starting position") return "";
+  if (opening.name === "Unbooked line") {
+    return "This is no longer a named book line, which is fine. Use the position in front of you instead of memorizing a name.";
+  }
+  const planText = Array.isArray(opening.plans) && opening.plans.length
+    ? ` The useful idea is: ${formatPlanList(opening.plans.slice(0, 2))}`
+    : "";
+  return `Opening context: ${opening.name} is a common early setup. You do not need to memorize the name yet.${planText}`;
 }
 
 function getOpponentThreatSummary() {
@@ -1362,84 +1596,120 @@ function describeMoveImpact(move) {
     parts.push(`It developed a ${pieceName(move.piece)}.`);
   }
   if (isCenterSquare(move.to)) parts.push(`It contested ${move.to}.`);
-  if (move.tags?.length) {
-    parts.push(move.note || move.tags[0].note);
-  } else if (move.role === "player") {
+  if (move.role === "player" && !move.tags?.length) {
     parts.push(move.note || "No immediate issue was tagged, but still compare the opponent's next forcing move.");
-  } else {
+  } else if (move.role !== "player") {
     parts.push("Now check what this attacks, defends, or leaves behind.");
   }
   return parts.join(" ");
 }
 
-function renderAICoachCard(context) {
-  const data = state.aiCoach.data;
-  const loading = state.aiCoach.loading;
-  const hasData = data && state.aiCoach.context === context;
-  const progress = getPlacementProgress();
+function formatMoveReviewTeaching(move, quality) {
+  const lines = [];
+  const impact = describeMoveImpact(move);
+  if (impact) lines.push(`What changed: ${impact}`);
+  if (quality?.reason) lines.push(quality.reason);
 
-  if (!progress.complete) {
-    return `
-      <article class="mini-card ai-coach-card locked-card">
-        <span class="label">Personal coach</span>
-        <strong>Locked during placement</strong>
-        <p>Complete ${progress.remaining} more game${progress.remaining === 1 ? "" : "s"} first. Until then the app records results, mistakes, openings, and practice outcomes so the coach has enough personal evidence to work from.</p>
-      </article>
-    `;
+  const primary = move.tags?.[0];
+  if (primary) {
+    lines.push(formatHabitForTag(primary, move));
+  } else if (!quality?.reason) {
+    lines.push("Habit: after every move, check what your opponent can force next.");
   }
 
-  if (loading) {
-    return `
-      <article class="mini-card ai-coach-card">
-        <strong>Personal coach</strong>
-        <p>Reading your current position, recent games, weaknesses, and practice history...</p>
-      </article>
-    `;
-  }
-
-  if (state.aiCoach.error) {
-    return `
-      <article class="mini-card ai-coach-card">
-        <strong>Personal coach</strong>
-        <p>${escapeHtml(state.aiCoach.error)}</p>
-        <button id="askAICoachButton" type="button">Try again</button>
-      </article>
-    `;
-  }
-
-  if (!hasData) {
-    return `
-      <article class="mini-card ai-coach-card">
-        <strong>Personal coach</strong>
-        <p>${state.openAI.configured ? "Use OpenAI to tailor this advice to your actual games, mistakes, openings, and practice history." : "Connect an OpenAI key in .env and restart the Node server to unlock personalized coaching."}</p>
-        <button id="askAICoachButton" type="button">${state.openAI.configured ? "Ask personal coach" : "Check coach setup"}</button>
-      </article>
-    `;
-  }
-
-  const candidateRows = (data.candidate_explanations || []).map((item) => `
-    <div class="candidate-row">
-      <strong>${escapeHtml(item.move || "Move")}</strong>
-      <span>${escapeHtml(item.reason || "")}</span>
-    </div>
-  `).join("");
-  const practiceRows = (data.practice_recommendations || []).map((item) => `<span class="candidate">${escapeHtml(item)}</span>`).join("");
-
-  return `
-    <article class="mini-card ai-coach-card">
-      <span class="label">Personal coach${state.openAI.model ? ` - ${escapeHtml(state.openAI.model)}` : ""}</span>
-      <strong>${escapeHtml(data.summary || "Personalized read")}</strong>
-      <p>${escapeHtml(data.plan || "")}</p>
-      ${candidateRows ? `<div class="candidate-list coach-candidates">${candidateRows}</div>` : ""}
-      ${data.weakness_focus ? `<p><strong>Focus:</strong> ${escapeHtml(data.weakness_focus)}</p>` : ""}
-      ${practiceRows ? `<div class="tag-list">${practiceRows}</div>` : ""}
-      <button id="askAICoachButton" type="button">Refresh personal coach</button>
-    </article>
-  `;
+  return lines.length ? lines : ["No immediate issue was tagged. Still check the opponent's forcing reply before relaxing."];
 }
 
-function bindAICoachButton(context) {
-  document.querySelector("#askAICoachButton")?.addEventListener("click", () => requestAICoach(context));
+function formatHabitForTag(tag, move) {
+  const bestMove = move.bestMoveSan || move.bestMoveUci || extractMoveFromNote(move.note) || "";
+  if (tag.category === "candidate_moves") {
+    return bestMove
+      ? `Habit: before quiet moves, name one move worth checking. Here, ${bestMove} was worth checking first.`
+      : "Habit: before quiet moves, name one forcing move worth checking first.";
+  }
+  if (tag.category === "missed_pin" || tag.category === "missed_line_tactic") {
+    return "Habit: scan bishop, rook, and queen lines before moving. A line piece can freeze a defender when something valuable sits behind it.";
+  }
+  if (tag.category === "missed_fork") {
+    return "Habit: look for moves that attack two targets at once, especially checks by knights and queens.";
+  }
+  if (tag.category === "missed_mate") {
+    return "Habit: check every legal check before choosing a quiet move.";
+  }
+  if (tag.category === "missed_capture" || tag.category === "hanging_piece") {
+    return "Habit: before choosing a plan, ask which pieces are loose and whether any capture is safe.";
+  }
+  if (tag.category === "poor_trade") {
+    return "Habit: calculate capture, recapture, and the final position before starting a trade.";
+  }
+  if (tag.category === "opening_principle") {
+    return "Habit: in the opening, prefer center control, one new developed piece, and king safety before side ideas.";
+  }
+  if (tag.category === "king_safety") {
+    return "Habit: when your king is central or exposed, check opponent checks before taking material.";
+  }
+  return tag.note || "Habit: pause before moving and compare at least one forcing alternative.";
+}
+
+function extractMoveFromNote(note) {
+  const match = String(note || "").match(/\b([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?|O-O(?:-O)?)\b/);
+  return match?.[1] || "";
+}
+
+function formatTagTerm(tag) {
+  const terms = {
+    candidate_moves: "Candidate move",
+    missed_pin: "Pin",
+    missed_line_tactic: "Line tactic",
+    missed_skewer: "Skewer",
+    missed_fork: "Fork",
+    missed_mate: "Checkmate",
+    missed_capture: "Loose piece",
+    hanging_piece: "Loose piece",
+    poor_trade: "Trade",
+    opening_principle: "Opening habit",
+    king_safety: "King safety",
+  };
+  return terms[tag?.category] || tag?.label || "Habit";
+}
+
+function explainMoveTag(tag, move) {
+  const note = tag?.note || move.note || "";
+  const bestMove = move.bestMoveSan || move.bestMoveUci || extractMoveFromNote(move.note) || "";
+  const suffix = note ? ` ${note}` : "";
+  if (tag.category === "candidate_moves") {
+    return bestMove
+      ? `A candidate move is a move worth checking before deciding. ${bestMove} deserved a look because forcing moves can change the position immediately.`
+      : "A candidate move is a move worth checking before deciding, usually a check, capture, threat, or important defensive move.";
+  }
+  if (tag.category === "missed_pin") {
+    return `A pin means one piece is stuck because the king or a more valuable piece is behind it.${suffix}`;
+  }
+  if (tag.category === "missed_line_tactic") {
+    return `A line tactic uses a bishop, rook, or queen along a rank, file, or diagonal.${suffix}`;
+  }
+  if (tag.category === "missed_skewer") {
+    return `A skewer attacks the valuable front piece first, then wins what sits behind it.${suffix}`;
+  }
+  if (tag.category === "missed_fork") {
+    return `A fork is one move that attacks two important targets at the same time.${suffix}`;
+  }
+  if (tag.category === "missed_mate") {
+    return `Checkmate means the king is attacked and has no legal escape.${suffix}`;
+  }
+  if (tag.category === "missed_capture" || tag.category === "hanging_piece") {
+    return `A loose piece is not defended enough. Look for safe captures before quiet moves.${suffix}`;
+  }
+  if (tag.category === "poor_trade") {
+    return `A trade is only good if the final position after the recapture is good for you.${suffix}`;
+  }
+  if (tag.category === "opening_principle") {
+    return `Opening habits are about reaching a playable middlegame: center, development, and king safety.${suffix}`;
+  }
+  if (tag.category === "king_safety") {
+    return `King safety matters because checks can force every move after that.${suffix}`;
+  }
+  return note || "This is a thinking habit to check before choosing your move.";
 }
 
 function formatPlanList(plans) {
@@ -1527,34 +1797,54 @@ function buildPracticePrompt(item) {
   return `${item.prompt} ${guide.drill}`;
 }
 
-function buildPersonalLessonGuide(lesson) {
-  if (!lesson) return LESSON_GUIDES.candidate_moves;
+function buildPersonalSkillGuide(skill) {
+  if (!skill) return LESSON_GUIDES.candidate_moves;
 
-  const guide = LESSON_GUIDES[lesson.category] || LESSON_GUIDES.candidate_moves;
-  const weakness = state.profile[lesson.category];
+  const categories = getSkillCategories(skill);
+  const primaryCategory = categories.find((category) => state.profile[category]) || skill.categoryAliases?.[0] || categories[0] || "candidate_moves";
+  const guide = LESSON_GUIDES[primaryCategory] || LESSON_GUIDES.candidate_moves;
+  const weakness = categories.map((category) => state.profile[category]).find(Boolean);
   const latestExample = weakness?.examples?.[0];
   const opening = detectOpening();
   const candidates = rankCandidateMoves(state.game.fen()).slice(0, 2).map((move) => move.san);
 
   if (weakness?.count) {
     return {
-      why: `${lesson.title} is showing up in your games ${weakness.count} time${weakness.count === 1 ? "" : "s"}. Most recent note: ${weakness.lastNote || latestExample?.note || guide.why}`,
+      why: `${skill.label} is showing up in your games ${weakness.count} time${weakness.count === 1 ? "" : "s"}. Most recent note: ${weakness.lastNote || latestExample?.note || guide.why}`,
       lookFor: [
-        ...guide.lookFor.slice(0, 2),
+        skill.scanPrompt,
         latestExample?.san ? `Review your ${latestExample.san} decision` : `Compare ${candidates.join(" and ") || "candidate moves"}`,
       ],
       drill: latestExample?.san
         ? `Replay the position before ${latestExample.san}. Before moving, say what your opponent threatens and why your candidate fixes or improves it.`
-        : guide.drill,
+        : skill.focusPrompt || guide.drill,
     };
   }
 
   return {
-    why: `${lesson.title} has not become a recurring weakness yet. In your current ${opening.name} position, use it as a thinking checkpoint before you move.`,
+    why: `${skill.label} has not become a recurring weakness yet. In this ${formatOpeningForGuide(opening)}, use it as a thinking checkpoint before you move.`,
     lookFor: candidates.length
       ? [`Compare ${candidates[0]}`, candidates[1] ? `Compare ${candidates[1]}` : "Find one quiet improving move", ...guide.lookFor.slice(0, 1)]
       : guide.lookFor,
-    drill: `From the current board, choose a move and explain which ${lesson.concepts[0] || "idea"} it improves. ${guide.drill}`,
+    drill: skill.focusPrompt || `From the current board, choose a move and explain which ${skill.concepts?.[0] || "idea"} it improves. ${guide.drill}`,
+  };
+}
+
+function formatOpeningForGuide(opening) {
+  if (shouldShowOpeningContext(opening)) return `${opening.name} setup, a common opening pattern`;
+  if (opening?.name === "Unbooked line") return "position outside a named opening line";
+  return "position";
+}
+
+function buildFoundationSkillGuide(skill) {
+  if (!skill) return LESSON_GUIDES.candidate_moves;
+  return {
+    why: `The coach is still learning your baseline. For now, ${skill.label.toLowerCase()} boards are general practice, not a claim about your weaknesses.`,
+    lookFor: [
+      skill.scanPrompt,
+      "Play normally so the coach can learn from real decisions.",
+    ],
+    drill: skill.focusPrompt || "Use the board to practice one clear thinking habit before you move.",
   };
 }
 
@@ -1571,10 +1861,15 @@ function getCategoryPriority(category) {
   return Math.max(0, weaknessScore + recentMistakeScore + queuedScore + missedScore - solvedScore);
 }
 
-function getPriorityReason(category) {
-  const weakness = state.profile[category];
-  const missed = state.practiceHistory.filter((item) => item.category === category && item.result === "missed").length;
-  const queued = state.practiceQueue.filter((item) => item.category === category).length;
+function getSkillPriority(skill) {
+  return getSkillCategories(skill).reduce((sum, category) => sum + getCategoryPriority(category), 0);
+}
+
+function getSkillPriorityReason(skill) {
+  const categories = getSkillCategories(skill);
+  const weakness = categories.map((category) => state.profile[category]).find(Boolean);
+  const missed = state.practiceHistory.filter((item) => categories.includes(item.category) && item.result === "missed").length;
+  const queued = state.practiceQueue.filter((item) => categories.includes(item.category)).length;
 
   if (weakness?.count) {
     return `${weakness.label} has appeared ${weakness.count} time${weakness.count === 1 ? "" : "s"} in your games.`;
@@ -1588,17 +1883,17 @@ function getPriorityReason(category) {
     return `${queued} practice position${queued === 1 ? "" : "s"} are waiting from your games.`;
   }
 
-  return "Foundation skill: keep it warm even when it is not your top weakness.";
+  return skill.summary || "Foundation skill: keep it warm even when it is not your top weakness.";
 }
 
-function prioritizeLessons() {
-  return STARTER_LESSONS
-    .map((lesson) => ({
-      ...lesson,
-      priority: getCategoryPriority(lesson.category),
-      reason: getPriorityReason(lesson.category),
+function prioritizeSkills() {
+  return SKILL_CATALOG
+    .map((skill) => ({
+      ...skill,
+      priority: getSkillPriority(skill),
+      reason: getSkillPriorityReason(skill),
     }))
-    .sort((a, b) => b.priority - a.priority || a.title.localeCompare(b.title));
+    .sort((a, b) => b.priority - a.priority || a.label.localeCompare(b.label));
 }
 
 function prioritizeTrainingModules() {
@@ -1606,30 +1901,46 @@ function prioritizeTrainingModules() {
     .map((module) => ({
       ...module,
       priority: getCategoryPriority(module.category),
-      reason: getPriorityReason(module.category),
+      reason: getSkillPriorityReason(getSkillForCategory(module.category)),
     }))
     .sort((a, b) => b.priority - a.priority || a.title.localeCompare(b.title));
 }
 
 function getNextTrainingFocus() {
-  const lessons = prioritizeLessons();
-  const top = lessons[0];
+  const skills = prioritizeSkills();
+  const top = skills[0];
   if (!top) return null;
   return {
-    category: top.category,
-    title: top.title,
+    skillId: top.id,
+    category: top.categoryAliases?.[0] || "candidate_moves",
+    title: top.label,
     priority: top.priority,
     reason: top.reason,
   };
 }
 
-function normalizePlacementState() {
-  state.placement = {
-    ...DEFAULT_PLACEMENT,
-    ...state.placement,
-    games: Array.isArray(state.placement?.games) ? state.placement.games : [],
-    completedGameIds: Array.isArray(state.placement?.completedGameIds) ? state.placement.completedGameIds : [],
-  };
+function normalizeCalibrationState() {
+  state.calibration = { ...DEFAULT_CALIBRATION, ...state.calibration };
+}
+
+// Users who finished (or even started) the old 5-game placement flow already
+// gave the app real evidence — count them as calibrated and reuse their score.
+function migrateLegacyPlacement() {
+  const legacy = loadJson(LEGACY_STORAGE_KEYS.placement, null);
+  if (legacy) {
+    const legacyGames = Array.isArray(legacy.games) ? legacy.games.length : 0;
+    if (!state.calibration.done && (legacy.completedAt || legacyGames >= 1)) {
+      state.calibration = {
+        done: true,
+        gameId: legacy.games?.[0]?.gameId || null,
+        estimatedScore: Number(legacy.estimatedScore) || estimateTrainingScoreFromGames(legacy.games || []),
+        completedAt: legacy.completedAt || new Date().toISOString(),
+      };
+      saveJson(STORAGE_KEYS.calibration, state.calibration);
+    }
+  }
+  localStorage.removeItem(LEGACY_STORAGE_KEYS.placement);
+  localStorage.removeItem(LEGACY_STORAGE_KEYS.placementCardDismissed);
 }
 
 function getCompletedGames() {
@@ -1660,7 +1971,7 @@ function summarizeMistakes(moves = []) {
   };
 }
 
-function summarizeGameForPlacement(gameRecord) {
+function summarizeGameForScore(gameRecord) {
   const mistakes = summarizeMistakes(gameRecord.moves || []);
   return {
     gameId: gameRecord.id,
@@ -1674,33 +1985,47 @@ function summarizeGameForPlacement(gameRecord) {
   };
 }
 
-function getPlacementGames() {
-  normalizePlacementState();
-  const stored = state.placement.games.slice(0, PLACEMENT_TARGET_GAMES);
-  const storedIds = new Set(stored.map((game) => game.gameId));
-  const derived = getCompletedGames()
-    .filter((game) => !storedIds.has(game.id))
-    .map(summarizeGameForPlacement)
-    .slice(0, Math.max(0, PLACEMENT_TARGET_GAMES - stored.length));
-  return [...stored, ...derived].slice(0, PLACEMENT_TARGET_GAMES);
+function isCalibrationComplete() {
+  return state.calibration?.done === true;
 }
 
-function getPlacementCompletedCount() {
-  return Math.min(PLACEMENT_TARGET_GAMES, getPlacementGames().length);
+// ─────────── Per-dimension skill model ───────────
+
+function ensureSkillState() {
+  if (state.skill?.dims) return state.skill;
+  const seedScore = Number(state.calibration?.estimatedScore) || null;
+  state.skill = seedScore ? seedSkillStateFromScore(seedScore) : createEmptySkillState();
+  saveJson(STORAGE_KEYS.skill, state.skill);
+  return state.skill;
 }
 
-function isPlacementComplete() {
-  return getPlacementCompletedCount() >= PLACEMENT_TARGET_GAMES;
+function updateSkillFromMove(record) {
+  if (!record || record.role !== "player" || state.activeDrill) return;
+  const skill = ensureSkillState();
+  applyMoveToSkillState(skill, {
+    phase: getPhase(record.beforeFen || state.game.fen()),
+    tags: record.tags,
+    qualityKey: record.qualityKey,
+    evalDelta: record.evalDelta,
+    mateBefore: record.mateBefore,
+    mateAfter: record.mateAfter,
+  });
+  saveJson(STORAGE_KEYS.skill, skill);
 }
 
-function getPlacementProgress() {
-  const completed = getPlacementCompletedCount();
-  return {
-    completed,
-    target: PLACEMENT_TARGET_GAMES,
-    remaining: Math.max(0, PLACEMENT_TARGET_GAMES - completed),
-    complete: completed >= PLACEMENT_TARGET_GAMES,
-  };
+function updateSkillFromGameResult(result) {
+  const skill = ensureSkillState();
+  applyGameResultToSkillState(skill, {
+    resultScore: getPlayerResultScore(result, state.settings.playerColor),
+    opponentElo: getCurrentBotElo(),
+  });
+  saveJson(STORAGE_KEYS.skill, skill);
+  syncSkillRatings(skill);
+}
+
+// True while the current game IS the calibration game.
+function isCalibrationGameActive() {
+  return !isCalibrationComplete() && !state.activeDrill;
 }
 
 function estimateTrainingScoreFromGames(games) {
@@ -1713,10 +2038,16 @@ function estimateTrainingScoreFromGames(games) {
   return clamp(Math.round(total / games.length), 400, 1800);
 }
 
+// Continuous calibration: the per-dimension skill model is the source of
+// truth once it has data; otherwise blend the calibration seed with recent
+// game evidence.
 function getEstimatedTrainingScore() {
-  const placementScore = Number(state.placement?.estimatedScore);
-  if (placementScore) return placementScore;
-  return estimateTrainingScoreFromGames(getPlacementGames()) || estimateTrainingScoreFromGames(getCompletedGames().map(summarizeGameForPlacement));
+  const skillOverall = state.skill?.dims ? overallRating(state.skill) : null;
+  if (skillOverall) return skillOverall;
+  const seed = Number(state.calibration?.estimatedScore) || null;
+  const recentScore = estimateTrainingScoreFromGames(getCompletedGames().slice(0, 8).map(summarizeGameForScore));
+  if (seed && recentScore) return Math.round((seed + recentScore * 2) / 3);
+  return recentScore || seed;
 }
 
 function getAdaptiveBotDepth() {
@@ -1739,40 +2070,79 @@ function getAdaptiveBotDepth() {
 }
 
 function getCurrentBotDepth() {
-  if (!isPlacementComplete()) {
-    return PLACEMENT_DEPTHS[Math.min(getPlacementCompletedCount(), PLACEMENT_DEPTHS.length - 1)];
+  if (!isCalibrationComplete()) {
+    return CALIBRATION_DEPTH;
   }
   return getAdaptiveBotDepth();
 }
 
+// Human-like opponent strength: Stockfish is Elo-limited instead of only
+// depth-capped, so weaker settings blunder like people rather than playing
+// shallow-but-perfect chess.
+function getCurrentBotElo() {
+  if (!isCalibrationComplete()) {
+    return 1100;
+  }
+  const score = getEstimatedTrainingScore() || 900;
+  const recent = getCompletedGames().slice(0, 3).map((game) => getPlayerResultScore(game.result, game.playerColor));
+  let elo = score;
+  if (recent.length >= 2) {
+    const average = recent.reduce((sum, value) => sum + value, 0) / recent.length;
+    if (average >= 0.67) elo += 100;
+    if (average <= 0.25) elo -= 100;
+  }
+  return clamp(Math.round(elo), 500, 2400);
+}
+
 function getOpponentStatusLabel() {
   if (state.activeDrill) return "Training board";
-  const progress = getPlacementProgress();
-  if (!progress.complete) {
-    return `Placement opponent ${progress.completed + 1}/${progress.target}`;
-  }
+  if (!isCalibrationComplete()) return "Calibration opponent";
   return "Adaptive opponent";
 }
 
-function recordCompletedGameForPlacement(result) {
-  normalizePlacementState();
-  if (state.placement.completedGameIds.includes(state.currentGameId)) return;
+// Average centipawn loss over graded player moves; null with too little data.
+function computeGameAcpl(moves) {
+  const losses = (moves || [])
+    .filter((move) => move.role === "player" && Number.isFinite(move.evalDelta))
+    .map((move) => Math.max(0, -move.evalDelta));
+  if (losses.length < 4) return null;
+  return losses.reduce((sum, value) => sum + value, 0) / losses.length;
+}
+
+function recordCompletedGameForCalibration(result) {
+  normalizeCalibrationState();
+  if (state.calibration.done) return;
 
   const current = state.localGames.find((game) => game.id === state.currentGameId);
   if (!current) return;
 
-  const summary = summarizeGameForPlacement({ ...current, result });
-  state.placement.completedGameIds = [...new Set([...state.placement.completedGameIds, state.currentGameId])];
+  const resultScore = getPlayerResultScore(result, current.playerColor || state.settings.playerColor);
+  const acpl = computeGameAcpl(current.moves);
+  const summary = summarizeGameForScore({ ...current, result });
+  const acplPenalty = acpl === null
+    ? (summary.averageMistakeSeverity || 0) * 40
+    : acpl * 1.6;
+  const score = clamp(Math.round(600 + CALIBRATION_DEPTH * 70 + resultScore * 260 - acplPenalty), 400, 1800);
 
-  if (state.placement.games.length < PLACEMENT_TARGET_GAMES) {
-    state.placement.games = [...state.placement.games, summary].slice(0, PLACEMENT_TARGET_GAMES);
-  }
+  state.calibration = {
+    done: true,
+    gameId: state.currentGameId,
+    estimatedScore: score,
+    completedAt: new Date().toISOString(),
+  };
+  saveJson(STORAGE_KEYS.calibration, state.calibration);
 
-  state.placement.estimatedScore = estimateTrainingScoreFromGames(getPlacementGames());
-  if (isPlacementComplete() && !state.placement.completedAt) {
-    state.placement.completedAt = new Date().toISOString();
+  // Seed skill dimensions that the calibration game didn't touch; dims that
+  // already accumulated graded-move data keep it.
+  const skill = ensureSkillState();
+  const seeded = seedSkillStateFromScore(score);
+  for (const dim of SKILL_DIMENSIONS) {
+    if (!skill.dims[dim] || skill.dims[dim].perf === null || skill.dims[dim].samples < 8) {
+      skill.dims[dim] = seeded.dims[dim];
+    }
   }
-  saveJson(STORAGE_KEYS.placement, state.placement);
+  skill.calibratedAt = state.calibration.completedAt;
+  saveJson(STORAGE_KEYS.skill, skill);
 }
 
 function getProfileSummary() {
@@ -1780,24 +2150,29 @@ function getProfileSummary() {
   const solved = state.practiceHistory.filter((item) => item.result === "solved").length;
   const missed = state.practiceHistory.filter((item) => item.result === "missed").length;
   const weaknessPenalty = Object.values(state.profile).reduce((sum, item) => sum + item.count * item.severity * 8, 0);
-  const placementScore = getEstimatedTrainingScore();
-  const score = Math.round(clamp((placementScore || 900) + solved * 10 - missed * 5 - weaknessPenalty, 400, 1800));
-  const strengths = STARTER_LESSONS
-    .filter((lesson) => !state.profile[lesson.category] || state.profile[lesson.category].count <= 1)
+  const baseScore = getEstimatedTrainingScore();
+  const score = Math.round(clamp((baseScore || 900) + solved * 10 - missed * 5 - weaknessPenalty, 400, 1800));
+  const strengths = SKILL_CATALOG
+    .filter((skill) => {
+      const categories = getSkillCategories(skill);
+      return !categories.some((category) => state.profile[category]?.count > 1);
+    })
     .slice(0, 3)
-    .map((lesson) => ({
-      title: lesson.title,
-      note: state.profile[lesson.category]
-        ? "Only one recent issue tagged here."
-        : "No recurring issue tagged here yet.",
-      score: state.profile[lesson.category] ? "OK" : "Clean",
-    }));
+    .map((skill) => {
+      const categories = getSkillCategories(skill);
+      const touched = categories.some((category) => state.profile[category]);
+      return {
+        title: skill.label,
+        note: touched ? "Only one recent issue tagged here." : "No recurring issue tagged here yet.",
+        score: touched ? "OK" : "Clean",
+      };
+    });
 
   return {
     score,
     games,
     solved,
-    placement: getPlacementProgress(),
+    calibration: { done: isCalibrationComplete() },
     strengths,
   };
 }
@@ -1812,6 +2187,7 @@ function addPracticeFromLesson(lessonId) {
   }));
 
   const guide = LESSON_GUIDES[lesson.category] || LESSON_GUIDES.candidate_moves;
+  const skill = getSkillForCategory(lesson.category);
   const item = {
     id: crypto.randomUUID(),
     sourceKey: `${state.game.fen()}|lesson|${lesson.id}`,
@@ -1820,6 +2196,8 @@ function addPracticeFromLesson(lessonId) {
     fen: state.game.fen(),
     title: lesson.title,
     category: lesson.category,
+    skillId: skill?.id || "",
+    labMode: "focus",
     prompt: guide.drill,
     candidates,
     createdAt: new Date().toISOString(),
@@ -1842,6 +2220,7 @@ async function checkOpenAIHealth(options = {}) {
     const response = await fetch("/api/health?check=1");
     if (!response.ok) throw new Error("Coach server is not responding.");
     const data = await response.json();
+    state.featureFlags.remoteHistoryEraseEnabled = Boolean(data.remoteHistoryEraseEnabled);
     state.openAI.configured = Boolean(data.openaiConfigured);
     state.openAI.model = data.model || "";
     state.openAI.online = Boolean(data.openaiOnline);
@@ -1854,6 +2233,7 @@ async function checkOpenAIHealth(options = {}) {
     state.openAI.configured = false;
     state.openAI.online = false;
     state.openAI.model = "";
+    state.featureFlags.remoteHistoryEraseEnabled = false;
     state.openAI.status = error.message || "Start the Node server with npm start.";
   }
 
@@ -1876,150 +2256,450 @@ async function verifyRequiredServices() {
   ]);
 
   renderAll();
-  if (supabaseReady && openAIReady && !state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
-    maybeEngineMove();
-  }
   return supabaseReady && openAIReady;
 }
 
-async function requestAICoach(context) {
-  if (!isPlacementComplete()) {
-    state.aiCoach = {
-      loading: false,
-      error: "",
-      data: null,
-      context,
-    };
+// ─────────── Conversational coach ───────────
+
+function getCurrentChatMessages() {
+  if (state.coachChat.gameId !== state.currentGameId) {
+    state.coachChat = { gameId: state.currentGameId, messages: [] };
+  }
+  return state.coachChat.messages;
+}
+
+function pushChatMessage(role, content, options = {}) {
+  const messages = getCurrentChatMessages();
+  messages.push({ role, content, isQuestion: Boolean(options.isQuestion), at: new Date().toISOString() });
+  saveJson(STORAGE_KEYS.coachChat, state.coachChat);
+}
+
+function saveCoachMemory() {
+  saveJson(STORAGE_KEYS.coachMemory, state.coachMemory);
+}
+
+function buildSkillSnapshotForChat() {
+  const snapshot = state.skill?.dims ? skillSnapshot(state.skill) : { overall: getEstimatedTrainingScore() || null };
+  snapshot.calibrated = isCalibrationComplete();
+  return snapshot;
+}
+
+function momentFromMoveRecord(record) {
+  if (!record) return null;
+  return {
+    ply: record.ply,
+    san: record.san,
+    quality: record.qualityKey || record.classification || "",
+    cpl: Number.isFinite(record.evalDelta) ? Math.max(0, -record.evalDelta) : null,
+    bestMoveSan: record.bestMoveSan || "",
+    principalVariation: (record.principalVariation || []).slice(0, 6),
+    fenBefore: record.beforeFen || "",
+    tags: (record.tags || []).slice(0, 4).map((tag) => tag.label),
+  };
+}
+
+function buildChatPayload(event, moment = null) {
+  const candidates = rankCandidateMoves(state.game.fen()).slice(0, 4).map((move) => ({
+    san: move.san,
+    reason: explainCandidateMove(state.game.fen(), move),
+  }));
+  const opening = detectOpening();
+  return {
+    event,
+    messages: compactTranscript(getCurrentChatMessages().map(({ role, content }) => ({ role, content }))),
+    coachMemory: memoryForPayload(state.coachMemory),
+    skillSnapshot: buildSkillSnapshotForChat(),
+    weaknesses: Object.values(state.profile)
+      .sort((a, b) => b.count * b.severity - a.count * a.severity)
+      .slice(0, 5)
+      .map((item) => ({ category: item.category, label: item.label, count: item.count, severity: item.severity })),
+    game: {
+      fen: state.game.fen(),
+      recentSan: state.moves.slice(-20).map((move) => move.san),
+      phase: getPhase(state.game),
+      sideToMove: colorName(state.game.turn()),
+      playerColor: colorName(state.settings.playerColor),
+      opening: opening.name,
+      result: state.game.isGameOver() ? getResultLabel() : "",
+    },
+    moment,
+    candidates,
+  };
+}
+
+async function requestCoachChat(event, moment = null) {
+  state.coachThinking = true;
+  state.coachError = "";
+  if (state.currentTab === "coach") renderCoachPanel();
+
+  try {
+    const data = await sendCoachChat(buildChatPayload(event, moment));
+    state.coachThinking = false;
+
+    if (data.configured === false) {
+      state.openAI.configured = false;
+      state.coachError = data.message || "The coach is offline.";
+      if (state.currentTab === "coach") renderCoachPanel();
+      return null;
+    }
+
+    if (data.memory_note) {
+      state.coachMemory = appendMemoryNote(state.coachMemory, data.memory_note);
+      saveCoachMemory();
+    }
+    pushChatMessage("assistant", data.message, { isQuestion: Boolean(data.question) });
+    if (data.question) {
+      state.pendingCoachQuestion = {
+        question: data.question,
+        ply: moment?.ply ?? state.moves.length,
+        san: moment?.san || "",
+        fen: moment?.fenBefore || state.game.fen(),
+      };
+      pushChatMessage("assistant", data.question, { isQuestion: true });
+    }
+    if (state.currentTab === "coach") renderCoachPanel();
+    return data;
+  } catch (error) {
+    state.coachThinking = false;
+    state.coachError = error.message || "Coach request failed.";
+    if (state.currentTab === "coach") renderCoachPanel();
+    return null;
+  }
+}
+
+async function handleUserChatMessage(text) {
+  pushChatMessage("user", text);
+
+  // Answering a coach question captures a reasoning trace: what the player
+  // said they were thinking, anchored to the move it was about.
+  if (state.pendingCoachQuestion) {
+    state.coachMemory = appendTrace(state.coachMemory, {
+      id: crypto.randomUUID(),
+      gameId: state.currentGameId,
+      ply: state.pendingCoachQuestion.ply,
+      fen: state.pendingCoachQuestion.fen,
+      san: state.pendingCoachQuestion.san,
+      question: state.pendingCoachQuestion.question,
+      answer: text,
+      takeaway: "",
+      createdAt: new Date().toISOString(),
+    });
+    saveCoachMemory();
+    syncReasoningTrace(state.coachMemory.traces[state.coachMemory.traces.length - 1]);
+    state.pendingCoachQuestion = null;
+  }
+
+  if (state.rethink.active && state.rethink.stage === "ask") {
+    state.rethink.stage = "decide";
+    renderCoachPanel();
+    await requestCoachChat("rethink_followup", momentFromMoveRecord(state.rethink.record));
     renderCoachPanel();
     return;
   }
 
-  state.aiCoach = {
-    loading: true,
-    error: "",
-    data: null,
-    context,
-  };
   renderCoachPanel();
-
-  try {
-    const response = await fetch("/api/coach", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(buildCoachContext(context)),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Personal coach request failed.");
-
-    state.openAI.configured = Boolean(data.configured);
-    if (!data.configured) {
-      state.openAI.status = "Missing OPENAI_API_KEY";
-    }
-    state.aiCoach = {
-      loading: false,
-      error: "",
-      data,
-      context,
-    };
-  } catch (error) {
-    state.aiCoach = {
-      loading: false,
-      error: error.message || "Personal coach request failed.",
-      data: null,
-      context,
-    };
-  }
-
-  renderCoachPanel();
+  await requestCoachChat("user_message");
 }
 
-function buildCoachContext(context) {
-  const opening = detectOpening();
-  const candidates = rankCandidateMoves(state.game.fen()).slice(0, 6).map((move) => ({
-    san: move.san,
-    uci: `${move.from}${move.to}${move.promotion || ""}`,
-    reason: explainCandidateMove(state.game.fen(), move),
-    score: Number(move.score.toFixed(2)),
-  }));
-  const lastPlayerMove = [...state.moves].reverse().find((move) => move.role === "player") || null;
-  const selectedLesson = STARTER_LESSONS.find((lesson) => lesson.id === state.selectedLessonId) || null;
-  const profileSummary = getProfileSummary();
+// ─────────── Proactive commentary ───────────
 
-  return {
-    context,
-    currentPosition: {
-      fen: state.game.fen(),
-      pgn: state.game.pgn(),
-      sideToMove: colorName(state.game.turn()),
-      phase: getPhase(state.game),
-      result: getResultLabel(),
-      playerColor: colorName(state.settings.playerColor),
-      botDepth: getCurrentBotDepth(),
-      botMode: isPlacementComplete() ? "adaptive" : "placement",
-      opening: {
-        name: opening.name,
-        plans: opening.plans,
-      },
-    },
-    candidateMoves: candidates,
-    recentMoves: state.moves.slice(-12).map((move) => ({
-      ply: move.ply,
-      role: move.role,
-      color: colorName(move.color),
-      san: move.san,
-      classification: move.classification,
-      note: move.note,
-      tags: move.tags,
-      quality: move.qualityLabel || "",
-      qualityReason: move.qualityReason || "",
-      analysisStatus: move.analysisStatus,
-      evalDelta: move.evalDelta,
-      evalBefore: move.evalBefore,
-      evalAfter: move.evalAfter,
-      mateBefore: move.mateBefore,
-      mateAfter: move.mateAfter,
-      bestMove: move.bestMoveSan || move.bestMoveUci || "",
-      principalVariation: move.principalVariation || [],
-    })),
-    lastPlayerMove,
-    placement: {
-      progress: getPlacementProgress(),
-      games: getPlacementGames(),
-      estimatedScore: getEstimatedTrainingScore(),
-      currentBotDepth: getCurrentBotDepth(),
-    },
-    weaknessProfile: Object.values(state.profile).sort((a, b) => b.count * b.severity - a.count * a.severity).slice(0, 8),
-    profileSummary,
-    practiceQueue: state.practiceQueue.slice(0, 8).map((item) => ({
-      title: item.title,
-      category: item.category,
-      prompt: item.prompt,
-      note: item.note,
-      playedMove: item.playedMove,
-    })),
-    practiceHistory: state.practiceHistory.slice(0, 12).map((item) => ({
-      title: item.title,
-      category: item.category,
-      result: item.result,
-      attemptedAt: item.attemptedAt,
-    })),
-    selectedLesson,
-    activeDrill: state.activeDrill ? {
-      title: state.activeDrill.title,
-      type: state.activeDrill.type,
-      objective: state.activeDrill.objective,
-      message: state.drillMessage,
-    } : null,
-    availablePracticeModules: TRAINING_MODULES.map((module) => ({
-      id: module.id,
-      title: module.title,
-      type: module.type,
-      category: module.category,
-      objective: module.objective,
-    })),
-  };
+const PROACTIVE_LIMIT_PER_GAME = 6;
+const PROACTIVE_MIN_PLY_GAP = 4;
+
+function resetProactiveState() {
+  state.proactive = { count: 0, lastCommentPly: 0, turningPointUsed: false, praiseCount: 0 };
+}
+
+function canCoachSpeak() {
+  return isCoachAvailable() && isCalibrationComplete() && !state.activeDrill && !state.rethink.active;
+}
+
+function shouldCommentOnMove(record) {
+  if (!canCoachSpeak()) return null;
+  if (state.proactive.count >= PROACTIVE_LIMIT_PER_GAME) return null;
+  if (record.ply - state.proactive.lastCommentPly < PROACTIVE_MIN_PLY_GAP) return null;
+
+  const quality = record.qualityKey;
+  if (quality === "blunder" || quality === "missed_win") return "mistake";
+  if (quality === "mistake" && record.ply - state.proactive.lastCommentPly >= 6) return "mistake";
+
+  // Eval sign flip = the game turned around; worth one comment per game.
+  if (!state.proactive.turningPointUsed && Number.isFinite(record.evalBefore) && Number.isFinite(record.evalAfter)) {
+    const swing = record.evalAfter - record.evalBefore;
+    if (Math.sign(record.evalBefore) !== Math.sign(record.evalAfter) && Math.abs(swing) >= 150) {
+      return "turning_point";
+    }
+  }
+
+  if (quality === "best" && state.proactive.praiseCount < 2) {
+    const recentRough = state.moves.slice(-6, -1).some((move) => move.role === "player" && ["mistake", "blunder"].includes(move.qualityKey));
+    if (recentRough) return "praise";
+  }
+
+  return null;
+}
+
+async function maybeTriggerProactiveCoach(record) {
+  const trigger = shouldCommentOnMove(record);
+  if (!trigger) return;
+
+  state.proactive.count += 1;
+  state.proactive.lastCommentPly = record.ply;
+  if (trigger === "turning_point") state.proactive.turningPointUsed = true;
+  if (trigger === "praise") state.proactive.praiseCount += 1;
+
+  await requestCoachChat("proactive_comment", momentFromMoveRecord(record));
+}
+
+// ─────────── Rethink flow ───────────
+
+const RETHINK_GRADE_TIMEOUT_MS = 3000;
+const RETHINKS_PER_GAME = 2;
+
+function resetRethinkState() {
+  state.rethink = { active: false, record: null, remaining: RETHINKS_PER_GAME, resolve: null, stage: "ask" };
+}
+
+function shouldOfferRethink(record) {
+  return (
+    record?.role === "player" &&
+    ["blunder", "missed_win"].includes(record.qualityKey) &&
+    !record.rethinkOffered &&
+    state.rethink.remaining > 0 &&
+    isCalibrationComplete() &&
+    !state.activeDrill &&
+    !state.game.isGameOver()
+  );
+}
+
+function renderRethinkCard() {
+  if (!state.rethink.active) return "";
+  const record = state.rethink.record;
+  const showDecide = state.rethink.stage === "decide";
+  return `
+    <article class="mini-card rethink-card">
+      <span class="label">Hold on</span>
+      <strong>${escapeHtml(record?.san || "That move")} looks costly</strong>
+      ${showDecide ? `
+        <div class="button-row">
+          <button class="primary-action" id="rethinkRetryButton" type="button">Rethink the move</button>
+          <button id="rethinkPlayOnButton" type="button">Play on</button>
+        </div>
+      ` : `
+        <p>Tell the coach what your idea was in the chat below — then decide whether to rethink it.</p>
+        <div class="button-row">
+          <button id="rethinkSkipButton" type="button">Skip and decide now</button>
+        </div>
+      `}
+    </article>
+  `;
+}
+
+function bindRethinkCard() {
+  document.querySelector("#rethinkRetryButton")?.addEventListener("click", () => resolveRethink(true));
+  document.querySelector("#rethinkPlayOnButton")?.addEventListener("click", () => resolveRethink(false));
+  document.querySelector("#rethinkSkipButton")?.addEventListener("click", () => {
+    state.rethink.stage = "decide";
+    renderCoachPanel();
+  });
+}
+
+function resolveRethink(takeBack) {
+  const record = state.rethink.record;
+  const resolve = state.rethink.resolve;
+  state.rethink.active = false;
+  state.rethink.record = null;
+  state.rethink.resolve = null;
+  state.rethink.stage = "ask";
+
+  if (takeBack && record) {
+    // Undo exactly the player's ply. The move record is kept in the game log
+    // (marked retracted) so the weakness profile keeps the data point.
+    state.game.undo();
+    record.retracted = true;
+    state.moves = state.moves.filter((move) => move.id !== record.id);
+    const tail = state.moves[state.moves.length - 1];
+    state.lastMove = tail ? { from: tail.from, to: tail.to } : null;
+    pushChatMessage("assistant", "Take another look. What does your opponent's last move attack or threaten?");
+    saveCurrentGame();
+    renderAll();
+  }
+
+  resolve?.(takeBack);
+}
+
+// Called from the engine-reply path: waits briefly for grading, and if the
+// move was a blunder, interrupts with a coach conversation before the bot
+// replies. Resolves true when the player takes the move back.
+async function maybeOfferRethink(record) {
+  if (!record?.gradePromise) return false;
+
+  await Promise.race([record.gradePromise, wait(RETHINK_GRADE_TIMEOUT_MS)]);
+  if (!shouldOfferRethink(record)) return false;
+
+  record.rethinkOffered = true;
+  state.rethink.active = true;
+  state.rethink.record = record;
+  state.rethink.remaining -= 1;
+  state.rethink.stage = "ask";
+
+  const rethinkDecision = new Promise((resolve) => {
+    state.rethink.resolve = resolve;
+  });
+
+  if (state.currentTab !== "coach") switchTab("coach");
+  renderCoachPanel();
+
+  // Ask for the player's idea. Local fallback keeps the flow moving offline.
+  const response = await requestCoachChat("rethink_prompt", momentFromMoveRecord(record));
+  if (!response) {
+    pushChatMessage("assistant", `That drops material or misses something big. What was your idea with ${record.san}?`, { isQuestion: true });
+    state.pendingCoachQuestion = {
+      question: `What was your idea with ${record.san}?`,
+      ply: record.ply,
+      san: record.san,
+      fen: record.beforeFen,
+    };
+    renderCoachPanel();
+  }
+
+  return rethinkDecision;
+}
+
+// ─────────── Guided review ───────────
+
+function startGuidedReview() {
+  const moments = selectKeyMoments(state.moves);
+  if (!moments.length) {
+    state.guidedReview = null;
+    pushChatMessage("assistant", "Honestly, no single moment decided that game — your biggest slips were small. Browse the move list if you want, or start another game.");
+    renderReviewPanel();
+    return;
+  }
+  state.guidedReview = { active: true, moments, index: 0, step: "ask", lastCoachMessage: "" };
+  advanceGuidedReviewMoment();
+}
+
+async function advanceGuidedReviewMoment() {
+  const review = state.guidedReview;
+  const moment = review.moments[review.index];
+  state.reviewPly = moment.ply;
+  review.step = "ask";
+  review.lastCoachMessage = "";
+  renderReviewPanel();
+
+  const data = await requestCoachChat("review_moment", moment);
+  review.lastCoachMessage = data?.message || `Look at this position before ${moment.san}. ${moment.reason} What were you thinking here?`;
+  if (!data) {
+    state.pendingCoachQuestion = {
+      question: "What were you thinking at this moment?",
+      ply: moment.ply,
+      san: moment.san,
+      fen: moment.fenBefore,
+    };
+  }
+  renderReviewPanel();
+}
+
+async function submitGuidedReviewAnswer(text) {
+  const review = state.guidedReview;
+  const moment = review.moments[review.index];
+
+  pushChatMessage("user", text);
+  state.coachMemory = appendTrace(state.coachMemory, {
+    id: crypto.randomUUID(),
+    gameId: state.currentGameId,
+    ply: moment.ply,
+    fen: moment.fenBefore,
+    san: moment.san,
+    question: state.pendingCoachQuestion?.question || "What were you thinking at this moment?",
+    answer: text,
+    takeaway: "",
+    createdAt: new Date().toISOString(),
+  });
+  saveCoachMemory();
+  syncReasoningTrace(state.coachMemory.traces[state.coachMemory.traces.length - 1]);
+  state.pendingCoachQuestion = null;
+
+  review.step = "teach";
+  review.lastCoachMessage = "";
+  renderReviewPanel();
+
+  // The answer is now in the transcript, so the coach teaches this moment.
+  const data = await requestCoachChat("review_moment", moment);
+  review.lastCoachMessage = data?.message || (moment.bestMoveSan
+    ? `The engine preferred ${moment.bestMoveSan} here. Compare what it does to what ${moment.san} allowed.`
+    : `Compare the position before and after ${moment.san} — look for what changed for your opponent.`);
+  renderReviewPanel();
+}
+
+async function nextGuidedReviewMoment() {
+  const review = state.guidedReview;
+  if (review.index + 1 < review.moments.length) {
+    review.index += 1;
+    await advanceGuidedReviewMoment();
+    return;
+  }
+  state.guidedReview = null;
+  state.reviewPly = null;
+  renderReviewPanel();
+  await requestCoachChat("game_summary");
+  if (state.currentTab === "review") renderReviewPanel();
+}
+
+function renderGuidedReviewCard() {
+  const gameDone = state.game.isGameOver();
+  if (!isCalibrationComplete()) return "";
+
+  if (!state.guidedReview?.active) {
+    if (!gameDone) return "";
+    return `
+      <article class="mini-card guided-review-card">
+        <span class="label">Guided review</span>
+        <strong>Walk through the key moments</strong>
+        <p>The coach picks the 2-3 moments that decided this game, asks what you were thinking, and teaches from there.</p>
+        <button class="primary-action" id="startGuidedReviewButton" type="button" ${isCoachAvailable() ? "" : "disabled"}>${isCoachAvailable() ? "Start guided review" : "Coach offline"}</button>
+      </article>
+    `;
+  }
+
+  const review = state.guidedReview;
+  const moment = review.moments[review.index];
+  const coachText = review.lastCoachMessage
+    ? `<p class="guided-coach-message">${escapeHtml(review.lastCoachMessage)}</p>`
+    : `<p class="guided-coach-message guided-loading">Coach is looking at this moment...</p>`;
+
+  return `
+    <article class="mini-card guided-review-card">
+      <span class="label">Guided review · moment ${review.index + 1} of ${review.moments.length}</span>
+      <strong>Move ${moment.ply}: ${escapeHtml(moment.san)}</strong>
+      <p>${escapeHtml(moment.reason)}</p>
+      ${coachText}
+      ${review.step === "ask" && review.lastCoachMessage ? `
+        <form id="guidedReviewForm" class="guided-review-form">
+          <input id="guidedReviewInput" type="text" autocomplete="off" placeholder="What was your plan here?">
+          <button type="submit">Answer</button>
+        </form>
+      ` : ""}
+      ${review.step === "teach" && review.lastCoachMessage ? `
+        <div class="button-row">
+          <button class="primary-action" id="guidedReviewNextButton" type="button">${review.index + 1 < review.moments.length ? "Next moment" : "Finish review"}</button>
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function bindGuidedReviewCard() {
+  document.querySelector("#startGuidedReviewButton")?.addEventListener("click", startGuidedReview);
+  document.querySelector("#guidedReviewNextButton")?.addEventListener("click", nextGuidedReviewMoment);
+  document.querySelector("#guidedReviewForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#guidedReviewInput");
+    const text = input?.value.trim();
+    if (!text) return;
+    submitGuidedReviewAnswer(text);
+  });
 }
 
 function renderReviewPanel() {
@@ -2034,18 +2714,23 @@ function renderReviewPanel() {
   const selectedMove = state.reviewPly != null
     ? state.moves.find((move) => move.ply === state.reviewPly)
     : state.moves[state.moves.length - 1];
-  const boardFen = selectedMove ? selectedMove.afterFen : state.game.fen();
+  // During a guided review "ask" step, show the position BEFORE the key move
+  // so the player re-reads the board the way they saw it in the game.
+  const boardFen = state.guidedReview?.active && state.guidedReview.step === "ask" && selectedMove
+    ? selectedMove.beforeFen
+    : selectedMove ? selectedMove.afterFen : state.game.fen();
   const turningPoints = getReviewTurningPoints();
   const analysisCard = renderSelectedMoveAnalysis(selectedMove);
+  const skillCard = renderReviewSkillCard(selectedMove);
 
   const rows = state.moves.map((move) => {
     const isSelected = selectedMove && move.ply === selectedMove.ply;
     const evalText = formatEvalDelta(move);
     const quality = getMoveQuality(move);
     const tagPills = (move.tags || []).map((tag) =>
-      `<span class="tag ${reviewTagClass(tag.severity)}">${escapeHtml(tag.label)}</span>`
+      `<span class="tag ${reviewTagClass(tag.severity)}">${escapeHtml(toTitleCaseLabel(tag.label))}</span>`
     ).join("");
-    const classText = quality ? quality.label : prettyClassification(move.classification);
+    const classText = toTitleCaseLabel(quality ? quality.label : prettyClassification(move.classification));
     const className = quality ? `quality-pill ${qualityClassName(quality.key)}` : reviewClassClass(move.classification);
     return `
       <div class="move-row ${isSelected ? "selected" : ""}" role="button" tabindex="0" data-ply="${move.ply}">
@@ -2081,12 +2766,15 @@ function renderReviewPanel() {
   els.reviewPanel.innerHTML = `
     <h2>Review</h2>
     <div class="stack">
+      ${renderGuidedReviewCard()}
       ${boardCard}
       ${analysisCard}
+      ${skillCard}
       ${turningPointHtml}
       <div class="move-list">${rows}</div>
     </div>
   `;
+  bindGuidedReviewCard();
 
   els.reviewPanel.querySelectorAll(".move-row[data-ply]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -2101,6 +2789,34 @@ function renderReviewPanel() {
       renderReviewPanel();
     });
   });
+  els.reviewPanel.querySelectorAll("[data-review-retry]").forEach((button) => {
+    button.addEventListener("click", () => startReviewRetry(button.dataset.reviewRetry));
+  });
+  els.reviewPanel.querySelectorAll("[data-review-skill]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedSkillId = button.dataset.reviewSkill;
+      switchTab("practice");
+    });
+  });
+}
+
+function renderReviewSkillCard(move) {
+  if (!shouldOfferSkillTraining(move)) return "";
+  const skill = getPrimarySkillForMove(move);
+  if (!skill) return "";
+  const tag = move.tags?.[0];
+  const reason = tag?.note || move.qualityReason || "This move is worth retrying with a focused scan.";
+  return `
+    <article class="mini-card skill-transfer-card">
+      <span class="label">Skill transfer</span>
+      <strong>${escapeHtml(skill.label)}</strong>
+      <p>${escapeHtml(reason)}</p>
+      <div class="button-row">
+        <button class="primary-action" type="button" data-review-retry="${escapeAttr(move.ply)}">Retry this position</button>
+        <button type="button" data-review-skill="${escapeAttr(skill.id)}">Open lab</button>
+      </div>
+    </article>
+  `;
 }
 
 function renderReviewBoardCard(move, boardFen) {
@@ -2265,8 +2981,7 @@ function renderMiniBoard(fen, highlights = {}) {
         const color = ch === ch.toUpperCase() ? "w" : "b";
         const dark = (rank + file) % 2 === 1;
         const square = `${FILES[file]}${8 - rank}`;
-        const glyph = PIECES[color + ch.toLowerCase()] || "";
-        html += renderMiniSquare(square, dark, glyph, color, highlights);
+        html += renderMiniSquare(square, dark, ch.toLowerCase(), color, highlights);
         file++;
       }
     }
@@ -2275,7 +2990,7 @@ function renderMiniBoard(fen, highlights = {}) {
   return html;
 }
 
-function renderMiniSquare(square, dark, glyph, color, highlights) {
+function renderMiniSquare(square, dark, pieceType, color, highlights) {
   const highlight = highlights[square] || {};
   const highlightClass = typeof highlight === "string" ? highlight : highlight.className || "";
   const qualityKey = typeof highlight === "string" ? "" : highlight.qualityKey || "";
@@ -2284,10 +2999,157 @@ function renderMiniSquare(square, dark, glyph, color, highlights) {
   const marker = markerText ? `<span class="mini-marker ${quality ? qualityClassName(qualityKey) : ""}">${escapeHtml(markerText)}</span>` : "";
   return `
     <div class="mini-sq ${dark ? "dark" : "light"} ${highlightClass} ${quality ? qualityClassName(qualityKey) : ""}">
-      ${glyph ? `<span class="mini-piece piece ${color}">${glyph}</span>` : ""}
+      ${pieceType ? pieceImageHtml(color, pieceType, "mini-piece") : ""}
       ${marker}
     </div>
   `;
+}
+
+function getSkillForPractice(item) {
+  return getSkillById(item?.skillId) || getSkillForCategory(item?.category);
+}
+
+function getPrimarySkillForMove(move) {
+  const tag = move?.tags?.[0];
+  if (tag?.category) return getSkillForCategory(tag.category);
+  if (move?.bestMoveUci && move.bestMoveUci !== move.uci) return getSkillById("candidate-moves");
+  return null;
+}
+
+function shouldOfferSkillTraining(move) {
+  if (!move || move.role !== "player") return false;
+  if (move.tags?.length) return true;
+  if (["inaccuracy", "mistake", "blunder", "missed_win"].includes(move.qualityKey)) return true;
+  return typeof move.evalDelta === "number" && move.evalDelta >= 50 && Boolean(move.bestMoveUci);
+}
+
+function getSkillLabCounts(skill) {
+  const categories = getSkillCategories(skill);
+  return {
+    focus: CURATED_PRACTICE_PUZZLES.filter((puzzle) => categories.includes(puzzle.category)).length,
+    mixed: CURATED_PRACTICE_PUZZLES.length,
+    game_transfer: state.practiceQueue.filter((item) => categories.includes(item.category)).length,
+  };
+}
+
+function getPersonalSkillPractice(skill) {
+  const categories = getSkillCategories(skill);
+  return state.practiceQueue
+    .filter((item) => categories.includes(item.category))
+    .sort((a, b) => getCategoryPriority(b.category) - getCategoryPriority(a.category));
+}
+
+function withSkillLabMode(puzzle, skill, mode) {
+  if (!puzzle || !skill) return null;
+  const modeInfo = SKILL_LAB_MODES.find((item) => item.id === mode) || SKILL_LAB_MODES[0];
+  const titlePrefix = mode === "game_transfer" ? "From your game" : `${skill.label} ${modeInfo.label}`;
+  return {
+    ...puzzle,
+    skillId: skill.id,
+    labMode: mode,
+    type: `${skill.label} lab`,
+    title: puzzle.title || titlePrefix,
+    plainTitle: mode === "mixed" ? "Mixed tactic scan" : mode === "game_transfer" ? "From your game" : (puzzle.plainTitle || skill.shortLabel),
+    plainGoal: mode === "focus"
+      ? skill.focusPrompt
+      : mode === "mixed"
+        ? skill.mixedPrompt
+        : (puzzle.plainGoal || skill.transferPrompt),
+    hintSteps: [
+      skill.scanPrompt,
+      ...(Array.isArray(puzzle.hintSteps) ? puzzle.hintSteps : []),
+    ].filter(Boolean).slice(0, 4),
+    successText: puzzle.successText || `Correct. That is the ${skill.shortLabel || skill.label} pattern.`,
+    missText: puzzle.missText || `Not yet. ${skill.scanPrompt}`,
+  };
+}
+
+function getCuratedSkillPuzzles(skill) {
+  const categories = getSkillCategories(skill);
+  const matches = CURATED_PRACTICE_PUZZLES.filter((puzzle) => categories.includes(puzzle.category));
+  return matches.length ? matches : CURATED_PRACTICE_PUZZLES;
+}
+
+function selectSkillLabPuzzle(skill, mode = "focus") {
+  const solvedKeys = getRecentlySolvedPracticeKeys();
+  const personal = getPersonalSkillPractice(skill)
+    .map(practiceItemToPuzzle)
+    .filter(Boolean);
+
+  if (mode === "game_transfer") {
+    const puzzle = personal.find((item) => !solvedKeys.has(getPracticeSourceKey(item))) || personal[0];
+    return withSkillLabMode(puzzle, skill, "game_transfer");
+  }
+
+  const curatedPool = mode === "mixed" ? CURATED_PRACTICE_PUZZLES : getCuratedSkillPuzzles(skill);
+  const curated = curatedPool
+    .map((puzzle) => withSkillLabMode(puzzle, skill, mode))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aSolved = solvedKeys.has(getPracticeSourceKey(a)) ? 1 : 0;
+      const bSolved = solvedKeys.has(getPracticeSourceKey(b)) ? 1 : 0;
+      return aSolved - bSolved
+        || getSkillPriority(getSkillForPractice(b)) - getSkillPriority(getSkillForPractice(a))
+        || (a.difficulty || 1) - (b.difficulty || 1);
+    });
+
+  return curated[0] || null;
+}
+
+function startSkillLab(skillId = state.selectedSkillId, mode = "focus") {
+  const skill = getSkillById(skillId) || prioritizeSkills()[0] || SKILL_CATALOG[0];
+  const puzzle = selectSkillLabPuzzle(skill, mode);
+  if (!puzzle) return false;
+  state.selectedSkillId = skill.id;
+  return startPracticePuzzle(puzzle, { render: true });
+}
+
+function reviewMoveToPuzzle(move) {
+  if (!move?.beforeFen) return null;
+  const skill = getPrimarySkillForMove(move) || getSkillById("candidate-moves");
+  const tag = move.tags?.[0];
+  const ranked = rankCandidateMoves(move.beforeFen).slice(0, 3);
+  const candidates = move.bestMoveUci
+    ? [{ san: move.bestMoveSan || uciToSan(move.beforeFen, move.bestMoveUci) || move.bestMoveUci, uci: move.bestMoveUci }]
+    : ranked.map((candidate) => ({
+        san: candidate.san,
+        uci: `${candidate.from}${candidate.to}${candidate.promotion || ""}`,
+      }));
+
+  if (!candidates.length) return null;
+
+  return normalizePracticePuzzle({
+    id: `review-${move.id}`,
+    source: "personal",
+    sourceKey: `review:${move.id}:${skill.id}`,
+    skillId: skill.id,
+    labMode: "game_transfer",
+    category: tag?.category || skill.categoryAliases?.[0] || "candidate_moves",
+    plainTitle: "Retry from review",
+    title: skill.label,
+    difficulty: 2,
+    playerColor: move.beforeFen.split(" ")[1] || state.settings.playerColor,
+    fen: move.beforeFen,
+    expectedMoves: candidates.map((candidate) => candidate.uci),
+    targetSquares: candidates.map((candidate) => candidate.uci.slice(2, 4)).filter(Boolean),
+    hintSquares: candidates[0]?.uci ? [candidates[0].uci.slice(0, 2), candidates[0].uci.slice(2, 4)] : [],
+    plainGoal: `This is the position before ${move.san}. Find the stronger ${skill.shortLabel || skill.label} idea.`,
+    hintSteps: [
+      tag?.note || skill.transferPrompt,
+      candidates[0]?.san ? `Compare ${candidates[0].san}.` : skill.scanPrompt,
+      skill.scanPrompt,
+    ].filter(Boolean),
+    successText: "Correct. You found the better idea from your reviewed game.",
+    missText: "Not yet. Slow down and run the scan before moving.",
+  });
+}
+
+function startReviewRetry(ply) {
+  const move = state.moves.find((item) => item.ply === Number(ply));
+  const puzzle = reviewMoveToPuzzle(move);
+  if (!puzzle) return false;
+  state.selectedSkillId = puzzle.skillId || state.selectedSkillId;
+  return startPracticePuzzle(puzzle, { render: true });
 }
 
 function getPracticeMotifGuide(category) {
@@ -2327,11 +3189,14 @@ function getPracticeSourceKey(puzzle) {
 function normalizePracticePuzzle(puzzle) {
   if (!puzzle?.fen || !Array.isArray(puzzle.expectedMoves) || !puzzle.expectedMoves.length) return null;
   const guide = getPracticeMotifGuide(puzzle.category);
+  const skill = getSkillForPractice(puzzle);
   return {
     ...puzzle,
     isPracticeTrainer: true,
     source: puzzle.source || "curated",
     sourceKey: getPracticeSourceKey(puzzle),
+    skillId: skill?.id || "",
+    labMode: puzzle.labMode || (puzzle.source === "personal" ? "game_transfer" : "focus"),
     type: puzzle.type || "Practice puzzle",
     term: puzzle.term || guide.term,
     definition: puzzle.definition || guide.definition,
@@ -2353,6 +3218,7 @@ function practiceItemToPuzzle(item) {
   if (!candidates.length) return null;
 
   const guide = getPracticeMotifGuide(item.category);
+  const skill = getSkillForPractice(item);
   const turn = item.fen.split(" ")[1] || state.settings.playerColor;
   const bestCandidate = candidates[0];
   return normalizePracticePuzzle({
@@ -2360,6 +3226,8 @@ function practiceItemToPuzzle(item) {
     source: "personal",
     sourceKey: item.sourceKey,
     queueItemId: item.id,
+    skillId: skill?.id || "",
+    labMode: item.labMode || "game_transfer",
     category: item.category,
     plainTitle: plainPracticeTitleForCategory(item.category),
     title: item.title || guide.term,
@@ -2483,7 +3351,7 @@ function startPracticePuzzle(puzzle, options = {}) {
 }
 
 function ensurePracticeTrainer() {
-  if (!isPlacementComplete() || isPracticeTrainerDrill()) return false;
+  if (!isCalibrationComplete() || state.activeDrill) return false;
   const next = selectNextPracticePuzzle();
   return startPracticePuzzle(next, { render: false, switchTab: false });
 }
@@ -2540,8 +3408,8 @@ function renderPracticeTrainer() {
   const revealTerm = solved || trainer.hintIndex >= (puzzle.hintSteps?.length || 1);
   const feedback = trainer.feedback || state.drillMessage || puzzle.plainGoal;
   const label = puzzle.source === "personal"
-    ? "Adaptive practice - from your games"
-    : `Adaptive practice - difficulty ${puzzle.difficulty || 1}`;
+    ? `${getSkillForPractice(puzzle)?.label || "Skill"} lab - from your games`
+    : `${getSkillForPractice(puzzle)?.label || "Skill"} lab - ${puzzle.labMode === "mixed" ? "mixed" : `difficulty ${puzzle.difficulty || 1}`}`;
   const heading = solved
     ? `Solved: ${puzzle.term}`
     : (puzzle.plainTitle || plainPracticeTitleForCategory(puzzle.category));
@@ -2577,21 +3445,120 @@ function renderPracticeTrainer() {
       <span class="label">${revealTerm ? "Pattern learned" : "How to look"}</span>
       <strong>${escapeHtml(revealTerm ? puzzle.term : "Scan the position")}</strong>
       <p>${escapeHtml(revealTerm ? `${puzzle.definition} ${puzzle.scan}` : (currentHint || puzzle.scan))}</p>
-      ${solved ? `<div class="tag-list"><span class="tag good">Solved</span><span class="tag">${escapeHtml(puzzle.term)}</span></div>` : ""}
+      ${solved ? `<div class="tag-list"><span class="tag good">${escapeHtml(toTitleCaseLabel("Solved"))}</span><span class="tag">${escapeHtml(toTitleCaseLabel(puzzle.term))}</span></div>` : ""}
     </article>
   `;
 }
 
+function renderOpeningDrillCard() {
+  if (!isOpeningDrill()) return "";
+  const drill = state.activeDrill;
+  const found = getLineById(drill.openingLineId);
+  const total = found?.line.moves.length || 0;
+  return `
+    <article class="mini-card practice-trainer-card">
+      <span class="label">Opening trainer · move ${Math.min(drill.plyIndex + 1, total)} of ${total}</span>
+      <strong>${escapeHtml(drill.title)}</strong>
+      <p>${escapeHtml(state.drillMessage || drill.objective)}</p>
+      <div class="button-row">
+        <button id="exitOpeningDrillButton" type="button">Exit drill</button>
+      </div>
+    </article>
+  `;
+}
+
+function bindOpeningDrillCard() {
+  document.querySelector("#exitOpeningDrillButton")?.addEventListener("click", () => {
+    state.activeDrill = null;
+    state.drillMessage = "";
+    restoreActiveGame();
+    renderAll();
+  });
+}
+
+function renderOpeningTrainerSection() {
+  const mine = state.repertoire.myOpenings;
+  const selected = mine.length
+    ? REPERTOIRE.filter((opening) => mine.includes(opening.id))
+    : [];
+
+  const lineCards = selected.flatMap((opening) => opening.lines.map((line) => {
+    const progress = state.repertoire.lines[line.id];
+    const dueText = progress ? nextDueLabel(ensureSrs(progress)) : "not started";
+    const reps = progress?.reps || 0;
+    return `
+      <article class="practice-card">
+        <span class="label">${escapeHtml(opening.name)} · ${escapeHtml(colorName(opening.side))} · ${escapeHtml(dueText)}${reps ? ` · ${reps} rep${reps === 1 ? "" : "s"}` : ""}</span>
+        <strong>${escapeHtml(line.name)}</strong>
+        <p>${escapeHtml(opening.summary)}</p>
+        <div class="button-row">
+          <button class="primary-action" type="button" data-opening-drill="${escapeAttr(line.id)}">Drill this line</button>
+        </div>
+      </article>
+    `;
+  })).join("");
+
+  const pickers = REPERTOIRE.map((opening) => `
+    <button class="candidate opening-pick ${mine.includes(opening.id) ? "picked" : ""}" type="button" data-toggle-opening="${escapeAttr(opening.id)}">
+      ${escapeHtml(opening.name)} (${opening.side === "w" ? "White" : "Black"})
+    </button>
+  `).join("");
+
+  return `
+    ${lineCards || "<p class=\"empty-state\">Pick 2-4 openings below to build your repertoire. The trainer walks you through each line and explains every move.</p>"}
+    <article class="mini-card">
+      <span class="label">Choose my openings (up to 4)</span>
+      <div class="candidate-list">${pickers}</div>
+    </article>
+  `;
+}
+
+function bindOpeningTrainerSection() {
+  els.practicePanel.querySelectorAll("[data-toggle-opening]").forEach((button) => {
+    button.addEventListener("click", () => toggleMyOpening(button.dataset.toggleOpening));
+  });
+  els.practicePanel.querySelectorAll("[data-opening-drill]").forEach((button) => {
+    button.addEventListener("click", () => startOpeningDrill(button.dataset.openingDrill));
+  });
+}
+
+function renderWeaknessLabsSection() {
+  const sorted = prioritizeSkills().slice(0, 4);
+  const cards = sorted.map((skill) => {
+    const counts = getSkillLabCounts(skill);
+    return `
+      <article class="practice-card">
+        <span class="label">${skill.priority > 0 ? `Recommended · priority ${skill.priority}` : "Skill"}</span>
+        <strong>${escapeHtml(skill.label)}</strong>
+        <p>${escapeHtml(skill.summary)}</p>
+        <div class="button-row">
+          <button type="button" data-start-weakness-lab="${escapeAttr(skill.id)}">Train this pattern</button>
+          ${counts.game_transfer ? `<button type="button" data-start-weakness-transfer="${escapeAttr(skill.id)}">${escapeHtml(formatCountLabel(counts.game_transfer, "position from your game", "positions from your games"))}</button>` : ""}
+        </div>
+      </article>
+    `;
+  }).join("");
+  return cards || "<p class=\"empty-state\">Weakness labs appear as the coach tags patterns in your games.</p>";
+}
+
+function bindWeaknessLabsSection() {
+  els.practicePanel.querySelectorAll("[data-start-weakness-lab]").forEach((button) => {
+    button.addEventListener("click", () => startSkillLab(button.dataset.startWeaknessLab, "focus"));
+  });
+  els.practicePanel.querySelectorAll("[data-start-weakness-transfer]").forEach((button) => {
+    button.addEventListener("click", () => startSkillLab(button.dataset.startWeaknessTransfer, "game_transfer"));
+  });
+}
+
 function renderPracticePanel() {
-  const progress = getPlacementProgress();
-  if (!progress.complete) {
+  if (!isCalibrationComplete()) {
     els.practicePanel.innerHTML = `
       <h2>Practice</h2>
       <div class="stack">
-        <article class="mini-card placement-card">
+        <article class="mini-card calibration-card">
           <span class="label">Practice trainer</span>
-          <strong>Unlocks after placement</strong>
-          <p>Finish ${progress.remaining} more placement game${progress.remaining === 1 ? "" : "s"} to unlock adaptive mate, fork, pin, skewer, loose-piece, and defense puzzles.</p>
+          <strong>Unlocks after your calibration game</strong>
+          <p>Finish your first game so the trainer can match puzzle difficulty to how you actually play.</p>
         </article>
       </div>
     `;
@@ -2600,14 +3567,13 @@ function renderPracticePanel() {
 
   ensurePracticeTrainer();
 
-  const queuedPractice = state.practiceQueue
-    .slice(0, 4)
+  const dueItems = selectDue(state.practiceQueue.map((item) => ensureSrs(item)), new Date(), 4)
     .sort((a, b) => getCategoryPriority(b.category) - getCategoryPriority(a.category));
   const nextFocus = getNextTrainingFocus();
   const trainer = renderPracticeTrainer();
-  const personalCards = queuedPractice.map((item) => `
+  const dueCards = dueItems.map((item) => `
     <article class="practice-card">
-      <span class="label">From your games - priority ${getCategoryPriority(item.category)}</span>
+      <span class="label">${escapeHtml(getSkillForPractice(item)?.label || "Skill")} - from your games - ${escapeHtml(nextDueLabel(item))}</span>
       <strong>${escapeHtml(plainPracticeTitleForCategory(item.category))}</strong>
       <p>${escapeHtml(plainPracticeGoalForItem(item))}</p>
       <div class="button-row">
@@ -2617,7 +3583,7 @@ function renderPracticePanel() {
   `).join("");
   const foundationCards = CURATED_PRACTICE_PUZZLES.map((puzzle) => `
     <button class="practice-card practice-select" type="button" data-start-puzzle="${escapeAttr(puzzle.id)}">
-      <span class="label">Foundation - difficulty ${puzzle.difficulty}</span>
+      <span class="label">${escapeHtml(getSkillForPractice(puzzle)?.label || "Foundation")} - difficulty ${puzzle.difficulty}</span>
       <strong>${escapeHtml(puzzle.plainTitle)}</strong>
       <p>${escapeHtml(puzzle.plainGoal || getPracticeMotifGuide(puzzle.category).plainGoal)}</p>
     </button>
@@ -2626,6 +3592,7 @@ function renderPracticePanel() {
   els.practicePanel.innerHTML = `
     <h2>Practice</h2>
     <div class="stack">
+      ${renderOpeningDrillCard()}
       ${trainer}
       ${nextFocus ? `
         <article class="mini-card priority-card">
@@ -2634,8 +3601,12 @@ function renderPracticePanel() {
           <p>${escapeHtml(nextFocus.reason)}</p>
         </article>
       ` : ""}
-      <h3>From Your Games</h3>
-      ${personalCards || "<p class=\"empty-state\">Personal practice positions appear after the coach tags your games.</p>"}
+      <h3>Due Drills</h3>
+      ${dueCards || "<p class=\"empty-state\">Nothing due right now. Drills from your mistakes come back on a spaced schedule.</p>"}
+      <h3>My Openings</h3>
+      ${renderOpeningTrainerSection()}
+      <h3>Weakness Labs</h3>
+      ${renderWeaknessLabsSection()}
       <h3>Foundation Skills</h3>
       <div class="lesson-grid">${foundationCards}</div>
     </div>
@@ -2643,6 +3614,9 @@ function renderPracticePanel() {
 
   document.querySelector("#practiceHintButton")?.addEventListener("click", advancePracticeHint);
   document.querySelector("#practiceRetryButton")?.addEventListener("click", retryPracticePuzzle);
+  bindOpeningDrillCard();
+  bindOpeningTrainerSection();
+  bindWeaknessLabsSection();
   document.querySelector("#practiceNextButton")?.addEventListener("click", startNextPracticePuzzle);
   document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
   els.practicePanel.querySelectorAll("[data-practice-board]").forEach((button) => {
@@ -2656,7 +3630,7 @@ function renderPracticePanel() {
 
 function renderProfilePanel() {
   const summary = getProfileSummary();
-  const progress = getPlacementProgress();
+  const calibrated = isCalibrationComplete();
   const weaknessRows = Object.values(state.profile)
     .sort((a, b) => b.count * b.severity - a.count * a.severity)
     .map((item) => `
@@ -2683,8 +3657,8 @@ function renderProfilePanel() {
     <div class="stack">
       <article class="profile-summary">
         <div>
-          <span class="label">${progress.complete ? "Current training score" : "Placement progress"}</span>
-          <strong>${progress.complete ? summary.score : `${progress.completed}/${progress.target}`}</strong>
+          <span class="label">${calibrated ? "Current training score" : "Calibration"}</span>
+          <strong>${calibrated ? summary.score : "1 game to go"}</strong>
         </div>
         <div>
           <span class="label">Games tracked</span>
@@ -2695,80 +3669,64 @@ function renderProfilePanel() {
           <strong>${summary.solved}</strong>
         </div>
       </article>
+      ${calibrated ? renderSkillDimensionCard() : ""}
       <article class="mini-card">
-        <span class="label">${progress.complete ? "Adaptive model" : "Placement model"}</span>
-        <strong>${progress.complete ? "Coach is using your history" : `${progress.remaining} more game${progress.remaining === 1 ? "" : "s"} needed`}</strong>
-        <p>${progress.complete
+        <span class="label">${calibrated ? "Adaptive model" : "Calibration model"}</span>
+        <strong>${calibrated ? "Coach is using your history" : "One calibration game needed"}</strong>
+        <p>${calibrated
           ? `Estimated score ${summary.score}. Opponent strength adjusts from recent game results plus mistake severity.`
-          : "Strengths, weaknesses, and OpenAI coach advice stay provisional until there are enough completed games to avoid guessing from one position."}</p>
+          : "Strengths, weaknesses, and coach advice unlock after your first completed game, then keep refining with every move you play."}</p>
       </article>
       <h3>Strengths</h3>
-      ${progress.complete ? (strengthRows || "<p class=\"empty-state\">Strengths need more solved practice positions.</p>") : "<p class=\"empty-state\">Strengths unlock after placement.</p>"}
+      ${calibrated ? (strengthRows || "<p class=\"empty-state\">Strengths need more solved practice positions.</p>") : "<p class=\"empty-state\">Strengths unlock after your calibration game.</p>"}
       <h3>Weaknesses</h3>
-      ${progress.complete ? (weaknessRows || "<p class=\"empty-state\">No recurring weaknesses tagged yet.</p>") : "<p class=\"empty-state\">Weaknesses are being collected during placement.</p>"}
+      ${calibrated ? (weaknessRows || "<p class=\"empty-state\">No recurring weaknesses tagged yet.</p>") : "<p class=\"empty-state\">Weaknesses are collected as you play.</p>"}
     </div>
   `;
 }
 
-function renderLessonsPanel() {
-  const profileCategories = new Set(Object.keys(state.profile));
-  const sorted = prioritizeLessons();
-  const selectedLesson = sorted.find((lesson) => lesson.id === state.selectedLessonId) || sorted[0];
-  state.selectedLessonId = selectedLesson?.id || null;
-  const personalized = buildPersonalLessonGuide(selectedLesson);
-  const cards = sorted.map((lesson) => {
-    const recommended = profileCategories.has(lesson.category);
+function renderSkillDimensionCard() {
+  if (!state.skill?.dims) return "";
+  const snapshot = skillSnapshot(state.skill);
+  const rows = SKILL_DIMENSIONS.map((dim) => {
+    const entry = snapshot[dim];
+    if (!entry || entry.rating === null) return "";
+    const percent = clamp(Math.round(((entry.rating - 400) / 1400) * 100), 2, 100);
+    const trendArrow = entry.trend > 0 ? "▲" : entry.trend < 0 ? "▼" : "•";
+    const trendClass = entry.trend > 0 ? "up" : entry.trend < 0 ? "down" : "flat";
     return `
-      <button class="lesson-card lesson-select ${lesson.id === state.selectedLessonId ? "selected" : ""}" type="button" data-lesson="${escapeAttr(lesson.id)}">
-        <span class="label">${recommended ? "Recommended" : "Lesson"} - priority ${lesson.priority}</span>
-        <strong>${escapeHtml(lesson.title)}</strong>
-        <p>${escapeHtml(lesson.summary)}</p>
-        <p>${escapeHtml(lesson.reason)}</p>
-        <div class="tag-list">
-          ${lesson.concepts.map((concept) => `<span class="tag ${recommended ? "warn" : ""}">${escapeHtml(concept)}</span>`).join("")}
+      <div class="skill-dim-row">
+        <div class="skill-dim-head">
+          <strong>${escapeHtml(DIMENSION_LABELS[dim] || dim)}</strong>
+          <span class="skill-dim-rating">${entry.rating} <span class="skill-trend ${trendClass}" title="Recent trend">${trendArrow}</span></span>
         </div>
-      </button>
+        <div class="skill-dim-meter"><i style="width: ${percent}%"></i></div>
+        <p class="skill-dim-next">Next level: ${escapeHtml(entry.nextLevel)}</p>
+      </div>
     `;
   }).join("");
-
-  els.lessonsPanel.innerHTML = `
-    <h2>Lessons</h2>
-    <div class="stack">
-      <article class="lesson-detail">
-        <span class="label">Selected lesson</span>
-        <strong>${escapeHtml(selectedLesson.title)}</strong>
-        <p>${escapeHtml(personalized.why)}</p>
-        <div class="candidate-list">
-          ${personalized.lookFor.map((item) => `<span class="candidate">${escapeHtml(item)}</span>`).join("")}
-        </div>
-        <p>${escapeHtml(personalized.drill)}</p>
-        <button id="startLessonButton" type="button">Start interactive lesson</button>
-      </article>
-      <div class="lesson-grid">${cards}</div>
-    </div>
+  if (!rows.trim()) return "";
+  return `
+    <article class="mini-card skill-dims-card">
+      <span class="label">Skill dimensions</span>
+      ${rows}
+    </article>
   `;
-
-  els.lessonsPanel.querySelectorAll("[data-lesson]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedLessonId = button.dataset.lesson;
-      renderLessonsPanel();
-    });
-  });
-
-  document.querySelector("#startLessonButton")?.addEventListener("click", () => startLesson(state.selectedLessonId));
 }
 
 function renderSettingsPanel() {
-  const progress = getPlacementProgress();
+  const calibrated = isCalibrationComplete();
+  const erase = state.historyErase;
+  const remoteEraseEnabled = state.featureFlags.remoteHistoryEraseEnabled;
   els.settingsPanel.innerHTML = `
     <h2>Settings</h2>
     <div class="settings-grid">
       ${renderRequiredServicesCard()}
       <article class="mini-card">
         <strong>Bot difficulty</strong>
-        <p>${progress.complete
+        <p>${calibrated
           ? "Adaptive mode is active. The opponent adjusts automatically from your estimated score, recent results, and mistake severity."
-          : `Placement mode is active. The opponent adjusts automatically while ${progress.remaining} placement game${progress.remaining === 1 ? "" : "s"} remain.`}</p>
+          : "Calibration mode is active. Finish your first game and the opponent starts adapting to you."}</p>
       </article>
       <article class="mini-card">
         <strong>OpenAI personal coach</strong>
@@ -2778,9 +3736,13 @@ function renderSettingsPanel() {
       <article class="mini-card">
         <strong>Supabase sync</strong>
         <p class="sync-status-row"><span class="label">Storage</span> ${escapeHtml(getStorageStatusLabel())}</p>
-        <p>${state.supabaseReachable ? "Connected. Games, moves, practice, and profile events can sync." : "Required. The app stays locked until Supabase is reachable and writable."}</p>
+        <p>${state.supabaseReachable ? "Connected. Games, moves, practice, and profile events can sync." : "Optional. Play always works locally; connect Supabase to keep long-term history."}</p>
         ${state.supabaseHealth ? `<p>${escapeHtml(state.supabaseHealth)}</p>` : ""}
       </article>
+      <label class="field">
+        <span>Your name</span>
+        <input id="displayNameInput" type="text" maxlength="32" value="${escapeAttr(getDisplayName())}" placeholder="You">
+      </label>
       <label class="field">
         <span>Player color</span>
         <select id="playerColorInput">
@@ -2810,8 +3772,21 @@ function renderSettingsPanel() {
       <div class="button-row">
         <button id="saveSettingsButton" type="button">Save settings</button>
         <button id="testSupabaseButton" type="button">Test Supabase</button>
-        <button id="resetLocalButton" type="button" class="danger-button">Clear local data</button>
       </div>
+      <article class="mini-card danger-zone-card">
+        <span class="label">Testing tools</span>
+        <strong>Erase history</strong>
+        <p>Clear games, moves, calibration, weakness profile, practice queue, and practice history. Settings and service connections stay saved.</p>
+        ${erase.status ? `<p class="sync-status-row good-status"><span class="label">Status</span> ${escapeHtml(erase.status)}</p>` : ""}
+        ${erase.error ? `<p class="sync-status-row danger-status"><span class="label">Error</span> ${escapeHtml(erase.error)}</p>` : ""}
+        <div class="button-row">
+          <button id="eraseLocalHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local history</button>
+          ${remoteEraseEnabled ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + Supabase history</button>` : ""}
+        </div>
+        ${remoteEraseEnabled
+          ? "<p class=\"empty-state\">Remote erase is enabled by ENABLE_REMOTE_HISTORY_ERASE for testing.</p>"
+          : "<p class=\"empty-state\">Set ENABLE_REMOTE_HISTORY_ERASE=true in .env and restart the server to show the remote wipe option.</p>"}
+      </article>
     </div>
   `;
 
@@ -2819,17 +3794,23 @@ function renderSettingsPanel() {
   document.querySelector("#saveSettingsButton").addEventListener("click", () => saveSettingsFromPanel());
   document.querySelector("#testOpenAIButton").addEventListener("click", checkOpenAIHealth);
   document.querySelector("#testSupabaseButton").addEventListener("click", testSupabaseConnection);
-  document.querySelector("#resetLocalButton").addEventListener("click", resetLocalData);
+  document.querySelector("#eraseLocalHistoryButton")?.addEventListener("click", eraseLocalHistory);
+  document.querySelector("#eraseRemoteHistoryButton")?.addEventListener("click", eraseRemoteHistory);
 }
 
-function handleSquareClick(square) {
-  if (!areRequiredServicesReady()) return;
+function getActivePlayerColor() {
+  return state.activeDrill ? state.activeDrill.playerColor : state.settings.playerColor;
+}
 
-  const playerColor = state.activeDrill ? state.activeDrill.playerColor : state.settings.playerColor;
-  if (state.thinking || state.game.isGameOver() || state.game.turn() !== playerColor) {
-    return;
-  }
+function canInteractWithBoard() {
+  const playerColor = getActivePlayerColor();
+  return !state.thinking && !state.game.isGameOver() && state.game.turn() === playerColor;
+}
 
+async function handleSquareClick(square) {
+  if (!canInteractWithBoard()) return;
+
+  const playerColor = getActivePlayerColor();
   const piece = state.game.get(square);
 
   if (!state.selectedSquare) {
@@ -2849,23 +3830,40 @@ function handleSquareClick(square) {
     return;
   }
 
-  const beforeFen = state.game.fen();
-  const move = state.game.move({ from: state.selectedSquare, to: square, promotion: "q" });
+  await attemptPlayerMove(state.selectedSquare, square);
+}
 
-  if (move) {
-    if (state.activeDrill) {
-      clearSelection({ render: false });
-      handleDrillMove(move, beforeFen);
-      return;
-    }
-    const animated = animateBoardMove(move);
-    clearSelection({ render: false });
-    recordMove(move, beforeFen, "player");
-    renderAfterMoveAnimation(animated, maybeEngineMove);
-    return;
+async function attemptPlayerMove(from, to, options = {}) {
+  const beforeFen = state.game.fen();
+  let move = null;
+  try {
+    move = state.game.move({ from, to, promotion: "q" });
+  } catch {
+    move = null;
   }
 
-  clearSelection();
+  if (!move) {
+    clearSelection();
+    return false;
+  }
+
+  if (state.activeDrill) {
+    clearSelection({ render: false });
+    handleDrillMove(move, beforeFen);
+    return true;
+  }
+
+  const animation = options.animate === false ? Promise.resolve(false) : animateBoardMove(move);
+  clearSelection({ render: false });
+  const record = recordMove(move, beforeFen, "player");
+  await renderAfterMoveAnimation(animation, async () => {
+    // Serious mistake? Pause for a coach conversation before the bot replies.
+    const tookBack = await maybeOfferRethink(record);
+    if (tookBack) return;
+    record?.gradePromise?.then(() => maybeTriggerProactiveCoach(record));
+    await maybeEngineMove();
+  });
+  return true;
 }
 
 function selectSquare(square) {
@@ -2881,8 +3879,6 @@ function clearSelection(options = {}) {
 }
 
 async function maybeEngineMove() {
-  if (!areRequiredServicesReady()) return;
-
   if (state.game.isGameOver() || state.game.turn() === state.settings.playerColor) {
     await finalizeIfGameOver();
     return;
@@ -2890,7 +3886,7 @@ async function maybeEngineMove() {
 
   state.thinking = true;
   renderGameMeta();
-  let engineAnimationDelay = 0;
+  let engineAnimation = Promise.resolve(false);
 
   try {
     await wait(180);
@@ -2900,7 +3896,7 @@ async function maybeEngineMove() {
     const botDepth = getCurrentBotDepth();
 
     try {
-      uci = await state.engine?.bestMove(fen, botDepth);
+      uci = await state.engine?.bestMove(fen, botDepth, getCurrentBotElo());
     } catch {
       uci = null;
       state.engine = null;
@@ -2914,7 +3910,7 @@ async function maybeEngineMove() {
       const beforeFen = state.game.fen();
       const played = state.game.move(move);
       if (played) {
-        engineAnimationDelay = animateBoardMove(played) ? 170 : 0;
+        engineAnimation = animateBoardMove(played);
         recordMove(played, beforeFen, "engine");
         break;
       }
@@ -2924,7 +3920,7 @@ async function maybeEngineMove() {
   } finally {
     state.thinking = false;
     await finalizeIfGameOver();
-    if (engineAnimationDelay) await wait(engineAnimationDelay);
+    await engineAnimation;
     renderAll();
   }
 }
@@ -2976,7 +3972,7 @@ function recordMove(move, beforeFen, role) {
     tags: [],
     note: "",
     analysisStatus: role === "player" && state.engine?.ready ? "pending" : "unavailable",
-    qualityEligible: role === "player" && !state.activeDrill && isPlacementComplete(),
+    qualityEligible: role === "player" && !state.activeDrill && isCalibrationComplete(),
     qualityKey: "",
     qualityLabel: "",
     qualityReason: "",
@@ -3014,10 +4010,15 @@ function recordMove(move, beforeFen, role) {
   const moveSyncPromise = syncMove(record);
 
   if (role === "player" && state.engine?.ready) {
-    enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise);
+    // Non-enumerable so the promise never leaks into localStorage/Supabase.
+    Object.defineProperty(record, "gradePromise", {
+      value: enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise),
+      enumerable: false,
+    });
   } else if (record.qualityKey) {
     moveSyncPromise.then(() => syncMoveAnalysis(record)).catch((error) => console.warn("Move quality sync failed", error));
   }
+  return record;
 }
 
 function updateMoveQuality(record) {
@@ -3071,6 +4072,7 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
       record.classification = classifyByEval(record.evalDelta, record.classification);
     }
     updateMoveQuality(record);
+    updateSkillFromMove(record);
 
     saveCurrentGame();
     await moveSyncPromise;
@@ -3106,9 +4108,9 @@ function analyzePlayerMove(beforeFen, playedMove, afterFen) {
   if (best && (!playedCandidate || best.score - playedCandidate.score >= 3.5)) {
     tags.push({
       category: "candidate_moves",
-      label: "Candidate moves",
+      label: "Candidate move",
       severity: 2,
-      note: `Consider forcing moves like ${best.san}.`,
+      note: `${best.san} was a move worth checking before deciding.`,
     });
   }
 
@@ -3639,11 +4641,11 @@ function classifyTags(tags) {
 
 function buildMoveNote(tags, best) {
   if (!tags.length) {
-    return best ? `Candidate scan looked acceptable. Also consider ${best.san}.` : "No issue tagged.";
+    return best ? `Your move looked playable. ${best.san} was another move worth checking.` : "No issue tagged.";
   }
 
   const primary = tags[0];
-  const candidateText = best ? ` Candidate to compare: ${best.san}.` : "";
+  const candidateText = best ? ` Also check ${best.san} before deciding.` : "";
   return `${primary.note}${candidateText}`;
 }
 
@@ -3680,6 +4682,7 @@ function maybeCreatePractice(record, candidates) {
   if (!record.tags.length || !candidates.length) return;
 
   const primary = record.tags[0];
+  const skill = getSkillForCategory(primary.category);
   const sourceKey = `${record.beforeFen}|${primary.category}`;
   const exists = state.practiceQueue.some((item) => item.sourceKey === sourceKey);
   if (exists) return;
@@ -3692,6 +4695,8 @@ function maybeCreatePractice(record, candidates) {
     fen: record.beforeFen,
     title: primary.label,
     category: primary.category,
+    skillId: skill?.id || "",
+    labMode: "game_transfer",
     playedMove: record.san,
     note: primary.note,
     prompt: `From this position, find a better candidate than ${record.san}.`,
@@ -3699,6 +4704,7 @@ function maybeCreatePractice(record, candidates) {
       san: candidate.san,
       uci: `${candidate.from}${candidate.to}${candidate.promotion || ""}`,
     })),
+    srs: createSrs(),
     createdAt: new Date().toISOString(),
   };
 
@@ -3706,6 +4712,8 @@ function maybeCreatePractice(record, candidates) {
   syncPosition(record, item);
 }
 
+// Spaced repetition: items persist and reschedule instead of vanishing when
+// solved, so patterns resurface until they stick.
 async function markPractice(id, result) {
   const item = state.practiceQueue.find((entry) => entry.id === id);
   if (!item) return;
@@ -3721,11 +4729,8 @@ async function markPractice(id, result) {
     ...state.practiceHistory,
   ].slice(0, 100);
 
-  if (result === "solved") {
-    state.practiceQueue = state.practiceQueue.filter((entry) => entry.id !== id);
-  } else {
-    state.practiceQueue = [item, ...state.practiceQueue.filter((entry) => entry.id !== id)];
-  }
+  const grade = result === "solved" ? GRADE_SOLVED : GRADE_MISSED;
+  item.srs = applyGrade(ensureSrs(item).srs, grade);
 
   saveJson(STORAGE_KEYS.practice, state.practiceQueue);
   saveJson(STORAGE_KEYS.practiceHistory, state.practiceHistory);
@@ -3779,7 +4784,156 @@ function resumeSavedGame() {
   renderAll();
 }
 
+// ─────────── Opening trainer ───────────
+
+function isOpeningDrill() {
+  return Boolean(state.activeDrill?.openingLineId);
+}
+
+function getRepertoireLineProgress(lineId) {
+  if (!state.repertoire.lines[lineId]) {
+    state.repertoire.lines[lineId] = { srs: createSrs(), reps: 0, perfect: 0 };
+  }
+  return state.repertoire.lines[lineId];
+}
+
+function saveRepertoire() {
+  saveJson(STORAGE_KEYS.repertoire, state.repertoire);
+}
+
+function startOpeningDrill(lineId) {
+  const found = getLineById(lineId);
+  if (!found) return;
+  const { opening, line } = found;
+
+  if (!state.activeDrill) saveCurrentGame();
+  state.activeDrill = {
+    id: `opening:${line.id}`,
+    openingLineId: line.id,
+    openingId: opening.id,
+    title: `${opening.name} — ${line.name}`,
+    type: "Opening trainer",
+    objective: `Play the ${opening.name} main line as ${colorName(opening.side)}. Wrong moves snap back with the idea explained.`,
+    playerColor: opening.side,
+    plyIndex: 0,
+    mistakes: 0,
+    category: "opening_principle",
+    source: "opening",
+  };
+  state.drillMessage = state.activeDrill.objective;
+  state.game = new Chess();
+  state.moves = [];
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+  state.lastMove = null;
+  switchTab("practice");
+  renderAll();
+
+  if (!learnerPlaysAt(opening.side, 0)) {
+    playScriptedOpponentMove();
+  }
+}
+
+async function playScriptedOpponentMove() {
+  const drill = state.activeDrill;
+  const found = getLineById(drill.openingLineId);
+  const entry = found?.line.moves[drill.plyIndex];
+  if (!entry) {
+    finishOpeningDrill();
+    return;
+  }
+  state.thinking = true;
+  renderGameMeta();
+  await wait(400);
+  const played = state.game.move(entry.san);
+  state.thinking = false;
+  if (played) {
+    state.lastMove = { from: played.from, to: played.to };
+    drill.plyIndex += 1;
+    if (entry.why) {
+      state.drillMessage = `${entry.san}: ${entry.why}`;
+    }
+  }
+  if (drill.plyIndex >= found.line.moves.length) {
+    finishOpeningDrill();
+    return;
+  }
+  renderAll();
+}
+
+async function handleOpeningDrillMove(move) {
+  const drill = state.activeDrill;
+  const found = getLineById(drill.openingLineId);
+  const expected = found.line.moves[drill.plyIndex];
+
+  if (!expected || move.san !== expected.san) {
+    state.game.undo();
+    drill.mistakes += 1;
+    state.drillMessage = expected
+      ? `Not ${move.san} here — the line plays ${expected.san}. ${expected.why || ""}`.trim()
+      : "The line is complete.";
+    renderAll();
+    return;
+  }
+
+  state.lastMove = { from: move.from, to: move.to };
+  drill.plyIndex += 1;
+  state.drillMessage = expected.why ? `${expected.san} — ${expected.why}` : `${expected.san} is right.`;
+  renderAll();
+
+  if (drill.plyIndex >= found.line.moves.length) {
+    finishOpeningDrill();
+    return;
+  }
+  await playScriptedOpponentMove();
+}
+
+function finishOpeningDrill() {
+  const drill = state.activeDrill;
+  if (!drill) return;
+  const progress = getRepertoireLineProgress(drill.openingLineId);
+  const perfect = drill.mistakes === 0;
+  const grade = perfect ? GRADE_SOLVED : drill.mistakes <= 2 ? GRADE_HARD : GRADE_MISSED;
+  progress.srs = applyGrade(ensureSrs(progress).srs, grade);
+  progress.reps += 1;
+  if (perfect) progress.perfect += 1;
+  saveRepertoire();
+  syncRepertoireProgress(drill.openingLineId, drill.openingId, progress);
+
+  state.drillMessage = perfect
+    ? `Line complete with no mistakes — ${nextDueLabel(progress)} for the next rep.`
+    : `Line complete with ${drill.mistakes} correction${drill.mistakes === 1 ? "" : "s"}. It will come back sooner so it sticks.`;
+
+  recordPracticeHistory({
+    title: drill.title,
+    category: "opening_principle",
+    skillId: "opening-development",
+    labMode: "opening",
+    expectedMoves: [],
+  }, perfect ? "solved" : "missed", state.game.fen());
+
+  const finishedMessage = state.drillMessage;
+  state.activeDrill = null;
+  restoreActiveGame();
+  renderAll();
+  state.drillMessage = finishedMessage;
+  if (state.currentTab === "practice") renderPracticePanel();
+}
+
+function toggleMyOpening(openingId) {
+  const list = state.repertoire.myOpenings;
+  state.repertoire.myOpenings = list.includes(openingId)
+    ? list.filter((id) => id !== openingId)
+    : [...list, openingId].slice(0, 4);
+  saveRepertoire();
+  renderPracticePanel();
+}
+
 async function handleDrillMove(move, beforeFen) {
+  if (isOpeningDrill()) {
+    await handleOpeningDrillMove(move);
+    return;
+  }
   if (isPracticeTrainerDrill()) {
     await handlePracticeTrainerMove(move, beforeFen);
     return;
@@ -3795,6 +4949,8 @@ async function handleDrillMove(move, beforeFen) {
       id: crypto.randomUUID(),
       title: state.activeDrill.title,
       category: state.activeDrill.category,
+      skillId: getSkillForCategory(state.activeDrill.category)?.id || "",
+      labMode: state.activeDrill.source || "",
       fen: beforeFen,
       result: "missed",
       attemptedAt: new Date().toISOString(),
@@ -3844,6 +5000,9 @@ async function handlePracticeTrainerMove(move, beforeFen) {
     trainer.feedback = `${puzzle.missText || "Not yet."}${hint ? ` ${hint}` : ""}`;
     state.drillMessage = trainer.feedback;
     recordPracticeHistory(puzzle, "missed", beforeFen, playedUci);
+    if (puzzle.queueItemId) {
+      rescheduleQueueItem(puzzle.queueItemId, GRADE_MISSED);
+    }
     await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "missed", playedUci);
     renderAll();
     return;
@@ -3858,12 +5017,20 @@ async function handlePracticeTrainerMove(move, beforeFen) {
   recordPracticeHistory(puzzle, "solved", beforeFen, playedUci);
 
   if (puzzle.queueItemId) {
-    state.practiceQueue = state.practiceQueue.filter((item) => item.id !== puzzle.queueItemId);
-    saveJson(STORAGE_KEYS.practice, state.practiceQueue);
+    rescheduleQueueItem(puzzle.queueItemId, GRADE_SOLVED);
   }
 
   await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "solved", playedUci);
   renderAll();
+}
+
+function rescheduleQueueItem(id, grade) {
+  const item = state.practiceQueue.find((entry) => entry.id === id);
+  if (!item) return;
+  item.srs = applyGrade(ensureSrs(item).srs, grade);
+  item.lastResult = grade === GRADE_SOLVED ? "solved" : "missed";
+  item.attemptedAt = new Date().toISOString();
+  saveJson(STORAGE_KEYS.practice, state.practiceQueue);
 }
 
 function getPracticeAttemptPayload(puzzle, fen) {
@@ -3880,6 +5047,8 @@ function recordPracticeHistory(puzzle, result, fen, chosenMove = "") {
     sourceKey: getPracticeSourceKey(puzzle),
     title: puzzle.title || puzzle.term || puzzle.plainTitle,
     category: puzzle.category,
+    skillId: puzzle.skillId || getSkillForPractice(puzzle)?.id || "",
+    labMode: puzzle.labMode || "",
     fen,
     result,
     chosenMove,
@@ -3916,6 +5085,8 @@ function completeDrill(fen) {
     id: crypto.randomUUID(),
     title: completedDrill.title,
     category: completedDrill.category,
+    skillId: getSkillForCategory(completedDrill.category)?.id || "",
+    labMode: completedDrill.source || "",
     fen,
     result: "solved",
     attemptedAt: new Date().toISOString(),
@@ -3980,9 +5151,22 @@ async function finalizeIfGameOver() {
   const existing = state.localGames.find((game) => game.id === state.currentGameId);
   if (existing?.result && existing.result !== "in_progress") return;
   const result = getResultLabel();
+  const wasCalibrating = !isCalibrationComplete();
   saveCurrentGame(result);
-  recordCompletedGameForPlacement(result);
+  recordCompletedGameForCalibration(result);
+  if (!state.activeDrill) updateSkillFromGameResult(result);
   await syncGameEnd(result);
+
+  if (wasCalibrating && isCalibrationComplete()) {
+    pushChatMessage("assistant", `Good — that's all I needed. I've set your starting level around ${state.calibration.estimatedScore || "your play"}. From here I'll talk with you during games and everything adapts to how you actually play. Ready when you are.`);
+    if (state.currentTab === "coach") renderCoachPanel();
+  } else if (isCalibrationComplete() && !state.activeDrill) {
+    const moments = selectKeyMoments(state.moves);
+    pushChatMessage("assistant", moments.length
+      ? `That's ${result}. Want to walk through the ${moments.length === 1 ? "key moment" : `${moments.length} key moments`} together? Open Review and hit "Start guided review".`
+      : `That's ${result}. A pretty clean game from you — no single moment decided it.`);
+    if (state.currentTab === "coach") renderCoachPanel();
+  }
 }
 
 function saveCurrentGame(result = "in_progress") {
@@ -4294,6 +5478,49 @@ async function syncPracticeAttempt(item, result, chosenMove = null) {
   }));
 }
 
+async function syncReasoningTrace(trace) {
+  if (!state.supabase || !trace) return;
+  await safeSupabase(() => state.supabase.from("reasoning_traces").insert({
+    game_id: trace.gameId,
+    ply: trace.ply,
+    fen: trace.fen,
+    san: trace.san,
+    question: trace.question,
+    answer: trace.answer,
+    coach_takeaway: trace.takeaway || null,
+  }));
+}
+
+async function syncRepertoireProgress(lineId, openingId, progress) {
+  if (!state.supabase || !progress?.srs) return;
+  await safeSupabase(() => state.supabase.from("repertoire_progress").upsert({
+    line_id: lineId,
+    opening_id: openingId,
+    ease: progress.srs.ease,
+    interval_days: progress.srs.intervalDays,
+    due_at: progress.srs.dueAt,
+    reps: progress.reps,
+    lapses: progress.srs.lapses,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "line_id" }));
+}
+
+async function syncSkillRatings(skill) {
+  if (!state.supabase || !skill?.dims) return;
+  const rows = SKILL_DIMENSIONS
+    .filter((dim) => skill.dims[dim]?.rating !== null)
+    .map((dim) => ({
+      dimension: dim,
+      rating: skill.dims[dim].rating,
+      perf: skill.dims[dim].perf,
+      samples: skill.dims[dim].samples,
+      confidence: skill.dims[dim].confidence,
+      updated_at: new Date().toISOString(),
+    }));
+  if (!rows.length) return;
+  await safeSupabase(() => state.supabase.from("skill_ratings").upsert(rows, { onConflict: "dimension" }));
+}
+
 async function safeSupabase(operation) {
   try {
     const { error } = await operation();
@@ -4315,6 +5542,7 @@ async function testSupabaseConnection() {
 }
 
 async function saveSettingsFromPanel(options = {}) {
+  state.settings.displayName = normalizeDisplayName(document.querySelector("#displayNameInput").value);
   state.settings.playerColor = document.querySelector("#playerColorInput").value;
   state.settings.coachMode = document.querySelector("#coachModeInput").value;
   state.supabaseConfig.url = document.querySelector("#supabaseUrlInput").value.trim();
@@ -4328,41 +5556,151 @@ async function saveSettingsFromPanel(options = {}) {
   return await verifySupabaseConnection({ syncStart: options.syncStart !== false, render: true });
 }
 
-function resetLocalData() {
+function clearHistoryStorage() {
   localStorage.removeItem(STORAGE_KEYS.profile);
   localStorage.removeItem(STORAGE_KEYS.practice);
   localStorage.removeItem(STORAGE_KEYS.practiceHistory);
   localStorage.removeItem(STORAGE_KEYS.games);
   localStorage.removeItem(STORAGE_KEYS.activeGame);
-  localStorage.removeItem(STORAGE_KEYS.placement);
-  localStorage.removeItem(STORAGE_KEYS.placementCardDismissed);
+  localStorage.removeItem(STORAGE_KEYS.calibration);
+  localStorage.removeItem(STORAGE_KEYS.coachChat);
+  localStorage.removeItem(STORAGE_KEYS.coachMemory);
+}
+
+function resetHistoryState() {
   state.profile = {};
   state.practiceQueue = [];
   state.practiceHistory = [];
   state.localGames = [];
-  state.placement = structuredClone(DEFAULT_PLACEMENT);
-  state.placementCardDismissed = false;
+  state.calibration = structuredClone(DEFAULT_CALIBRATION);
+  state.coachChat = { gameId: null, messages: [] };
+  state.coachMemory = { notes: [], traces: [] };
+  state.pendingCoachQuestion = null;
+  state.game = new Chess();
+  state.currentGameId = crypto.randomUUID();
+  state.startedAt = new Date().toISOString();
+  state.moves = [];
+  state.selectedSquare = null;
+  state.selectedSkillId = null;
+  state.legalTargets = new Set();
+  state.lastMove = null;
+  state.reviewPly = null;
+  state.thinking = false;
   state.activeDrill = null;
   state.drillMessage = "";
+  state.coachError = "";
+  resetProactiveState();
+  resetRethinkState();
   resetPracticeTrainerState();
   state.practiceTrainer.status = "idle";
+}
+
+function resetLocalHistoryForErase() {
+  clearHistoryStorage();
+  resetHistoryState();
+}
+
+function confirmHistoryErase(message) {
+  return window.confirm(message);
+}
+
+async function eraseLocalHistory() {
+  if (!confirmHistoryErase("Erase local history from this browser? This clears games, calibration, coach memory, profile, and practice history. Settings stay saved.")) {
+    return;
+  }
+
+  state.historyErase = {
+    busy: true,
+    status: "Erasing local history...",
+    error: "",
+  };
+  renderAll();
+
+  resetLocalHistoryForErase();
+  state.historyErase = {
+    busy: false,
+    status: "Local history erased. Calibration is reset.",
+    error: "",
+  };
   renderAll();
 }
 
-function newGame() {
-  if (!areRequiredServicesReady()) return;
+async function eraseRemoteHistory() {
+  if (!state.featureFlags.remoteHistoryEraseEnabled) return;
+  if (!confirmHistoryErase("Erase local and Supabase history? This deletes games, moves, calibration, profile, and practice history for this test database. Settings stay saved.")) {
+    return;
+  }
 
+  state.historyErase = {
+    busy: true,
+    status: "Erasing Supabase history...",
+    error: "",
+  };
+  renderAll();
+
+  try {
+    const connected = state.supabase || await setupSupabase();
+    if (!connected || !state.supabase) {
+      throw new Error(state.supabaseHealth || "Supabase is not configured.");
+    }
+
+    await deleteSupabaseHistory();
+    resetLocalHistoryForErase();
+    state.supabaseReachable = true;
+    state.historyErase = {
+      busy: false,
+      status: "Local and Supabase history erased. Calibration is reset.",
+      error: "",
+    };
+  } catch (error) {
+    state.historyErase = {
+      busy: false,
+      status: "",
+      error: error.message || "History erase failed.",
+    };
+    state.supabaseHealth = `Supabase history erase failed: ${state.historyErase.error}`;
+  }
+
+  renderAll();
+}
+
+async function deleteSupabaseHistory() {
+  const tables = [
+    "practice_attempts",
+    "weakness_events",
+    "positions",
+    "moves",
+    "weaknesses",
+    "games",
+  ];
+
+  for (const table of tables) {
+    const { error } = await state.supabase
+      .from(table)
+      .delete()
+      .neq("id", "00000000-0000-0000-0000-000000000000");
+    if (error) throw new Error(`${table}: ${formatSupabaseError(error)}`);
+  }
+}
+
+function newGame() {
   state.game = new Chess();
   state.selectedSquare = null;
   state.legalTargets = new Set();
   state.lastMove = null;
   state.moves = [];
   state.reviewPly = null;
+  state.guidedReview = null;
   state.currentGameId = crypto.randomUUID();
   state.startedAt = new Date().toISOString();
   state.thinking = false;
   state.activeDrill = null;
   state.drillMessage = "";
+  state.coachChat = { gameId: state.currentGameId, messages: [] };
+  state.pendingCoachQuestion = null;
+  state.coachError = "";
+  resetProactiveState();
+  resetRethinkState();
   resetPracticeTrainerState();
   state.practiceTrainer.status = "idle";
   saveCurrentGame();
@@ -4374,30 +5712,9 @@ function newGame() {
   }
 }
 
-function onClickTakeBack() {
-  if (!areRequiredServicesReady()) return;
-  if (state.thinking || state.activeDrill || state.game.history().length < 2) return;
-
-  state.game.undo();
-  state.game.undo();
-  state.moves = state.moves.slice(0, -2);
-
-  const tail = state.moves[state.moves.length - 1];
-  state.lastMove = tail ? { from: tail.from, to: tail.to } : null;
-  state.selectedSquare = null;
-  state.legalTargets = new Set();
-
-  saveCurrentGame();
-  renderAll();
-
-  if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
-    maybeEngineMove();
-  }
-}
-
 function switchTab(tab) {
   state.currentTab = tab;
-  const boardChanged = tab === "practice" && areRequiredServicesReady() && ensurePracticeTrainer();
+  const boardChanged = tab === "practice" && ensurePracticeTrainer();
   els.tabs.forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
   els.panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
   updateCtxHead(tab);
@@ -4446,15 +5763,46 @@ async function initEngine() {
 
 function bindEvents() {
   els.newGameButton.addEventListener("click", newGame);
-  els.takeBackButton.addEventListener("click", onClickTakeBack);
   els.tabs.forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
+  });
+
+  boardDrag = attachDragHandlers(els.board, {
+    canDragFrom: (square) => {
+      if (!canInteractWithBoard()) return false;
+      const piece = state.game.get(square);
+      return Boolean(piece && piece.color === getActivePlayerColor());
+    },
+    onDragStart: (square) => {
+      // renderBoard() is suppressed mid-drag, so paint highlights on the live DOM.
+      state.selectedSquare = square;
+      state.legalTargets = new Set(state.game.moves({ square, verbose: true }).map((move) => move.to));
+      const selectedPiece = state.game.get(square);
+      for (const button of els.board.querySelectorAll("[data-square]")) {
+        const sq = button.dataset.square;
+        button.classList.toggle("selected", sq === square);
+        const isTarget = state.legalTargets.has(sq);
+        const occupant = isTarget ? state.game.get(sq) : null;
+        button.classList.toggle("target", isTarget);
+        button.classList.toggle("target-capture", Boolean(isTarget && occupant && selectedPiece && occupant.color !== selectedPiece.color));
+      }
+    },
+    onDrop: async (from, to) => {
+      const moved = await attemptPlayerMove(from, to, { animate: false });
+      if (!moved || state.pendingBoardRender) renderBoard();
+    },
+    onDragCancel: () => {
+      clearSelection();
+      if (state.pendingBoardRender) renderBoard();
+    },
   });
 }
 
 function boot() {
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
-  normalizePlacementState();
+  normalizeCalibrationState();
+  migrateLegacyPlacement();
+  if (isCalibrationComplete()) ensureSkillState();
   state.startedAt = new Date().toISOString();
   restoreActiveGame();
   bindEvents();
@@ -4462,7 +5810,7 @@ function boot() {
   verifyRequiredServices();
   initEngine();
 
-  if (areRequiredServicesReady() && !state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
+  if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
     maybeEngineMove();
   }
 }

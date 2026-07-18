@@ -30,16 +30,21 @@ try {
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-  await page.locator(".service-gate-card").waitFor({ timeout: 7000 });
+  await page.locator("#board .square").first().waitFor({ timeout: 7000 });
 
   const title = await page.title();
   if (title !== "Personal Chess Teacher") {
     throw new Error(`Unexpected page title: ${title}`);
   }
 
-  const gateText = await page.locator(".service-gate-card").innerText();
-  if (!gateText.includes("Supabase and OpenAI must be online")) {
-    throw new Error("Required-services gate did not render.");
+  const squareCount = await page.locator("#board .square").count();
+  if (squareCount !== 64) {
+    throw new Error(`Expected 64 board squares, found ${squareCount}.`);
+  }
+
+  const pieceCount = await page.locator("#board img.piece").count();
+  if (pieceCount < 2) {
+    throw new Error(`Expected SVG piece images on the board, found ${pieceCount}.`);
   }
 
   const appResponse = await page.request.get(`${baseUrl}/app.js`);
@@ -48,14 +53,14 @@ try {
     throw new Error("app.js still imports chess.js from the CDN.");
   }
 
-  for (const path of ["/vendor/chess/chess.js", "/lib/classify.mjs", "/lib/stockfish-engine.mjs"]) {
+  for (const path of ["/assets/squirrel_chess.svg", "/vendor/chess/chess.js", "/vendor/pieces/merida/wK.svg", "/vendor/pieces/merida/bQ.svg", "/lib/board-drag.mjs", "/lib/classify.mjs", "/lib/skill-model.mjs", "/lib/stockfish-engine.mjs"]) {
     const response = await page.request.get(`${baseUrl}${path}`);
     if (response.status() !== 200) {
       throw new Error(`${path} returned ${response.status()}`);
     }
   }
 
-  for (const path of ["/.env", "/README.md", "/server.js", "/lib/coach-helpers.js", "/supabase/schema.sql"]) {
+  for (const path of ["/.env", "/README.md", "/server.js", "/lib/coach-chat.js", "/supabase/schema.sql"]) {
     const response = await page.request.get(`${baseUrl}${path}`);
     if (response.status() !== 404) {
       throw new Error(`${path} should be denied, got ${response.status()}`);
