@@ -6,6 +6,21 @@ const SECRET_PATTERNS = [
     name: "OpenAI API key",
     pattern: /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g,
   },
+  {
+    // Supabase secret/service keys. Publishable keys (sb_publishable_...) are
+    // safe to expose and intentionally not flagged.
+    name: "Supabase secret key",
+    pattern: /\bsb_secret_[A-Za-z0-9_-]{16,}\b/g,
+  },
+  {
+    // Legacy Supabase service_role JWTs share this fixed HS256 header prefix.
+    name: "Supabase legacy JWT",
+    pattern: /\beyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+  },
+  {
+    name: "Postgres connection string with credentials",
+    pattern: /\bpostgres(?:ql)?:\/\/[^\s:]+:[^\s@]+@/g,
+  },
 ];
 
 const ignoredPrefixes = [

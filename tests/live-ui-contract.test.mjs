@@ -166,21 +166,59 @@ test("play is never gated on remote services", async () => {
   assert.match(app, /renderCoachOfflineBanner/);
 });
 
-test("settings exposes local history erase and gates remote erase behind server flag", async () => {
+test("settings exposes local history erase and account-scoped remote erase", async () => {
   const app = await source("app.js");
   const envExample = await source(".env.example");
 
   assert.match(envExample, /ENABLE_REMOTE_HISTORY_ERASE=false/);
+  assert.match(envExample, /SUPABASE_URL=/);
+  assert.match(envExample, /SUPABASE_SERVICE_ROLE_KEY=/);
   assert.match(app, /remoteHistoryEraseEnabled/);
   assert.match(app, /Erase local history/);
   assert.match(app, /Erase local \+ Supabase history/);
   assert.match(app, /deleteSupabaseHistory/);
+  assert.match(app, /accountDelete/);
+  assert.match(app, /canCloudSync/);
   assert.match(app, /practice_attempts/);
   assert.match(app, /weakness_events/);
   assert.match(app, /positions/);
   assert.match(app, /moves/);
   assert.match(app, /weaknesses/);
   assert.match(app, /games/);
+});
+
+test("auth gate and server-mediated sync are wired in", async () => {
+  const app = await source("app.js");
+  const css = await source("styles.css");
+  const apiClient = await source("lib/api-client.mjs");
+  const server = await source("server.js");
+  const schema = await source("supabase/schema.sql");
+
+  // Sign-in overlay and per-user storage.
+  assert.match(app, /function renderAuthGate/);
+  assert.match(app, /function ensureSignedIn/);
+  assert.match(app, /function applyStorageNamespace/);
+  assert.match(app, /function hydrateStateFromStorage/);
+  assert.match(app, /signInWithPassword/);
+  assert.match(css, /\.auth-gate/);
+  assert.match(css, /\.auth-card/);
+
+  // The browser must never talk to the database directly or embed keys.
+  assert.match(app, /createApiClient/);
+  assert.doesNotMatch(app, /sb_publishable_/);
+  assert.doesNotMatch(app, /SUPABASE_PROJECT_REF/);
+  assert.doesNotMatch(app, /\.from\(["']games["']\)/);
+  assert.match(apiClient, /\/api\/sync/);
+  assert.match(apiClient, /\/api\/account\/export/);
+
+  // Server owns auth verification and stamps user ownership.
+  assert.match(server, /requireUser/);
+  assert.match(server, /user_id: userId/);
+  assert.match(server, /\/api\/account\/data/);
+
+  // Schema is locked to the service role with per-user rows.
+  assert.match(schema, /enable row level security/);
+  assert.match(schema, /user_id uuid references auth\.users/);
 });
 
 test("identity settings and squirrel branding are wired into the UI", async () => {

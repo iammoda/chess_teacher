@@ -71,6 +71,66 @@ try {
     throw new Error(`Browser page errors: ${pageErrors.join("; ")}`);
   }
 
+  // ── Auth-mode smoke: with Supabase configured, the app must gate behind
+  // sign-in. supabase-js is stubbed so this works offline and deterministically.
+  process.env.SUPABASE_URL = "https://smoke-test.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "sb_secret_smoke_test_only";
+  process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_smoke_test_only";
+
+  try {
+    const authPage = await browser.newPage();
+    const authPageErrors = [];
+    authPage.on("pageerror", (error) => authPageErrors.push(error.message));
+
+    await authPage.route("https://esm.sh/@supabase/supabase-js*", (route) => route.fulfill({
+      contentType: "text/javascript",
+      body: `export function createClient() {
+        return { auth: {
+          onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+          async getSession() { return { data: { session: null } }; },
+          async signInWithPassword() { return { error: new Error("Invalid login credentials") }; },
+          async signUp() { return { data: {}, error: null }; },
+          async resetPasswordForEmail() { return { error: null }; },
+          async updateUser() { return { error: null }; },
+          async signOut() { return { error: null }; },
+        } };
+      }`,
+    }));
+
+    await authPage.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await authPage.locator("#authGate .auth-card").waitFor({ timeout: 7000 });
+
+    const heading = await authPage.locator("#authGate h2").textContent();
+    if (!/welcome back/i.test(heading || "")) {
+      throw new Error(`Unexpected auth gate heading: ${heading}`);
+    }
+
+    // Mode switching: sign in -> create account -> back.
+    await authPage.locator('[data-auth-mode="sign_up"]').click();
+    await authPage.locator("#authGate h2", { hasText: "Create your account" }).waitFor({ timeout: 3000 });
+    await authPage.locator('[data-auth-mode="sign_in"]').click();
+
+    // A rejected sign-in surfaces the error without dismissing the gate.
+    await authPage.locator("#authEmailInput").fill("smoke@example.com");
+    await authPage.locator("#authPasswordInput").fill("wrong-password");
+    await authPage.locator(".auth-submit").click();
+    await authPage.locator(".auth-error", { hasText: "Invalid login credentials" }).waitFor({ timeout: 3000 });
+
+    const gateCount = await authPage.locator("#authGate").count();
+    if (gateCount !== 1) {
+      throw new Error("Auth gate should stay up after a failed sign-in.");
+    }
+
+    if (authPageErrors.length) {
+      throw new Error(`Auth-mode page errors: ${authPageErrors.join("; ")}`);
+    }
+    await authPage.close();
+  } finally {
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    delete process.env.SUPABASE_PUBLISHABLE_KEY;
+  }
+
   console.log("Browser smoke passed.");
 } finally {
   await browser.close();

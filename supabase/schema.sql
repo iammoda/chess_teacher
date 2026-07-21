@@ -1,7 +1,17 @@
+-- Personal Chess Teacher schema (multi-tenant).
+-- Fresh installs: run this file once in the Supabase SQL editor.
+-- Existing installs: run supabase/migrations/*.sql in order instead.
+--
+-- Access model: the browser NEVER talks to the database. The Node server is
+-- the only client, using the service role key. RLS is enabled with no
+-- policies and all grants are revoked from anon/authenticated, so leaked
+-- publishable keys cannot read or write anything.
+
 create extension if not exists "pgcrypto";
 
 create table if not exists games (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   started_at timestamptz not null default now(),
   ended_at timestamptz,
   player_color text not null check (player_color in ('w', 'b')),
@@ -16,6 +26,7 @@ create table if not exists games (
 
 create table if not exists moves (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   game_id uuid references games(id) on delete cascade,
   ply integer not null,
   role text not null check (role in ('player', 'engine')),
@@ -49,6 +60,7 @@ alter table moves add column if not exists quality_reason text;
 
 create table if not exists positions (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   game_id uuid references games(id) on delete cascade,
   move_id uuid references moves(id) on delete set null,
   fen text not null,
@@ -62,17 +74,20 @@ create table if not exists positions (
 
 create table if not exists weaknesses (
   id uuid primary key default gen_random_uuid(),
-  category text not null unique,
+  user_id uuid references auth.users(id) on delete cascade,
+  category text not null,
   label text not null,
   count integer not null default 0,
   severity integer not null default 1,
   last_seen timestamptz not null default now(),
   examples jsonb not null default '[]'::jsonb,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint weaknesses_user_category_key unique (user_id, category)
 );
 
 create table if not exists weakness_events (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   game_id uuid references games(id) on delete cascade,
   move_id uuid references moves(id) on delete set null,
   category text not null,
@@ -95,6 +110,7 @@ create table if not exists lessons (
 
 create table if not exists exercises (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   lesson_id text references lessons(id) on delete set null,
   source_position_id uuid references positions(id) on delete set null,
   fen text not null,
@@ -107,6 +123,7 @@ create table if not exists exercises (
 
 create table if not exists practice_attempts (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   exercise_id uuid references exercises(id) on delete set null,
   source_key text,
   fen text not null,
@@ -118,6 +135,7 @@ create table if not exists practice_attempts (
 
 create table if not exists reasoning_traces (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   game_id uuid,
   ply integer,
   fen text,
@@ -130,30 +148,68 @@ create table if not exists reasoning_traces (
 
 create table if not exists coach_memory (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
   note text not null,
   source text,
   created_at timestamptz not null default now()
 );
 
 create table if not exists skill_ratings (
-  dimension text primary key,
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
+  dimension text not null,
   rating integer,
   perf real,
   samples integer not null default 0,
   confidence real not null default 0,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint skill_ratings_user_dimension_key unique (user_id, dimension)
 );
 
 create table if not exists repertoire_progress (
-  line_id text primary key,
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
+  line_id text not null,
   opening_id text,
   ease real not null default 2.5,
   interval_days integer not null default 0,
   due_at timestamptz,
   reps integer not null default 0,
   lapses integer not null default 0,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint repertoire_progress_user_line_key unique (user_id, line_id)
 );
+
+create index if not exists games_user_id_idx               on games(user_id);
+create index if not exists moves_user_id_idx               on moves(user_id);
+create index if not exists moves_game_id_idx               on moves(game_id);
+create index if not exists positions_user_id_idx           on positions(user_id);
+create index if not exists weaknesses_user_id_idx          on weaknesses(user_id);
+create index if not exists weakness_events_user_id_idx     on weakness_events(user_id);
+create index if not exists practice_attempts_user_id_idx   on practice_attempts(user_id);
+create index if not exists reasoning_traces_user_id_idx    on reasoning_traces(user_id);
+create index if not exists coach_memory_user_id_idx        on coach_memory(user_id);
+create index if not exists skill_ratings_user_id_idx       on skill_ratings(user_id);
+create index if not exists repertoire_progress_user_id_idx on repertoire_progress(user_id);
+
+-- Lock everything down: service-role-only access.
+alter table games               enable row level security;
+alter table moves               enable row level security;
+alter table positions           enable row level security;
+alter table weaknesses          enable row level security;
+alter table weakness_events     enable row level security;
+alter table lessons             enable row level security;
+alter table exercises           enable row level security;
+alter table practice_attempts   enable row level security;
+alter table reasoning_traces    enable row level security;
+alter table coach_memory        enable row level security;
+alter table skill_ratings       enable row level security;
+alter table repertoire_progress enable row level security;
+
+revoke all on all tables    in schema public from anon, authenticated;
+revoke all on all sequences in schema public from anon, authenticated;
+alter default privileges in schema public revoke all on tables    from anon, authenticated;
+alter default privileges in schema public revoke all on sequences from anon, authenticated;
 
 insert into lessons (id, title, category, level, summary, concepts)
 values

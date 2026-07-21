@@ -23,7 +23,7 @@ Then open:
 http://localhost:5173
 ```
 
-Play always works locally (chess.js + bundled Stockfish). The conversational coach needs the local OpenAI server; Supabase adds long-term history sync. Supabase project `kajifmxqfcceibwredjf` is prefilled as `https://kajifmxqfcceibwredjf.supabase.co`, and the browser-safe publishable key is configured. The schema has been applied; use the Settings tab to test the connection if sync looks wrong. If the app says engine analysis or move-quality columns are missing, re-run `supabase/schema.sql` so evals, best moves, principal variations, and quality cues can persist.
+Play always works locally (chess.js + bundled Stockfish). The conversational coach needs the local OpenAI server. Accounts and long-term history sync need Supabase configured on the server (see Account And Sync Setup); when configured, the app requires sign-in and every user's history is isolated by account. Apply `supabase/schema.sql` on fresh projects, or run `supabase/migrations/001_multi_tenant.sql` to upgrade an existing single-user database.
 
 ## What The Platform Does Today
 
@@ -61,6 +61,9 @@ OPENAI_MODEL=gpt-5.1
 HOST=127.0.0.1
 PORT=5173
 ENABLE_REMOTE_HISTORY_ERASE=false
+SUPABASE_URL=
+SUPABASE_PUBLISHABLE_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
 ```
 
 Start the app:
@@ -68,6 +71,21 @@ Start the app:
 ```sh
 npm start
 ```
+
+## Account And Sync Setup
+
+Identity uses Supabase Auth (email + password); data access is server-only.
+
+1. In the Supabase dashboard, enable email auth (on by default) and grab three values from Project Settings -> API: the project URL, the publishable key, and the service role key.
+2. Put them in `.env` as `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`, then restart the server.
+3. Fresh project: run `supabase/schema.sql` in the SQL editor. Existing single-user database: run `supabase/migrations/001_multi_tenant.sql` instead (it adds `user_id` everywhere, re-keys per-user uniqueness, enables RLS, and revokes anon/authenticated grants).
+
+Security model:
+
+- The browser never talks to the database. All reads/writes go through the Node server (`POST /api/sync`, `GET /api/account/export`, `DELETE /api/account/data`), which verifies the Supabase access token and stamps `user_id` server-side.
+- The service role key stays in `.env`. RLS is enabled with no policies and all grants are revoked from `anon`/`authenticated`, so the publishable key alone can read or write nothing.
+- The coach endpoints require sign-in whenever Supabase is configured, so only authenticated users can spend OpenAI tokens. Rate limits are per-user.
+- Leaving the three variables blank runs the app in legacy local mode: no sign-in, no cloud sync, history stays in the browser.
 
 The Node server serves the app and exposes `/api/coach`. The browser sends chess context to that endpoint; the server adds the API key and calls OpenAI.
 
@@ -230,24 +248,21 @@ Browser UI
   |     Weakness profile
   |     Practice generation
   |
-  |-- OpenAI coach endpoint
-  |     Server-side API key
-  |     Personalized plan and explanations
+  |-- Supabase Auth (identity only)
+  |     Email sign-in, session tokens
   |
-  |-- Persistence layer
-        Local storage fallback
-        Supabase sync when configured
+  |-- Node server (/api)
+        OpenAI coach endpoints (server-side API key)
+        /api/sync + account endpoints (service-role Supabase access,
+        token verification, user_id stamping, per-user rate limits)
+        Local storage remains the in-browser cache
 ```
 
 ## Supabase Data Model
 
-The schema lives in `supabase/schema.sql`.
+The schema lives in `supabase/schema.sql` (fresh installs) and `supabase/migrations/` (upgrades).
 
-Configured project:
-
-- Project ref: `kajifmxqfcceibwredjf`
-- API URL: `https://kajifmxqfcceibwredjf.supabase.co`
-- Client key: publishable browser key configured in `app.js`
+Every user-data table carries `user_id uuid references auth.users`, RLS is enabled with no policies, and grants are revoked from `anon`/`authenticated`: only the server's service role can touch data. Per-user uniqueness replaces the old single-user keys (`weaknesses (user_id, category)`, `skill_ratings (user_id, dimension)`, `repertoire_progress (user_id, line_id)`).
 
 Main tables:
 
@@ -260,7 +275,7 @@ Main tables:
 - `exercises`: practice positions linked to weaknesses or lessons.
 - `practice_attempts`: attempts on generated or curated exercises.
 
-This keeps the first version personal-only while leaving room for auth later.
+Accounts are live: each user's history is isolated by `user_id`, enforced server-side.
 
 ## Coaching Strategy
 
@@ -362,7 +377,7 @@ The biggest remaining work is turning strong analysis into a complete training s
 - Curriculum pages: opening repertoire, endgame modules, pawn-structure plans, lesson completion, and next-lesson recommendations.
 - Practice analytics: solve streaks, repeated miss tracking, trend charts, and improvement summaries.
 - Teaching polish: better arrows/highlights, mistake comparison cards, coach questions, and cleaner mobile/tablet layouts.
-- Data hardening: auth-ready Supabase policies, migrations, backup/restore, and more automated sync tests.
+- Data hardening: migrations tooling, backup/restore, and more automated sync tests. (Auth, RLS lockdown, and per-user isolation shipped.)
 
 ## Roadmap
 
@@ -404,6 +419,6 @@ The biggest remaining work is turning strong analysis into a complete training s
 ## Implementation Notes
 
 - The current app is static and intentionally avoids a build step.
-- `index.html`, `styles.css`, and `app.js` are the whole runnable app.
+- `index.html`, `styles.css`, and `app.js` are the whole runnable app; `server.js` serves it and owns every secret.
 - Stockfish is loaded from bundled files in `vendor/stockfish` first, then jsDelivr. If both fail, the app falls back to a heuristic opponent.
-- Supabase credentials are stored in browser local storage for this personal MVP. Do not use this model for a public multi-user app without proper auth and security rules.
+- The browser holds no database credentials. Supabase Auth issues session tokens (via the server-provided publishable key); the server verifies each token and performs all database access with the service role key. Local storage is a per-account cache, namespaced by user id.

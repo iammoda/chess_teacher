@@ -5,7 +5,8 @@ import { StockfishEngine } from "./lib/stockfish-engine.mjs";
 import { attachDragHandlers } from "./lib/board-drag.mjs";
 import { arrowsOverlaySvg, uciToArrow } from "./lib/board-arrows.mjs";
 import { playSound, classifyMoveForSound } from "./lib/sounds.mjs";
-import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, sendCoachChat, streamCoachChat } from "./lib/coach-client.mjs";
+import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, streamCoachChat } from "./lib/coach-client.mjs";
+import { createApiClient, ApiError } from "./lib/api-client.mjs";
 import {
   SKILL_DIMENSIONS,
   DIMENSION_LABELS,
@@ -45,7 +46,11 @@ const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 const CAPTURE_ORDER = ["q", "r", "b", "n", "p"];
 const MOVE_ANIMATION_MS = 240;
 
-const STORAGE_KEYS = {
+// Base storage keys. When the server has auth configured, every key is
+// namespaced per signed-in user (see applyStorageNamespace) so two accounts
+// on one browser never bleed into each other. Legacy local mode keeps the
+// bare keys.
+const STORAGE_KEY_BASES = {
   settings: "chess_teacher_settings_v1",
   activeGame: "chess_teacher_active_game_v1",
   profile: "chess_teacher_profile_v1",
@@ -59,19 +64,41 @@ const STORAGE_KEYS = {
   daily: "chess_teacher_daily_v1",
   coachChat: "chess_teacher_coach_chat_v1",
   coachMemory: "chess_teacher_coach_memory_v1",
-  supabase: "chess_teacher_supabase_v1",
 };
+
+let STORAGE_KEYS = buildStorageKeys("");
+
+function buildStorageKeys(userId) {
+  const keys = {};
+  for (const [name, base] of Object.entries(STORAGE_KEY_BASES)) {
+    keys[name] = userId ? `${base}::${userId}` : base;
+  }
+  return keys;
+}
+
+// Point all storage at the signed-in user. The first time an account signs in
+// on a browser that has legacy single-user data, that data is copied over so
+// nothing is lost.
+function applyStorageNamespace(userId) {
+  STORAGE_KEYS = buildStorageKeys(userId);
+  if (!userId) return;
+
+  const marker = `${STORAGE_KEY_BASES.settings}::${userId}`;
+  if (localStorage.getItem(marker) !== null) return;
+
+  for (const base of Object.values(STORAGE_KEY_BASES)) {
+    const legacy = localStorage.getItem(base);
+    if (legacy !== null && localStorage.getItem(`${base}::${userId}`) === null) {
+      localStorage.setItem(`${base}::${userId}`, legacy);
+    }
+  }
+}
 
 const LOCAL_STOCKFISH_BASE_URL = "/vendor/stockfish/";
 const STOCKFISH_CDN_BASE_URL = "https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/";
+// supabase-js is used ONLY for authentication (sign in/up, session refresh).
+// All data traffic goes through the Node server, which holds the service key.
 const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.105.4?bundle";
-const SUPABASE_PROJECT_REF = "kajifmxqfcceibwredjf";
-const SUPABASE_URL = `https://${SUPABASE_PROJECT_REF}.supabase.co`;
-const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_MCwuWk-w1KTNSI-pjTGBsQ_hm7_hwBc";
-const DEFAULT_SUPABASE_CONFIG = {
-  url: SUPABASE_URL,
-  anonKey: SUPABASE_PUBLISHABLE_KEY,
-};
 
 let supabaseModulePromise = null;
 
@@ -633,21 +660,24 @@ const els = {
 
 const state = {
   game: new Chess(),
-  settings: loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS),
-  profile: loadJson(STORAGE_KEYS.profile, {}),
-  practiceQueue: loadJson(STORAGE_KEYS.practice, []),
-  practiceHistory: loadJson(STORAGE_KEYS.practiceHistory, []),
-  localGames: loadJson(STORAGE_KEYS.games, []),
-  calibration: loadJson(STORAGE_KEYS.calibration, DEFAULT_CALIBRATION),
-  skill: loadJson(STORAGE_KEYS.skill, null),
+  // Storage-backed fields start as defaults and are filled by
+  // hydrateStateFromStorage() once the storage namespace is known (after
+  // sign-in when auth is configured, immediately in legacy local mode).
+  settings: structuredClone(DEFAULT_SETTINGS),
+  profile: {},
+  practiceQueue: [],
+  practiceHistory: [],
+  localGames: [],
+  calibration: structuredClone(DEFAULT_CALIBRATION),
+  skill: null,
   // { myOpenings: [openingId], lines: { [lineId]: { srs, reps, perfect } } }
-  repertoire: loadJson(STORAGE_KEYS.repertoire, { myOpenings: [], lines: {} }),
+  repertoire: { myOpenings: [], lines: {} },
   openingDrill: null,
-  mateLadder: loadJson(STORAGE_KEYS.mateLadder, { solved: [], attempts: {}, rungSolved: {} }),
-  daily: loadJson(STORAGE_KEYS.daily, { streak: 0, lastCompletedDate: null, todayCompleted: {} }),
+  mateLadder: { solved: [], attempts: {}, rungSolved: {} },
+  daily: { streak: 0, lastCompletedDate: null, todayCompleted: {} },
   clocks: null, // { white: ms, black: ms, increment: ms, side: "w"|"b", intervalId, gameFlagged: false }
-  coachChat: loadJson(STORAGE_KEYS.coachChat, { gameId: null, messages: [] }),
-  coachMemory: loadJson(STORAGE_KEYS.coachMemory, { notes: [], traces: [] }),
+  coachChat: { gameId: null, messages: [] },
+  coachMemory: { notes: [], traces: [] },
   coachThinking: false,
   coachError: "",
   pendingCoachQuestion: null,
@@ -692,14 +722,52 @@ const state = {
     model: "",
     status: "Checking OpenAI coach...",
   },
-  supabaseConfig: normalizeSupabaseConfig(loadJson(STORAGE_KEYS.supabase, DEFAULT_SUPABASE_CONFIG)),
-  supabase: null,
-  supabaseHealth: "",
-  supabaseReachable: null,
-  supabaseAnalysisReachable: null,
-  supabaseQualityReachable: null,
+  // Server-provided config from /api/health.
+  server: {
+    loaded: false,
+    authRequired: false,
+    syncConfigured: false,
+    supabaseAuth: null, // { url, publishableKey }
+  },
+  // Supabase Auth session state (identity only; data goes through /api).
+  auth: {
+    client: null,
+    session: null,
+    user: null,
+    mode: "sign_in", // sign_in | sign_up | reset | recovery
+    busy: false,
+    error: "",
+    notice: "",
+    recovery: false,
+  },
+  // Cloud sync status through the server API.
+  sync: {
+    reachable: null,
+    health: "",
+  },
+  account: {
+    busy: false,
+    status: "",
+    error: "",
+  },
   engine: null,
 };
+
+// Storage-backed state, re-read whenever the storage namespace changes.
+function hydrateStateFromStorage() {
+  state.settings = loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS);
+  state.profile = loadJson(STORAGE_KEYS.profile, {});
+  state.practiceQueue = loadJson(STORAGE_KEYS.practice, []);
+  state.practiceHistory = loadJson(STORAGE_KEYS.practiceHistory, []);
+  state.localGames = loadJson(STORAGE_KEYS.games, []);
+  state.calibration = loadJson(STORAGE_KEYS.calibration, DEFAULT_CALIBRATION);
+  state.skill = loadJson(STORAGE_KEYS.skill, null);
+  state.repertoire = loadJson(STORAGE_KEYS.repertoire, { myOpenings: [], lines: {} });
+  state.mateLadder = loadJson(STORAGE_KEYS.mateLadder, { solved: [], attempts: {}, rungSolved: {} });
+  state.daily = loadJson(STORAGE_KEYS.daily, { streak: 0, lastCompletedDate: null, todayCompleted: {} });
+  state.coachChat = loadJson(STORAGE_KEYS.coachChat, { gameId: null, messages: [] });
+  state.coachMemory = loadJson(STORAGE_KEYS.coachMemory, { notes: [], traces: [] });
+}
 
 function loadJson(key, fallback) {
   try {
@@ -714,14 +782,11 @@ function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-function normalizeSupabaseConfig(config) {
-  return {
-    ...DEFAULT_SUPABASE_CONFIG,
-    ...config,
-    url: config?.url || DEFAULT_SUPABASE_CONFIG.url,
-    anonKey: config?.anonKey || DEFAULT_SUPABASE_CONFIG.anonKey,
-  };
-}
+// The server API client. Every cloud request carries the current session's
+// access token; when signed out the endpoints reject and sync stays local.
+const api = createApiClient({
+  getToken: () => state.auth.session?.access_token || null,
+});
 
 async function loadSupabaseCreateClient() {
   if (!supabaseModulePromise) {
@@ -1250,15 +1315,23 @@ function renderCapturedTray(label, pieces, balanceText = "") {
 }
 
 function getStorageStatusLabel() {
-  if (state.supabaseReachable) return "Supabase ready";
-  if (state.supabase) return "Supabase configured";
-  if (state.supabaseConfig.url && !state.supabaseConfig.anonKey) return "Supabase key needed";
-  if (state.supabaseReachable === false) return "Supabase unavailable";
-  return "Supabase required";
+  if (state.sync.reachable) return "Cloud sync ready";
+  if (!state.server.syncConfigured) return "Local only";
+  if (!isSignedIn()) return "Sign in required";
+  if (state.sync.reachable === false) return "Cloud sync unavailable";
+  return "Cloud sync configured";
+}
+
+function isSignedIn() {
+  return Boolean(state.auth.session && state.auth.user);
+}
+
+function canCloudSync() {
+  return state.server.syncConfigured && isSignedIn();
 }
 
 function isSupabaseReady() {
-  return state.supabaseReachable === true;
+  return state.sync.reachable === true;
 }
 
 function isOpenAIReady() {
@@ -1270,13 +1343,18 @@ function isCoachAvailable() {
 }
 
 function getRequiredServiceRows() {
+  const syncDetail = isSupabaseReady()
+    ? "Online and writable."
+    : state.sync.health
+      || (!state.server.syncConfigured
+        ? "Not configured on the server. History stays in this browser."
+        : isSignedIn() ? "Checking cloud sync..." : "Sign in to sync your history.");
+
   return [
     {
-      name: "Supabase",
+      name: "Account & sync",
       ready: isSupabaseReady(),
-      detail: isSupabaseReady()
-        ? "Online and writable."
-        : state.supabaseHealth || (state.supabase ? "Checking database access..." : "Supabase must be configured and reachable."),
+      detail: syncDetail,
     },
     {
       name: "OpenAI coach",
@@ -1303,7 +1381,7 @@ function renderRequiredServicesCard() {
     <article class="mini-card service-gate-card">
       <span class="label">Services</span>
       <strong>Coach and sync status</strong>
-      <p>Play always works locally. The personal coach needs OpenAI; long-term history sync needs Supabase.</p>
+      <p>Play always works locally. The personal coach needs OpenAI; long-term history sync needs a signed-in account.</p>
       <div class="service-list">${rows}</div>
       <div class="button-row">
         <button id="checkRequiredServicesButton" type="button">Check services</button>
@@ -2364,10 +2442,8 @@ async function checkOpenAIHealth(options = {}) {
   if (options.render !== false) renderAll();
 
   try {
-    const response = await fetch("/api/health?check=1");
-    if (!response.ok) throw new Error("Coach server is not responding.");
-    const data = await response.json();
-    state.featureFlags.remoteHistoryEraseEnabled = Boolean(data.remoteHistoryEraseEnabled);
+    const data = await api.health(true);
+    applyServerConfig(data);
     state.openAI.configured = Boolean(data.openaiConfigured);
     state.openAI.model = data.model || "";
     state.openAI.online = Boolean(data.openaiOnline);
@@ -2376,6 +2452,9 @@ async function checkOpenAIHealth(options = {}) {
       : state.openAI.configured
         ? data.openaiError || "OpenAI coach is configured, but the API is not reachable."
         : "Missing OPENAI_API_KEY";
+    if ("dataOnline" in data && !data.dataOnline && data.dataError) {
+      state.sync.health = data.dataError;
+    }
   } catch (error) {
     state.openAI.configured = false;
     state.openAI.online = false;
@@ -2391,19 +2470,26 @@ async function checkOpenAIHealth(options = {}) {
   return isOpenAIReady();
 }
 
+// Copies /api/health server-level fields into state.
+function applyServerConfig(data) {
+  state.server.loaded = true;
+  state.server.authRequired = Boolean(data.authRequired);
+  state.server.syncConfigured = Boolean(data.syncConfigured);
+  state.server.supabaseAuth = data.supabaseAuth || null;
+  state.featureFlags.remoteHistoryEraseEnabled = Boolean(data.remoteHistoryEraseEnabled);
+}
+
 async function verifyRequiredServices() {
-  state.supabaseHealth = "Testing Supabase connection...";
+  state.sync.health = "Testing cloud sync...";
   state.openAI.status = "Checking OpenAI coach...";
   state.openAI.online = false;
   renderAll();
 
-  const [supabaseReady, openAIReady] = await Promise.all([
-    verifySupabaseConnection({ syncStart: true, render: false }),
-    checkOpenAIHealth({ render: false }),
-  ]);
+  const openAIReady = await checkOpenAIHealth({ render: false });
+  const syncReady = await verifyCloudSync({ syncStart: true, render: false });
 
   renderAll();
-  return supabaseReady && openAIReady;
+  return syncReady && openAIReady;
 }
 
 // ─────────── Conversational coach ───────────
@@ -2491,6 +2577,7 @@ async function requestCoachChat(event, moment = null) {
 
   try {
     const data = await streamCoachChat(buildChatPayload(event, moment), {
+      fetchImpl: api.authedFetch,
       onDelta: (partial) => {
         streamingMessage.content = partial;
         // Cheap live update: rewrite the last bubble's text without re-rendering.
@@ -4105,10 +4192,12 @@ function renderSkillDimensionCard() {
 function renderSettingsPanel() {
   const calibrated = isCalibrationComplete();
   const erase = state.historyErase;
-  const remoteEraseEnabled = state.featureFlags.remoteHistoryEraseEnabled;
+  const account = state.account;
+  const remoteEraseAvailable = canCloudSync() || state.featureFlags.remoteHistoryEraseEnabled;
   els.settingsPanel.innerHTML = `
     <h2>Settings</h2>
     <div class="settings-grid">
+      ${renderAccountCard()}
       ${renderRequiredServicesCard()}
       <article class="mini-card">
         <strong>Bot difficulty</strong>
@@ -4122,10 +4211,14 @@ function renderSettingsPanel() {
         <button id="testOpenAIButton" type="button">Test OpenAI coach</button>
       </article>
       <article class="mini-card">
-        <strong>Supabase sync</strong>
+        <strong>Cloud sync</strong>
         <p class="sync-status-row"><span class="label">Storage</span> ${escapeHtml(getStorageStatusLabel())}</p>
-        <p>${state.supabaseReachable ? "Connected. Games, moves, practice, and profile events can sync." : "Optional. Play always works locally; connect Supabase to keep long-term history."}</p>
-        ${state.supabaseHealth ? `<p>${escapeHtml(state.supabaseHealth)}</p>` : ""}
+        <p>${state.sync.reachable
+          ? "Connected. Games, moves, practice, and profile events sync to your account."
+          : state.server.syncConfigured
+            ? "Sign in to keep long-term history in your account. Play always works locally."
+            : "Not configured on the server. Play always works locally; history stays in this browser."}</p>
+        ${state.sync.health ? `<p>${escapeHtml(state.sync.health)}</p>` : ""}
       </article>
       <label class="field">
         <span>Your name</span>
@@ -4167,34 +4260,22 @@ function renderSettingsPanel() {
         <input id="showEvalBarInput" type="checkbox"${state.settings.showEvalBar !== false ? " checked" : ""}>
         <span>Show evaluation bar</span>
       </label>
-      <details class="advanced-settings">
-        <summary>Connection details</summary>
-        <label class="field">
-          <span>Supabase URL</span>
-          <input id="supabaseUrlInput" type="url" value="${escapeAttr(state.supabaseConfig.url)}" placeholder="https://project.supabase.co">
-        </label>
-        <label class="field">
-          <span>Publishable key</span>
-          <input id="supabaseKeyInput" type="password" value="${escapeAttr(state.supabaseConfig.anonKey)}" placeholder="Publishable key">
-        </label>
-      </details>
       <div class="button-row">
         <button id="saveSettingsButton" type="button">Save settings</button>
-        <button id="testSupabaseButton" type="button">Test Supabase</button>
+        <button id="testSupabaseButton" type="button">Test cloud sync</button>
       </div>
       <article class="mini-card danger-zone-card">
-        <span class="label">Testing tools</span>
+        <span class="label">Danger zone</span>
         <strong>Erase history</strong>
-        <p>Clear games, moves, calibration, weakness profile, practice queue, and practice history. Settings and service connections stay saved.</p>
+        <p>Clear games, moves, calibration, weakness profile, practice queue, and practice history. Settings and your account stay saved.</p>
         ${erase.status ? `<p class="sync-status-row good-status"><span class="label">Status</span> ${escapeHtml(erase.status)}</p>` : ""}
         ${erase.error ? `<p class="sync-status-row danger-status"><span class="label">Error</span> ${escapeHtml(erase.error)}</p>` : ""}
         <div class="button-row">
           <button id="eraseLocalHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local history</button>
-          ${remoteEraseEnabled ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + Supabase history</button>` : ""}
+          ${remoteEraseAvailable ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + Supabase history</button>` : ""}
         </div>
-        ${remoteEraseEnabled
-          ? "<p class=\"empty-state\">Remote erase is enabled by ENABLE_REMOTE_HISTORY_ERASE for testing.</p>"
-          : "<p class=\"empty-state\">Set ENABLE_REMOTE_HISTORY_ERASE=true in .env and restart the server to show the remote wipe option.</p>"}
+        ${account.status ? `<p class="sync-status-row good-status"><span class="label">Account</span> ${escapeHtml(account.status)}</p>` : ""}
+        ${account.error ? `<p class="sync-status-row danger-status"><span class="label">Account</span> ${escapeHtml(account.error)}</p>` : ""}
       </article>
     </div>
   `;
@@ -4205,6 +4286,39 @@ function renderSettingsPanel() {
   document.querySelector("#testSupabaseButton").addEventListener("click", testSupabaseConnection);
   document.querySelector("#eraseLocalHistoryButton")?.addEventListener("click", eraseLocalHistory);
   document.querySelector("#eraseRemoteHistoryButton")?.addEventListener("click", eraseRemoteHistory);
+  document.querySelector("#signOutButton")?.addEventListener("click", signOut);
+  document.querySelector("#exportDataButton")?.addEventListener("click", exportAccountData);
+}
+
+// Account card: identity, sign out, data export. Only meaningful when the
+// server has auth configured; local mode explains itself instead.
+function renderAccountCard() {
+  if (!state.server.authRequired) {
+    return `
+      <article class="mini-card account-card">
+        <span class="label">Account</span>
+        <strong>Local mode</strong>
+        <p>No account is configured on this server. Progress stays in this browser.</p>
+      </article>
+    `;
+  }
+
+  const email = state.auth.user?.email || "";
+  return `
+    <article class="mini-card account-card">
+      <span class="label">Account</span>
+      <strong>${isSignedIn() ? escapeHtml(email || "Signed in") : "Signed out"}</strong>
+      <p>${isSignedIn()
+        ? "Your games, coach memory, and skill profile sync to this account."
+        : "Sign in to sync your training history."}</p>
+      <div class="button-row">
+        ${isSignedIn() ? `
+          <button id="exportDataButton" type="button"${state.account.busy ? " disabled" : ""}>Export my data</button>
+          <button id="signOutButton" type="button">Sign out</button>
+        ` : ""}
+      </div>
+    </article>
+  `;
 }
 
 function getActivePlayerColor() {
@@ -5993,186 +6107,335 @@ function restoreActiveGame() {
   }
 }
 
-async function setupSupabase() {
-  const { url, anonKey } = state.supabaseConfig;
-  if (!url || !anonKey) {
-    state.supabase = null;
-    state.supabaseReachable = false;
-    state.supabaseAnalysisReachable = false;
-    state.supabaseQualityReachable = false;
-    state.supabaseHealth = "Supabase URL and publishable key are required.";
+// ─────────── Account / authentication ───────────
+//
+// Identity lives in Supabase Auth (email + password). The browser only ever
+// holds the session token; every data operation goes through the Node server,
+// which verifies the token and stamps user_id server-side.
+
+let authGateResolve = null;
+
+async function initAuthClient() {
+  const config = state.server.supabaseAuth;
+  if (!config?.url || !config?.publishableKey) {
+    state.auth.error = "The server did not provide sign-in configuration.";
     return false;
   }
 
   try {
     const createClient = await loadSupabaseCreateClient();
-    state.supabase = createClient(url, anonKey);
-    state.supabaseReachable = null;
-    state.supabaseAnalysisReachable = null;
-    state.supabaseQualityReachable = null;
-    renderGameMeta();
-    return true;
+    state.auth.client = createClient(config.url, config.publishableKey, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
   } catch (error) {
-    console.warn("Supabase client could not load", error);
-    state.supabase = null;
-    state.supabaseReachable = false;
-    state.supabaseAnalysisReachable = false;
-    state.supabaseQualityReachable = false;
-    state.supabaseHealth = "Supabase client could not load.";
-    renderGameMeta();
+    console.warn("Auth client could not load", error);
+    state.auth.error = "Could not load the sign-in module. Check your connection and reload.";
     return false;
   }
+
+  state.auth.client.auth.onAuthStateChange((event, session) => {
+    state.auth.session = session || null;
+    state.auth.user = session?.user || null;
+    if (event === "PASSWORD_RECOVERY") {
+      state.auth.recovery = true;
+      state.auth.mode = "recovery";
+      renderAuthGate();
+    } else if (event === "SIGNED_OUT") {
+      window.location.reload();
+    } else if (event === "SIGNED_IN" && authGateResolve && isSignedIn() && !state.auth.recovery) {
+      // Covers sessions that arrive outside the form flow, e.g. returning
+      // from an email confirmation link with tokens in the URL hash.
+      finishAuthGate();
+    }
+  });
+
+  const { data } = await state.auth.client.auth.getSession();
+  state.auth.session = data?.session || null;
+  state.auth.user = data?.session?.user || null;
+  return true;
 }
+
+// Blocks the app behind the sign-in overlay until a session exists.
+function ensureSignedIn() {
+  if (isSignedIn() && !state.auth.recovery) {
+    finishAuthGate();
+    return Promise.resolve();
+  }
+  renderAuthGate();
+  return new Promise((resolve) => {
+    authGateResolve = resolve;
+  });
+}
+
+function finishAuthGate() {
+  document.querySelector("#authGate")?.remove();
+  if (authGateResolve) {
+    const resolve = authGateResolve;
+    authGateResolve = null;
+    resolve();
+  }
+}
+
+function renderAuthGate() {
+  let gate = document.querySelector("#authGate");
+  if (!gate) {
+    gate = document.createElement("div");
+    gate.id = "authGate";
+    gate.className = "auth-gate";
+    document.body.append(gate);
+  }
+
+  const { mode, busy, error, notice } = state.auth;
+  const titles = {
+    sign_in: "Welcome back",
+    sign_up: "Create your account",
+    reset: "Reset your password",
+    recovery: "Set a new password",
+  };
+  const submits = {
+    sign_in: "Sign in",
+    sign_up: "Create account",
+    reset: "Send reset link",
+    recovery: "Save new password",
+  };
+  const wantsEmail = mode !== "recovery";
+  const wantsPassword = mode !== "reset";
+
+  gate.innerHTML = `
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img src="./assets/squirrel_chess.svg" alt="" aria-hidden="true">
+        <strong>Personal Chess Teacher</strong>
+      </div>
+      <h2>${escapeHtml(titles[mode] || titles.sign_in)}</h2>
+      <p class="auth-sub">Your games, coach memory, and skill profile follow your account.</p>
+      <form id="authForm" novalidate>
+        ${wantsEmail ? `
+          <label class="field">
+            <span>Email</span>
+            <input id="authEmailInput" type="email" autocomplete="email" required placeholder="you@example.com">
+          </label>
+        ` : ""}
+        ${wantsPassword ? `
+          <label class="field">
+            <span>${mode === "recovery" ? "New password" : "Password"}</span>
+            <input id="authPasswordInput" type="password" autocomplete="${mode === "sign_in" ? "current-password" : "new-password"}" required minlength="8" placeholder="At least 8 characters">
+          </label>
+        ` : ""}
+        ${error ? `<p class="auth-error">${escapeHtml(error)}</p>` : ""}
+        ${notice ? `<p class="auth-notice">${escapeHtml(notice)}</p>` : ""}
+        <button type="submit" class="auth-submit"${busy ? " disabled" : ""}>${busy ? "Working..." : escapeHtml(submits[mode] || "Continue")}</button>
+      </form>
+      <div class="auth-links">
+        ${mode === "sign_in" ? `
+          <button type="button" data-auth-mode="sign_up">Create account</button>
+          <button type="button" data-auth-mode="reset">Forgot password?</button>
+        ` : ""}
+        ${mode === "sign_up" || mode === "reset" ? `
+          <button type="button" data-auth-mode="sign_in">Back to sign in</button>
+        ` : ""}
+      </div>
+    </div>
+  `;
+
+  gate.querySelector("#authForm").addEventListener("submit", handleAuthSubmit);
+  for (const button of gate.querySelectorAll("[data-auth-mode]")) {
+    button.addEventListener("click", () => {
+      state.auth.mode = button.dataset.authMode;
+      state.auth.error = "";
+      state.auth.notice = "";
+      renderAuthGate();
+    });
+  }
+  gate.querySelector("#authEmailInput, #authPasswordInput")?.focus();
+}
+
+async function handleAuthSubmit(event) {
+  event.preventDefault();
+  if (state.auth.busy || !state.auth.client) return;
+
+  const mode = state.auth.mode;
+  const email = document.querySelector("#authEmailInput")?.value.trim() || "";
+  const password = document.querySelector("#authPasswordInput")?.value || "";
+
+  state.auth.busy = true;
+  state.auth.error = "";
+  state.auth.notice = "";
+  renderAuthGate();
+
+  try {
+    const auth = state.auth.client.auth;
+    if (mode === "sign_in") {
+      const { error } = await auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    } else if (mode === "sign_up") {
+      const { data, error } = await auth.signUp({ email, password });
+      if (error) throw error;
+      if (!data.session) {
+        state.auth.notice = "Check your email to confirm your account, then sign in.";
+        state.auth.mode = "sign_in";
+      }
+    } else if (mode === "reset") {
+      const { error } = await auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+      if (error) throw error;
+      state.auth.notice = "Check your email for the reset link.";
+      state.auth.mode = "sign_in";
+    } else if (mode === "recovery") {
+      const { error } = await auth.updateUser({ password });
+      if (error) throw error;
+      state.auth.recovery = false;
+    }
+  } catch (error) {
+    state.auth.error = error.message || "Authentication failed. Try again.";
+  }
+  state.auth.busy = false;
+
+  const { data } = await state.auth.client.auth.getSession();
+  state.auth.session = data?.session || null;
+  state.auth.user = data?.session?.user || null;
+
+  if (isSignedIn() && !state.auth.recovery) {
+    finishAuthGate();
+  } else {
+    renderAuthGate();
+  }
+}
+
+async function signOut() {
+  try {
+    await state.auth.client?.auth.signOut();
+  } catch (error) {
+    console.warn("Sign out failed", error);
+  }
+  window.location.reload();
+}
+
+async function exportAccountData() {
+  if (!canCloudSync() || state.account.busy) return;
+  state.account = { busy: true, status: "Preparing export...", error: "" };
+  renderSettingsPanel();
+
+  try {
+    const data = await api.accountExport();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "chess-teacher-export.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    state.account = { busy: false, status: "Export downloaded.", error: "" };
+  } catch (error) {
+    state.account = { busy: false, status: "", error: error.message || "Export failed." };
+  }
+  renderSettingsPanel();
+}
+
+// ─────────── Cloud sync (through the server API) ───────────
 
 async function syncGameStart() {
-  if (!state.supabase) return false;
   const opening = detectOpening();
-  return await safeSupabase(() => state.supabase.from("games").upsert({
-    id: state.currentGameId,
-    started_at: state.startedAt,
-    player_color: state.settings.playerColor,
-    engine_level: getCurrentBotDepth(),
-    result: "in_progress",
-    opening_name: opening.name,
-    opening_key: "",
-    pgn: "",
-    status: "in_progress",
-  }));
+  return await apiSyncOp({
+    op: "upsert",
+    table: "games",
+    rows: [{
+      id: state.currentGameId,
+      started_at: state.startedAt,
+      player_color: state.settings.playerColor,
+      engine_level: getCurrentBotDepth(),
+      result: "in_progress",
+      opening_name: opening.name,
+      opening_key: "",
+      pgn: "",
+      status: "in_progress",
+    }],
+  });
 }
 
-async function verifySupabaseConnection(options = {}) {
-  if (!state.supabase) {
-    const loaded = await setupSupabase();
-    if (!loaded) {
-      if (!state.supabaseHealth) state.supabaseHealth = "Supabase is required before the app can be used.";
-      state.supabaseReachable = false;
-      state.supabaseAnalysisReachable = false;
-      state.supabaseQualityReachable = false;
-      if (options.render !== false) renderAll();
-      return false;
-    }
-  }
-
-  state.supabaseHealth = "Testing Supabase connection...";
-  if (options.render !== false) renderAll();
-
-  try {
-    const { error: gamesError } = await state.supabase.from("games").select("id", { count: "exact", head: true });
-    if (gamesError) throw new Error(`games table: ${formatSupabaseError(gamesError)}`);
-
-    const { error: movesError } = await state.supabase.from("moves").select("id", { count: "exact", head: true });
-    if (movesError) throw new Error(`moves table: ${formatSupabaseError(movesError)}`);
-
-    const { error: analysisError } = await state.supabase.from("moves").select("analysis_status", { count: "exact", head: true });
-    state.supabaseAnalysisReachable = !analysisError;
-    const { error: qualityError } = await state.supabase.from("moves").select("quality_key", { count: "exact", head: true });
-    state.supabaseQualityReachable = !qualityError;
-    const schemaWarnings = [
-      analysisError ? `engine analysis columns are not available yet: ${formatOptionalColumnError(analysisError, "analysis_status")}` : "",
-      qualityError ? `move quality columns are not available yet: ${formatOptionalColumnError(qualityError, "quality_key")}` : "",
-    ].filter(Boolean);
-    const analysisWarning = schemaWarnings.length
-      ? ` ${schemaWarnings.join(" ")}. Apply supabase/schema.sql to persist review data.`
-      : "";
-
-    if (options.syncStart !== false) {
-      const saved = await syncGameStart();
-      if (!saved) {
-        state.supabaseHealth = "Supabase is reachable, but saving the active game failed.";
-        state.supabaseReachable = false;
-        if (options.render !== false) renderAll();
-        return false;
-      }
-    }
-
-    state.supabaseHealth = `Supabase is online and writable.${analysisWarning}`;
-    state.supabaseReachable = true;
-    if (options.render !== false) renderAll();
-    return true;
-  } catch (error) {
-    state.supabaseHealth = `Supabase is required, but it is not reachable: ${formatSupabaseError(error)}`;
-    state.supabaseReachable = false;
-    state.supabaseAnalysisReachable = false;
-    state.supabaseQualityReachable = false;
+async function verifyCloudSync(options = {}) {
+  if (!state.server.syncConfigured) {
+    state.sync.reachable = false;
+    state.sync.health = "Cloud sync is not configured on the server. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.";
     if (options.render !== false) renderAll();
     return false;
   }
-}
 
-function formatSupabaseError(error) {
-  if (!error) return "unknown error";
-  if (typeof error === "string") return error;
-
-  const parts = [
-    error.message,
-    error.details,
-    error.hint,
-    error.code ? `code ${error.code}` : "",
-  ].filter(Boolean);
-
-  if (parts.length) return parts.join(" ");
-
-  try {
-    const serialized = JSON.stringify(error);
-    return serialized && serialized !== "{}" ? serialized : "unknown error";
-  } catch {
-    return "unknown error";
+  if (!isSignedIn()) {
+    state.sync.reachable = false;
+    state.sync.health = "Sign in to sync your training history.";
+    if (options.render !== false) renderAll();
+    return false;
   }
-}
 
-function formatOptionalColumnError(error, column) {
-  const formatted = formatSupabaseError(error);
-  if (!formatted || formatted === "unknown error" || formatted === "{\"message\":\"\"}") {
-    return `${column} column is missing`;
+  state.sync.health = "Testing cloud sync...";
+  if (options.render !== false) renderAll();
+
+  // Saving the active game exercises the whole path: session token, server
+  // validation, and a real database write.
+  const saved = await syncGameStart();
+  state.sync.reachable = saved;
+  if (saved) {
+    state.sync.health = "Cloud sync is online and writable.";
+  } else if (state.sync.health === "Testing cloud sync...") {
+    state.sync.health = "Cloud sync failed. Check the server logs.";
   }
-  return formatted;
+  if (options.render !== false) renderAll();
+  return saved;
 }
 
 async function syncGameEnd(result) {
-  if (!state.supabase) return;
   const opening = detectOpening();
   const savedGame = state.localGames.find((game) => game.id === state.currentGameId);
-  await safeSupabase(() => state.supabase.from("games").update({
-    ended_at: new Date().toISOString(),
-    result,
-    engine_level: savedGame?.engineLevel || getCurrentBotDepth(),
-    opening_name: opening.name,
-    opening_key: state.moves.slice(0, 8).map((move) => normalizeSan(move.san)).join(" "),
-    pgn: state.game.pgn(),
-    status: "complete",
-  }).eq("id", state.currentGameId));
+  await apiSyncOp({
+    op: "update",
+    table: "games",
+    id: state.currentGameId,
+    patch: {
+      ended_at: new Date().toISOString(),
+      result,
+      engine_level: savedGame?.engineLevel || getCurrentBotDepth(),
+      opening_name: opening.name,
+      opening_key: state.moves.slice(0, 8).map((move) => normalizeSan(move.san)).join(" "),
+      pgn: state.game.pgn(),
+      status: "complete",
+    },
+  });
 }
 
 async function syncMove(record) {
-  if (!state.supabase) return;
-  await safeSupabase(() => state.supabase.from("moves").insert({
-    id: record.id,
-    game_id: record.gameId,
-    ply: record.ply,
-    role: record.role,
-    color: record.color,
-    san: record.san,
-    uci: record.uci,
-    piece: record.piece,
-    captured: record.captured,
-    fen_before: record.beforeFen,
-    fen_after: record.afterFen,
-    classification: record.classification,
-    tags: record.tags,
-    note: record.note,
-  }));
+  await apiSyncOp({
+    op: "insert",
+    table: "moves",
+    rows: [{
+      id: record.id,
+      game_id: record.gameId,
+      ply: record.ply,
+      role: record.role,
+      color: record.color,
+      san: record.san,
+      uci: record.uci,
+      piece: record.piece,
+      captured: record.captured,
+      fen_before: record.beforeFen,
+      fen_after: record.afterFen,
+      classification: record.classification,
+      tags: record.tags,
+      note: record.note,
+    }],
+  });
 }
 
 async function syncMoveAnalysis(record) {
-  if (!state.supabase) return;
-  const payload = {
-    classification: record.classification,
-    tags: record.tags,
-    note: record.note,
-  };
-
-  if (state.supabaseAnalysisReachable === true) {
-    Object.assign(payload, {
+  await apiSyncOp({
+    op: "update",
+    table: "moves",
+    id: record.id,
+    patch: {
+      classification: record.classification,
+      tags: record.tags,
+      note: record.note,
       analysis_status: record.analysisStatus,
       engine_depth: record.engineDepth,
       engine_source: record.engineSource,
@@ -6184,96 +6447,111 @@ async function syncMoveAnalysis(record) {
       best_move_uci: record.bestMoveUci,
       best_move_san: record.bestMoveSan,
       principal_variation: record.principalVariation || [],
-    });
-  }
-
-  if (state.supabaseQualityReachable === true) {
-    payload.quality_key = record.qualityKey || null;
-    payload.quality_label = record.qualityLabel || null;
-    payload.quality_reason = record.qualityReason || null;
-  }
-
-  await safeSupabase(() => state.supabase.from("moves").update(payload).eq("id", record.id));
+      quality_key: record.qualityKey || null,
+      quality_label: record.qualityLabel || null,
+      quality_reason: record.qualityReason || null,
+    },
+  });
 }
 
 async function syncWeakness(tag, record, aggregate) {
-  if (!state.supabase) return;
+  await apiSyncOp({
+    op: "insert",
+    table: "weakness_events",
+    rows: [{
+      game_id: state.currentGameId,
+      move_id: record.id,
+      category: tag.category,
+      label: tag.label,
+      severity: tag.severity,
+      fen: record.beforeFen,
+      note: tag.note,
+    }],
+  });
 
-  await safeSupabase(() => state.supabase.from("weakness_events").insert({
-    game_id: state.currentGameId,
-    move_id: record.id,
-    category: tag.category,
-    label: tag.label,
-    severity: tag.severity,
-    fen: record.beforeFen,
-    note: tag.note,
-  }));
-
-  await safeSupabase(() => state.supabase.from("weaknesses").upsert({
-    category: tag.category,
-    label: tag.label,
-    count: aggregate.count,
-    severity: aggregate.severity,
-    last_seen: aggregate.lastSeen,
-    examples: aggregate.examples,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "category" }));
+  await apiSyncOp({
+    op: "upsert",
+    table: "weaknesses",
+    rows: [{
+      category: tag.category,
+      label: tag.label,
+      count: aggregate.count,
+      severity: aggregate.severity,
+      last_seen: aggregate.lastSeen,
+      examples: aggregate.examples,
+      updated_at: new Date().toISOString(),
+    }],
+  });
 }
 
 async function syncPosition(record, item) {
-  if (!state.supabase) return;
-  await safeSupabase(() => state.supabase.from("positions").insert({
-    game_id: state.currentGameId,
-    move_id: record.id,
-    fen: item.fen,
-    phase: getPhase(item.fen),
-    category: item.category,
-    tags: record.tags,
-    prompt: item.prompt,
-    best_candidates: item.candidates,
-  }));
+  await apiSyncOp({
+    op: "insert",
+    table: "positions",
+    rows: [{
+      game_id: state.currentGameId,
+      move_id: record.id,
+      fen: item.fen,
+      phase: getPhase(item.fen),
+      category: item.category,
+      tags: record.tags,
+      prompt: item.prompt,
+      best_candidates: item.candidates,
+    }],
+  });
 }
 
 async function syncPracticeAttempt(item, result, chosenMove = null) {
-  if (!state.supabase) return;
-  await safeSupabase(() => state.supabase.from("practice_attempts").insert({
-    source_key: item.sourceKey,
-    fen: item.fen,
-    chosen_move: chosenMove,
-    expected_moves: item.candidates,
-    result,
-  }));
+  await apiSyncOp({
+    op: "insert",
+    table: "practice_attempts",
+    rows: [{
+      source_key: item.sourceKey,
+      fen: item.fen,
+      chosen_move: chosenMove,
+      expected_moves: item.candidates,
+      result,
+    }],
+  });
 }
 
 async function syncReasoningTrace(trace) {
-  if (!state.supabase || !trace) return;
-  await safeSupabase(() => state.supabase.from("reasoning_traces").insert({
-    game_id: trace.gameId,
-    ply: trace.ply,
-    fen: trace.fen,
-    san: trace.san,
-    question: trace.question,
-    answer: trace.answer,
-    coach_takeaway: trace.takeaway || null,
-  }));
+  if (!trace) return;
+  await apiSyncOp({
+    op: "insert",
+    table: "reasoning_traces",
+    rows: [{
+      game_id: trace.gameId,
+      ply: trace.ply,
+      fen: trace.fen,
+      san: trace.san,
+      question: trace.question,
+      answer: trace.answer,
+      coach_takeaway: trace.takeaway || null,
+    }],
+  });
 }
 
 async function syncRepertoireProgress(lineId, openingId, progress) {
-  if (!state.supabase || !progress?.srs) return;
-  await safeSupabase(() => state.supabase.from("repertoire_progress").upsert({
-    line_id: lineId,
-    opening_id: openingId,
-    ease: progress.srs.ease,
-    interval_days: progress.srs.intervalDays,
-    due_at: progress.srs.dueAt,
-    reps: progress.reps,
-    lapses: progress.srs.lapses,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "line_id" }));
+  if (!progress?.srs) return;
+  await apiSyncOp({
+    op: "upsert",
+    table: "repertoire_progress",
+    rows: [{
+      line_id: lineId,
+      opening_id: openingId,
+      ease: progress.srs.ease,
+      interval_days: progress.srs.intervalDays,
+      due_at: progress.srs.dueAt,
+      reps: progress.reps,
+      lapses: progress.srs.lapses,
+      updated_at: new Date().toISOString(),
+    }],
+  });
 }
 
 async function syncSkillRatings(skill) {
-  if (!state.supabase || !skill?.dims) return;
+  if (!skill?.dims) return;
   const rows = SKILL_DIMENSIONS
     .filter((dim) => skill.dims[dim]?.rating !== null)
     .map((dim) => ({
@@ -6285,30 +6563,36 @@ async function syncSkillRatings(skill) {
       updated_at: new Date().toISOString(),
     }));
   if (!rows.length) return;
-  await safeSupabase(() => state.supabase.from("skill_ratings").upsert(rows, { onConflict: "dimension" }));
+  await apiSyncOp({ op: "upsert", table: "skill_ratings", rows });
 }
 
-async function safeSupabase(operation) {
+// Sends one sync operation to the server. Quietly no-ops when cloud sync is
+// unavailable (server unconfigured or signed out) so play never blocks.
+async function apiSyncOp(payload) {
+  if (!canCloudSync()) return false;
   try {
-    const { error } = await operation();
-    if (error) throw error;
-    state.supabaseReachable = true;
+    await api.syncOp(payload);
+    state.sync.reachable = true;
     renderGameMeta();
     return true;
   } catch (error) {
-    console.warn("Supabase sync failed", error);
+    console.warn("Cloud sync failed", error);
+    if (error instanceof ApiError && error.status === 401) {
+      state.sync.reachable = false;
+      state.sync.health = "Your session has expired. Sign in again to keep syncing.";
+    }
     renderGameMeta();
     return false;
   }
 }
 
 async function testSupabaseConnection() {
-  await saveSettingsFromPanel({ syncStart: false });
+  await saveSettingsFromPanel();
 
-  await verifySupabaseConnection({ syncStart: true });
+  await verifyCloudSync({ syncStart: true });
 }
 
-async function saveSettingsFromPanel(options = {}) {
+async function saveSettingsFromPanel() {
   state.settings.displayName = normalizeDisplayName(document.querySelector("#displayNameInput").value);
   state.settings.playerColor = document.querySelector("#playerColorInput").value;
   state.settings.coachMode = document.querySelector("#coachModeInput").value;
@@ -6316,15 +6600,9 @@ async function saveSettingsFromPanel(options = {}) {
   state.settings.soundEnabled = document.querySelector("#soundEnabledInput")?.checked !== false;
   state.settings.showBestArrow = document.querySelector("#showBestArrowInput")?.checked !== false;
   state.settings.showEvalBar = document.querySelector("#showEvalBarInput")?.checked !== false;
-  state.supabaseConfig.url = document.querySelector("#supabaseUrlInput").value.trim();
-  state.supabaseConfig.anonKey = document.querySelector("#supabaseKeyInput").value.trim();
   saveJson(STORAGE_KEYS.settings, state.settings);
-  saveJson(STORAGE_KEYS.supabase, state.supabaseConfig);
   renderAll();
-
-  const connected = await setupSupabase();
-  if (!connected) return false;
-  return await verifySupabaseConnection({ syncStart: options.syncStart !== false, render: true });
+  return true;
 }
 
 function clearHistoryStorage() {
@@ -6397,8 +6675,8 @@ async function eraseLocalHistory() {
 }
 
 async function eraseRemoteHistory() {
-  if (!state.featureFlags.remoteHistoryEraseEnabled) return;
-  if (!confirmHistoryErase("Erase local and Supabase history? This deletes games, moves, calibration, profile, and practice history for this test database. Settings stay saved.")) {
+  if (!canCloudSync() && !state.featureFlags.remoteHistoryEraseEnabled) return;
+  if (!confirmHistoryErase("Erase local and Supabase history? This permanently deletes your cloud games, moves, calibration, profile, and practice history for this account. Settings stay saved.")) {
     return;
   }
 
@@ -6410,14 +6688,13 @@ async function eraseRemoteHistory() {
   renderAll();
 
   try {
-    const connected = state.supabase || await setupSupabase();
-    if (!connected || !state.supabase) {
-      throw new Error(state.supabaseHealth || "Supabase is not configured.");
+    if (!canCloudSync()) {
+      throw new Error(state.sync.health || "Sign in before erasing cloud history.");
     }
 
     await deleteSupabaseHistory();
     resetLocalHistoryForErase();
-    state.supabaseReachable = true;
+    state.sync.reachable = true;
     state.historyErase = {
       busy: false,
       status: "Local and Supabase history erased. Calibration is reset.",
@@ -6429,29 +6706,17 @@ async function eraseRemoteHistory() {
       status: "",
       error: error.message || "History erase failed.",
     };
-    state.supabaseHealth = `Supabase history erase failed: ${state.historyErase.error}`;
+    state.sync.health = `Cloud history erase failed: ${state.historyErase.error}`;
   }
 
   renderAll();
 }
 
+// Deletes every cloud row belonging to the signed-in account (games, moves,
+// positions, weaknesses, weakness_events, practice_attempts, and the rest)
+// through the server, which scopes the wipe to the verified user.
 async function deleteSupabaseHistory() {
-  const tables = [
-    "practice_attempts",
-    "weakness_events",
-    "positions",
-    "moves",
-    "weaknesses",
-    "games",
-  ];
-
-  for (const table of tables) {
-    const { error } = await state.supabase
-      .from(table)
-      .delete()
-      .neq("id", "00000000-0000-0000-0000-000000000000");
-    if (error) throw new Error(`${table}: ${formatSupabaseError(error)}`);
-  }
+  await api.accountDelete();
 }
 
 function newGame() {
@@ -6573,7 +6838,36 @@ function bindEvents() {
   });
 }
 
-function boot() {
+// Loads /api/health before anything renders so the client knows whether the
+// server requires sign-in and where Supabase Auth lives.
+async function fetchServerConfig() {
+  try {
+    const data = await api.health();
+    applyServerConfig(data);
+    state.openAI.configured = Boolean(data.openaiConfigured);
+    state.openAI.model = data.model || "";
+  } catch (error) {
+    console.warn("Could not load server config; continuing in local mode", error);
+    state.server.loaded = false;
+  }
+}
+
+async function boot() {
+  await fetchServerConfig();
+
+  if (state.server.authRequired) {
+    const authReady = await initAuthClient();
+    if (authReady) {
+      await ensureSignedIn();
+      applyStorageNamespace(state.auth.user?.id || "");
+    } else {
+      // Auth module unreachable (e.g. offline dev): fall back to local mode
+      // so the board still works. Cloud sync stays off.
+      state.sync.health = state.auth.error || "Sign-in is unavailable right now.";
+    }
+  }
+
+  hydrateStateFromStorage();
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
   normalizeCalibrationState();
   migrateLegacyPlacement();
@@ -6596,4 +6890,6 @@ function boot() {
   }
 }
 
-boot();
+boot().catch((error) => {
+  console.error("Boot failed", error);
+});
