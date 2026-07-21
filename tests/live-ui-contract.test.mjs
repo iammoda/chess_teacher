@@ -47,6 +47,66 @@ test("conversational coach chat, rethink flow, and calibration are wired in", as
   assert.match(css, /\.rethink-card/);
 });
 
+test("board renders arrow overlay, eval bar, eval graph, and variation replay", async () => {
+  const app = await source("app.js");
+  const html = await source("index.html");
+  const css = await source("styles.css");
+  const arrows = await source("lib/board-arrows.mjs");
+
+  assert.match(html, /id="boardArrows"/);
+  assert.match(html, /id="evalBar"/);
+  assert.match(arrows, /export function arrowsOverlaySvg/);
+  assert.match(app, /function paintBoardArrows/);
+  assert.match(app, /function paintEvalBar/);
+  assert.match(app, /function renderEvalGraphCard/);
+  assert.match(app, /function startVariationReplay/);
+  assert.match(app, /function stepVariationReplay/);
+  assert.match(app, /getDisplayGame/);
+  assert.match(css, /\.board-arrows/);
+  assert.match(css, /\.eval-bar/);
+  assert.match(css, /\.eval-graph/);
+  assert.match(css, /\.replay-card/);
+});
+
+test("sounds and promotion picker are wired in", async () => {
+  const app = await source("app.js");
+  const css = await source("styles.css");
+  const sounds = await source("lib/sounds.mjs");
+
+  assert.match(sounds, /export function playSound/);
+  assert.match(sounds, /export function classifyMoveForSound/);
+  assert.match(app, /function playGameSound/);
+  assert.match(app, /function askForPromotionPiece/);
+  assert.match(app, /soundEnabled/);
+  assert.match(app, /showBestArrow/);
+  assert.match(css, /\.promotion-menu/);
+  assert.match(css, /\.promotion-choice/);
+});
+
+test("mate ladder, daily plan, and clocks are wired in", async () => {
+  const app = await source("app.js");
+  const html = await source("index.html");
+  const css = await source("styles.css");
+  const mates = await source("lib/mates.mjs");
+
+  assert.match(mates, /export const MATE_LADDER/);
+  assert.match(mates, /export function isRungUnlocked/);
+
+  assert.match(html, /id="playerClock"/);
+  assert.match(html, /id="opponentClock"/);
+  assert.match(app, /function startMateDrill/);
+  assert.match(app, /function handleMateDrillMove/);
+  assert.match(app, /function initClocksForNewGame/);
+  assert.match(app, /function tickClock/);
+  assert.match(app, /Checkmate Ladder/);
+  assert.match(app, /Daily plan/);
+  assert.match(app, /markDailyItemComplete/);
+
+  assert.match(css, /\.mate-rung/);
+  assert.match(css, /\.daily-list/);
+  assert.match(css, /\.clock\.running/);
+});
+
 test("practice unifies due drills, opening trainer, and weakness labs", async () => {
   const app = await source("app.js");
   const html = await source("index.html");
@@ -67,7 +127,7 @@ test("board source supports selected, legal, last-move, and smooth movement stat
   const css = await source("styles.css");
 
   assert.match(app, /targetCapture \? "target-capture"/);
-  assert.match(app, /state\.lastMove\?\.to === square \? "last-to"/);
+  assert.match(app, /lastToSquare === square \? "last-to"/);
   assert.match(app, /const MOVE_ANIMATION_MS = 240/);
   assert.match(app, /translate3d\(\$\{dx\}px, \$\{dy\}px, 0\)/);
 

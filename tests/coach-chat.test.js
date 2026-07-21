@@ -2,10 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CHAT_EVENTS,
+  META_MARKER,
+  META_END,
   validateChatPayload,
   reasoningEffortForEvent,
   buildChatInput,
   normalizeChatResponse,
+  parseCoachReply,
+  extractStreamingMessage,
   extractOutputText,
 } = require("../lib/coach-chat");
 
@@ -68,6 +72,7 @@ test("buildChatInput leads with the persona and preserves transcript order", () 
   assert.match(input[0].content, /Ask what they were thinking/);
   assert.match(input[0].content, /Never invent moves/);
   assert.match(input[0].content, /offer_rethink/);
+  assert.match(input[0].content, /<<<META /);
   assert.match(input[0].content, /Current event: user_message/);
 
   assert.equal(input[1].role, "assistant");
@@ -111,14 +116,9 @@ test("buildChatInput compacts context and clamps list sizes", () => {
   assert.equal(context.moment.san, "Qh5");
 });
 
-test("normalizeChatResponse parses valid coach JSON", () => {
-  const result = normalizeChatResponse(JSON.stringify({
-    message: "That knight is doing three jobs at once.",
-    question: "What was your plan with Qh5?",
-    offer_rethink: true,
-    memory_note: "Tends to attack before developing.",
-  }));
-
+test("normalizeChatResponse parses the META trailer format", () => {
+  const raw = `That knight is doing three jobs at once.\n${META_MARKER}{"question":"What was your plan with Qh5?","offer_rethink":true,"memory_note":"Tends to attack before developing."}${META_END}`;
+  const result = normalizeChatResponse(raw);
   assert.equal(result.configured, true);
   assert.equal(result.message, "That knight is doing three jobs at once.");
   assert.equal(result.question, "What was your plan with Qh5?");
@@ -126,24 +126,43 @@ test("normalizeChatResponse parses valid coach JSON", () => {
   assert.equal(result.memory_note, "Tends to attack before developing.");
 });
 
-test("normalizeChatResponse strips fences, defaults optionals, clamps memory note", () => {
-  const fenced = normalizeChatResponse('```json\n{"message":"Nice recovery."}\n```');
-  assert.equal(fenced.message, "Nice recovery.");
-  assert.equal(fenced.question, null);
-  assert.equal(fenced.offer_rethink, false);
-  assert.equal(fenced.memory_note, null);
-
-  const longNote = normalizeChatResponse(JSON.stringify({ message: "ok", memory_note: "n".repeat(200) }));
-  assert.equal(longNote.memory_note.length, 120);
+test("legacy JSON responses still parse for old fixtures", () => {
+  const legacy = normalizeChatResponse(JSON.stringify({
+    message: "Nice recovery.",
+    question: null,
+    offer_rethink: false,
+    memory_note: null,
+  }));
+  assert.equal(legacy.message, "Nice recovery.");
+  assert.equal(legacy.question, null);
+  assert.equal(legacy.offer_rethink, false);
 });
 
-test("normalizeChatResponse falls back to raw text on junk", () => {
+test("META trailer clamps long memory notes", () => {
+  const raw = `ok\n${META_MARKER}{"memory_note":"${"n".repeat(200)}"}${META_END}`;
+  const result = normalizeChatResponse(raw);
+  assert.equal(result.memory_note.length, 120);
+});
+
+test("normalizeChatResponse falls back when there's no trailer or JSON", () => {
   const junk = normalizeChatResponse("The engine hums quietly.");
   assert.equal(junk.message, "The engine hums quietly.");
   assert.equal(junk.question, null);
 
   const empty = normalizeChatResponse("");
   assert.match(empty.message, /try again/i);
+});
+
+test("parseCoachReply handles a truncated META trailer gracefully", () => {
+  const raw = `Solid recovery — you noticed the pin.\n${META_MARKER}{"memory_note":"scans for pins now"`;
+  const result = parseCoachReply(raw);
+  assert.equal(result.message, "Solid recovery — you noticed the pin.");
+  assert.equal(result.memory_note, null);
+});
+
+test("extractStreamingMessage hides a trailer that has started to stream", () => {
+  assert.equal(extractStreamingMessage("hello world"), "hello world");
+  assert.equal(extractStreamingMessage(`hello\n${META_MARKER}{"question"`), "hello\n");
 });
 
 test("extractOutputText reads output_text and nested content", () => {

@@ -28,12 +28,15 @@ const PUBLIC_FILES = new Set([
   "styles.css",
   "assets/squirrel.svg",
   "assets/squirrel_chess.svg",
+  "lib/board-arrows.mjs",
   "lib/board-drag.mjs",
   "lib/coach-client.mjs",
   "lib/classify.mjs",
+  "lib/mates.mjs",
   "lib/repertoire.mjs",
   "lib/review-model.mjs",
   "lib/skill-rating.mjs",
+  "lib/sounds.mjs",
   "lib/srs.mjs",
   "lib/skill-model.mjs",
   "lib/stockfish-engine.mjs",
@@ -83,7 +86,12 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/coach/chat") {
-      await handleCoachChatRequest(req, res);
+      const wantsStream = url.searchParams.get("stream") === "1";
+      if (wantsStream) {
+        await handleCoachChatStreamRequest(req, res);
+      } else {
+        await handleCoachChatRequest(req, res);
+      }
       return;
     }
 
@@ -320,6 +328,130 @@ async function handleCoachChatRequest(req, res) {
 
   const text = extractOutputText(data);
   sendJson(res, 200, normalizeChatResponse(text));
+}
+
+async function handleCoachChatStreamRequest(req, res) {
+  if (!process.env.OPENAI_API_KEY) {
+    // Fall back to the non-streaming response shape so the client can render.
+    sendJson(res, 200, {
+      configured: false,
+      message: "The coach is offline. Add OPENAI_API_KEY to .env and restart the server to talk.",
+      question: null,
+      offer_rethink: false,
+      memory_note: null,
+    });
+    return;
+  }
+
+  const ip = req.socket.remoteAddress || "unknown";
+  if (isRateLimited(ip)) {
+    sendJson(res, 429, { configured: true, error: "Too many coach requests in a short window. Wait a moment and try again." });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      configured: true,
+      error: error.message === "Request body too large"
+        ? "Coach request was too large."
+        : "Coach request was not valid JSON.",
+    });
+    return;
+  }
+
+  const validationError = validateChatPayload(payload);
+  if (validationError) {
+    sendJson(res, 400, { configured: true, error: validationError });
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), COACH_TIMEOUT_MS);
+  let upstream;
+  try {
+    upstream = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        input: buildChatInput(payload),
+        max_output_tokens: 900,
+        reasoning: { effort: reasoningEffortForEvent(payload.event) },
+        stream: true,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    sendEvent("error", { message: error.name === "AbortError" ? "Coach timed out." : "Could not reach the coaching service." });
+    res.end();
+    return;
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    clearTimeout(timeout);
+    const err = await upstream.text().catch(() => "");
+    sendEvent("error", { message: err ? `OpenAI ${upstream.status}: ${err.slice(0, 200)}` : `OpenAI ${upstream.status}` });
+    res.end();
+    return;
+  }
+
+  // Forward OpenAI's Responses-API SSE stream, translating deltas into our own
+  // "delta" and "done" events. We buffer the full raw text so we can parse the
+  // META trailer once the stream ends.
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+  let fullText = "";
+
+  try {
+    for await (const chunk of upstream.body) {
+      sseBuffer += decoder.decode(chunk, { stream: true });
+      let separator;
+      while ((separator = sseBuffer.indexOf("\n\n")) !== -1) {
+        const block = sseBuffer.slice(0, separator);
+        sseBuffer = sseBuffer.slice(separator + 2);
+        const dataLine = block.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        const dataStr = dataLine.slice(5).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+        let event;
+        try { event = JSON.parse(dataStr); } catch { continue; }
+        if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+          fullText += event.delta;
+          sendEvent("delta", { text: event.delta });
+        } else if (event.type === "response.error" || event.type === "error") {
+          sendEvent("error", { message: event.error?.message || "OpenAI stream error." });
+        }
+      }
+    }
+  } catch (error) {
+    clearTimeout(timeout);
+    sendEvent("error", { message: error.name === "AbortError" ? "Coach timed out." : "Coach stream interrupted." });
+    res.end();
+    return;
+  }
+  clearTimeout(timeout);
+
+  const finalReply = normalizeChatResponse(fullText);
+  sendEvent("done", finalReply);
+  res.end();
 }
 
 function readJsonBody(req) {

@@ -43,12 +43,20 @@
           <div class="seat-spacer"></div>
           <div class="seat-meta">
             <span class="capture-tray empty" id="opponentCaptureTray" aria-live="polite"></span>
+            <span class="clock" id="opponentClock" hidden></span>
             <span class="pill waiting" id="opponentSeatPill"><span class="dot"></span> Waiting</span>
           </div>
         </div>
 
-        <div class="board-host">
-          <div id="board" class="board" aria-label="Interactive chess board"></div>
+        <div class="board-stack">
+          <div class="eval-bar" id="evalBar" aria-hidden="true" hidden>
+            <div class="eval-bar-fill" id="evalBarFill"></div>
+            <span class="eval-bar-label" id="evalBarLabel"></span>
+          </div>
+          <div class="board-host">
+            <div id="board" class="board" aria-label="Interactive chess board"></div>
+            <svg id="boardArrows" class="board-arrows" viewBox="0 0 8 8" preserveAspectRatio="none" aria-hidden="true"></svg>
+          </div>
         </div>
 
         <div class="seat player" id="seatPlayer">
@@ -60,6 +68,7 @@
           <div class="seat-spacer"></div>
           <div class="seat-meta">
             <span class="capture-tray empty" id="playerCaptureTray" aria-live="polite"></span>
+            <span class="clock" id="playerClock" hidden></span>
             <span class="pill" id="playerSeatPill"><span class="dot"></span> Your Turn</span>
           </div>
         </div>

@@ -3,7 +3,9 @@ import { ANALYSIS_DEPTH, MOVE_QUALITIES, classifyByEval, classifyMoveQuality, no
 import { SKILL_CATALOG, getSkillById, getSkillCategories, getSkillForCategory } from "./lib/skill-model.mjs";
 import { StockfishEngine } from "./lib/stockfish-engine.mjs";
 import { attachDragHandlers } from "./lib/board-drag.mjs";
-import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, sendCoachChat } from "./lib/coach-client.mjs";
+import { arrowsOverlaySvg, uciToArrow } from "./lib/board-arrows.mjs";
+import { playSound, classifyMoveForSound } from "./lib/sounds.mjs";
+import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, sendCoachChat, streamCoachChat } from "./lib/coach-client.mjs";
 import {
   SKILL_DIMENSIONS,
   DIMENSION_LABELS,
@@ -16,6 +18,7 @@ import {
 } from "./lib/skill-rating.mjs";
 import { selectKeyMoments } from "./lib/review-model.mjs";
 import { REPERTOIRE, getOpeningById, getLineById, learnerPlaysAt } from "./lib/repertoire.mjs";
+import { ACTIVE_MATE_POSITIONS, getMatePositionById, matesByRung, isRungUnlocked, recordMateAttempt } from "./lib/mates.mjs";
 import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrade, selectDue, nextDueLabel } from "./lib/srs.mjs";
 
 const PIECE_SPRITE_BASE = "/vendor/pieces/merida/";
@@ -52,6 +55,8 @@ const STORAGE_KEYS = {
   calibration: "chess_teacher_calibration_v1",
   skill: "chess_teacher_skill_v1",
   repertoire: "chess_teacher_repertoire_v1",
+  mateLadder: "chess_teacher_mate_ladder_v1",
+  daily: "chess_teacher_daily_v1",
   coachChat: "chess_teacher_coach_chat_v1",
   coachMemory: "chess_teacher_coach_memory_v1",
   supabase: "chess_teacher_supabase_v1",
@@ -567,6 +572,10 @@ const DEFAULT_SETTINGS = {
   playerColor: "w",
   engineDepth: 5,
   coachMode: "post_game",
+  showBestArrow: true,
+  showEvalBar: true,
+  soundEnabled: true,
+  timeControl: "unlimited", // "unlimited" | "5+0" | "10+0" | "15+10"
 };
 
 const SKILL_LAB_MODES = [
@@ -591,6 +600,10 @@ let boardDrag = null;
 
 const els = {
   board: document.querySelector("#board"),
+  boardArrows: document.querySelector("#boardArrows"),
+  evalBar: document.querySelector("#evalBar"),
+  evalBarFill: document.querySelector("#evalBarFill"),
+  evalBarLabel: document.querySelector("#evalBarLabel"),
   newGameButton: document.querySelector("#newGameButton"),
   seatOpponent: document.querySelector("#seatOpponent"),
   seatPlayer: document.querySelector("#seatPlayer"),
@@ -604,6 +617,8 @@ const els = {
   playerSeatSub: document.querySelector("#playerSeatSub"),
   playerSeatPill: document.querySelector("#playerSeatPill"),
   playerCaptureTray: document.querySelector("#playerCaptureTray"),
+  playerClock: document.querySelector("#playerClock"),
+  opponentClock: document.querySelector("#opponentClock"),
   ctxHeadTitle: document.querySelector("#ctxHeadTitle"),
   ctxHeadMeta: document.querySelector("#ctxHeadMeta"),
   practiceBadge: document.querySelector("#practiceBadge"),
@@ -628,6 +643,9 @@ const state = {
   // { myOpenings: [openingId], lines: { [lineId]: { srs, reps, perfect } } }
   repertoire: loadJson(STORAGE_KEYS.repertoire, { myOpenings: [], lines: {} }),
   openingDrill: null,
+  mateLadder: loadJson(STORAGE_KEYS.mateLadder, { solved: [], attempts: {}, rungSolved: {} }),
+  daily: loadJson(STORAGE_KEYS.daily, { streak: 0, lastCompletedDate: null, todayCompleted: {} }),
+  clocks: null, // { white: ms, black: ms, increment: ms, side: "w"|"b", intervalId, gameFlagged: false }
   coachChat: loadJson(STORAGE_KEYS.coachChat, { gameId: null, messages: [] }),
   coachMemory: loadJson(STORAGE_KEYS.coachMemory, { notes: [], traces: [] }),
   coachThinking: false,
@@ -644,6 +662,10 @@ const state = {
   currentTab: "coach",
   reviewPly: null,
   guidedReview: null,
+  // { baseFen, moves: [{uci, san, fenAfter}], index }: temporary board view
+  // driven by a PV replay in Review; when active, renderBoard reads from
+  // getDisplayGame() instead of state.game.
+  variationReplay: null,
   thinking: false,
   pendingBoardRender: false,
   activeDrill: null,
@@ -745,6 +767,15 @@ function pieceName(piece) {
 
 function normalizeSan(san) {
   return san.replace(/[+#?!]+/g, "");
+}
+
+function playGameSound(kind) {
+  playSound(kind, { enabled: state.settings.soundEnabled !== false });
+}
+
+function playSoundForMove(move, chessAfter) {
+  const kind = classifyMoveForSound(move, chessAfter);
+  playGameSound(kind);
 }
 
 function isBoardFlipped() {
@@ -926,6 +957,19 @@ function renderAll() {
   saveJson(STORAGE_KEYS.calibration, state.calibration);
 }
 
+// The board can display either the live game or a variation replay walkthrough.
+// getDisplayGame returns whichever chess.js instance to read positions from,
+// and isInReplay signals to input handlers that clicks should not attempt moves.
+function getDisplayGame() {
+  const replay = state.variationReplay;
+  if (replay?.chess) return replay.chess;
+  return state.game;
+}
+
+function isInReplay() {
+  return Boolean(state.variationReplay);
+}
+
 function renderBoard() {
   if (boardDrag?.isDragging()) {
     state.pendingBoardRender = true;
@@ -934,27 +978,36 @@ function renderBoard() {
   state.pendingBoardRender = false;
   els.board.innerHTML = "";
 
-  const liveQualityCue = getLiveMoveQualityCue();
-  const selectedPiece = state.selectedSquare ? state.game.get(state.selectedSquare) : null;
+  const displayGame = getDisplayGame();
+  const inReplay = isInReplay();
+  const liveQualityCue = inReplay ? null : getLiveMoveQualityCue();
+  const selectedPiece = !inReplay && state.selectedSquare ? state.game.get(state.selectedSquare) : null;
+  const replayLastMove = state.variationReplay?.moves?.[state.variationReplay.index - 1];
+  const replayFrom = replayLastMove?.uci?.slice(0, 2);
+  const replayTo = replayLastMove?.uci?.slice(2, 4);
 
   for (const square of getBoardSquares()) {
     const fileIndex = FILES.indexOf(square[0]);
     const rankIndex = Number(square[1]) - 1;
-    const piece = state.game.get(square);
-    const legalTarget = state.legalTargets.has(square);
+    const piece = displayGame.get(square);
+    const legalTarget = !inReplay && state.legalTargets.has(square);
     const targetCapture = legalTarget && selectedPiece && piece && piece.color !== selectedPiece.color;
     const squareQuality = liveQualityCue?.move.to === square ? liveQualityCue.quality : null;
-    const practiceCue = getPracticeBoardCue(square);
+    const practiceCue = inReplay ? null : getPracticeBoardCue(square);
+    // In replay mode, highlight the most recently played PV move instead of
+    // the game's last move.
+    const lastFromSquare = inReplay ? replayFrom : state.lastMove?.from;
+    const lastToSquare = inReplay ? replayTo : state.lastMove?.to;
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
       "square",
       (fileIndex + rankIndex) % 2 === 0 ? "dark" : "light",
-      state.selectedSquare === square ? "selected" : "",
+      !inReplay && state.selectedSquare === square ? "selected" : "",
       legalTarget ? "target" : "",
       targetCapture ? "target-capture" : "",
-      state.lastMove?.from === square ? "last-from" : "",
-      state.lastMove?.to === square ? "last-to" : "",
+      lastFromSquare === square ? "last-from" : "",
+      lastToSquare === square ? "last-to" : "",
       squareQuality ? "quality-cued" : "",
       squareQuality ? qualityClassName(squareQuality.key) : "",
       practiceCue?.className || "",
@@ -1017,6 +1070,100 @@ function renderBoard() {
     button.addEventListener("click", () => handleSquareClick(square));
     els.board.append(button);
   }
+
+  paintBoardArrows();
+  paintEvalBar();
+}
+
+function paintBoardArrows() {
+  if (!els.boardArrows) return;
+  const arrows = getActiveBoardArrows();
+  const flipped = isBoardFlipped();
+  els.boardArrows.innerHTML = arrowsOverlaySvg(arrows, flipped);
+  els.boardArrows.setAttribute("data-count", String(arrows.length));
+  els.boardArrows.classList.toggle("has-arrows", arrows.length > 0);
+}
+
+function getActiveBoardArrows() {
+  const arrows = [];
+  if (state.variationReplay?.moves?.length) {
+    // Show the next PV move so the user knows what's coming.
+    const upcoming = state.variationReplay.moves[state.variationReplay.index];
+    if (upcoming) arrows.push({ ...uciToArrow(upcoming.uci, "replay") });
+    return arrows;
+  }
+  if (!state.settings.showBestArrow || !isCalibrationComplete()) return arrows;
+  const latest = getLatestPlayerMove();
+  if (!latest) return arrows;
+  if (state.currentTab === "review") {
+    // In Review, show a comparison for the selected move: played + best.
+    const selected = state.reviewPly != null
+      ? state.moves.find((move) => move.ply === state.reviewPly)
+      : null;
+    const focus = selected?.role === "player" ? selected : latest;
+    if (focus?.uci) arrows.push({ from: focus.uci.slice(0, 2), to: focus.uci.slice(2, 4), kind: "played" });
+    if (focus?.bestMoveUci && focus.bestMoveUci !== focus.uci) {
+      arrows.push({ ...uciToArrow(focus.bestMoveUci, "best") });
+    }
+    return arrows;
+  }
+  // In play, only show the best-move arrow when the player's most recent
+  // move was a real mistake and it isn't your turn (arrow points at what
+  // they should have played on their prior move).
+  if (["blunder", "missed_win", "mistake"].includes(latest.qualityKey) && latest.bestMoveUci && latest.bestMoveUci !== latest.uci) {
+    arrows.push({ ...uciToArrow(latest.bestMoveUci, "best") });
+  }
+  return arrows;
+}
+
+function paintEvalBar() {
+  if (!els.evalBar) return;
+  const enabled = state.settings.showEvalBar && isCalibrationComplete() && !state.activeDrill;
+  if (!enabled) {
+    els.evalBar.hidden = true;
+    return;
+  }
+  const latest = getLatestGradedMove();
+  if (!latest) {
+    els.evalBar.hidden = true;
+    return;
+  }
+  els.evalBar.hidden = false;
+  const { percent, label } = evalBarFromMove(latest);
+  els.evalBarFill.style.height = `${percent}%`;
+  els.evalBarLabel.textContent = label;
+}
+
+function getLatestGradedMove() {
+  for (let i = state.moves.length - 1; i >= 0; i--) {
+    const move = state.moves[i];
+    if (typeof move.evalAfter === "number" || typeof move.mateAfter === "number") return move;
+  }
+  return null;
+}
+
+function evalBarFromMove(move) {
+  // eval is from the side-to-move's perspective in the position AFTER the
+  // move; convert to White's perspective for the bar.
+  const afterFen = move.afterFen || "";
+  const sideToMove = afterFen.split(" ")[1] || "w";
+  const sign = sideToMove === "w" ? 1 : -1;
+  if (typeof move.mateAfter === "number") {
+    const whiteMate = move.mateAfter * sign;
+    return {
+      percent: whiteMate > 0 ? 100 : 0,
+      label: whiteMate > 0 ? `M${whiteMate}` : `-M${Math.abs(whiteMate)}`,
+    };
+  }
+  if (typeof move.evalAfter === "number") {
+    const whiteCp = move.evalAfter * sign;
+    // Smooth sigmoid so ±800cp is nearly capped.
+    const clamped = Math.max(-1000, Math.min(1000, whiteCp));
+    const percent = 50 + 50 * Math.tanh(clamped / 350);
+    const displayPawns = (whiteCp / 100).toFixed(1);
+    return { percent, label: `${whiteCp > 0 ? "+" : ""}${displayPawns}` };
+  }
+  return { percent: 50, label: "" };
 }
 
 function getPlayerSeatSubLabel() {
@@ -2330,24 +2477,55 @@ function buildChatPayload(event, moment = null) {
 async function requestCoachChat(event, moment = null) {
   state.coachThinking = true;
   state.coachError = "";
+  // Push an empty streaming bubble that fills in as deltas arrive.
+  const streamingMessage = { role: "assistant", content: "", isQuestion: false, at: new Date().toISOString(), streaming: true };
+  getCurrentChatMessages().push(streamingMessage);
+  saveJson(STORAGE_KEYS.coachChat, state.coachChat);
   if (state.currentTab === "coach") renderCoachPanel();
 
+  const removeStreamingBubble = () => {
+    const messages = getCurrentChatMessages();
+    const index = messages.indexOf(streamingMessage);
+    if (index !== -1) messages.splice(index, 1);
+  };
+
   try {
-    const data = await sendCoachChat(buildChatPayload(event, moment));
+    const data = await streamCoachChat(buildChatPayload(event, moment), {
+      onDelta: (partial) => {
+        streamingMessage.content = partial;
+        // Cheap live update: rewrite the last bubble's text without re-rendering.
+        const log = document.querySelector("#coachChatLog");
+        if (log) {
+          const bubbles = log.querySelectorAll(".chat-message.from-coach");
+          const last = bubbles[bubbles.length - 1];
+          if (last) {
+            last.textContent = partial;
+            log.scrollTop = log.scrollHeight;
+          }
+        }
+      },
+    });
+
     state.coachThinking = false;
 
     if (data.configured === false) {
+      removeStreamingBubble();
       state.openAI.configured = false;
       state.coachError = data.message || "The coach is offline.";
+      saveJson(STORAGE_KEYS.coachChat, state.coachChat);
       if (state.currentTab === "coach") renderCoachPanel();
       return null;
     }
+
+    // Finalize the streamed bubble with the full text.
+    streamingMessage.content = data.message;
+    streamingMessage.isQuestion = Boolean(data.question);
+    delete streamingMessage.streaming;
 
     if (data.memory_note) {
       state.coachMemory = appendMemoryNote(state.coachMemory, data.memory_note);
       saveCoachMemory();
     }
-    pushChatMessage("assistant", data.message, { isQuestion: Boolean(data.question) });
     if (data.question) {
       state.pendingCoachQuestion = {
         question: data.question,
@@ -2356,12 +2534,16 @@ async function requestCoachChat(event, moment = null) {
         fen: moment?.fenBefore || state.game.fen(),
       };
       pushChatMessage("assistant", data.question, { isQuestion: true });
+    } else {
+      saveJson(STORAGE_KEYS.coachChat, state.coachChat);
     }
     if (state.currentTab === "coach") renderCoachPanel();
     return data;
   } catch (error) {
     state.coachThinking = false;
+    removeStreamingBubble();
     state.coachError = error.message || "Coach request failed.";
+    saveJson(STORAGE_KEYS.coachChat, state.coachChat);
     if (state.currentTab === "coach") renderCoachPanel();
     return null;
   }
@@ -2569,6 +2751,7 @@ async function maybeOfferRethink(record) {
 // ─────────── Guided review ───────────
 
 function startGuidedReview() {
+  markDailyItemComplete("review");
   const moments = selectKeyMoments(state.moves);
   if (!moments.length) {
     state.guidedReview = null;
@@ -2766,7 +2949,9 @@ function renderReviewPanel() {
   els.reviewPanel.innerHTML = `
     <h2>Review</h2>
     <div class="stack">
+      ${renderVariationReplayCard()}
       ${renderGuidedReviewCard()}
+      ${renderEvalGraphCard()}
       ${boardCard}
       ${analysisCard}
       ${skillCard}
@@ -2774,19 +2959,24 @@ function renderReviewPanel() {
       <div class="move-list">${rows}</div>
     </div>
   `;
+  bindVariationReplayCard();
   bindGuidedReviewCard();
+  bindReplayPvButtons(els.reviewPanel);
+  bindEvalGraphCard();
 
   els.reviewPanel.querySelectorAll(".move-row[data-ply]").forEach((row) => {
     row.addEventListener("click", () => {
       const ply = Number(row.dataset.ply);
       state.reviewPly = state.reviewPly === ply ? null : ply;
       renderReviewPanel();
+      paintBoardArrows();
     });
   });
   els.reviewPanel.querySelectorAll(".turning-point[data-ply]").forEach((button) => {
     button.addEventListener("click", () => {
       state.reviewPly = Number(button.dataset.ply);
       renderReviewPanel();
+      paintBoardArrows();
     });
   });
   els.reviewPanel.querySelectorAll("[data-review-retry]").forEach((button) => {
@@ -2903,6 +3093,9 @@ function renderSelectedMoveAnalysis(move) {
             <span>${escapeHtml(pv)}</span>
           </div>
         </div>
+        <div class="button-row">
+          <button type="button" data-replay-pv="${move.id}">Replay engine line on board</button>
+        </div>
       ` : ""}
     </article>
   `;
@@ -2928,6 +3121,162 @@ function formatPrincipalVariation(fen, pv) {
   } catch {
     return pv.slice(0, 6).join(" ");
   }
+}
+
+// ─────────── Eval graph ───────────
+
+function renderEvalGraphCard() {
+  const points = state.moves
+    .map((move) => {
+      if (typeof move.mateAfter === "number") {
+        return { ply: move.ply, whiteCp: move.mateAfter > 0 ? 1200 : -1200, mate: true };
+      }
+      if (typeof move.evalAfter === "number") {
+        // evalAfter is from side-to-move's perspective in the position AFTER
+        // the move; that side is the OPPOSITE of the mover, so multiplying by
+        // the mover's color gives White-perspective.
+        const sign = move.color === "w" ? -1 : 1;
+        return { ply: move.ply, whiteCp: move.evalAfter * sign, mate: false };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  if (points.length < 2) return "";
+
+  const width = 300;
+  const height = 90;
+  const step = width / Math.max(points.length - 1, 1);
+  const midY = height / 2;
+
+  const scale = (cp) => {
+    const clamped = Math.max(-1000, Math.min(1000, cp));
+    // Same tanh scale as the eval bar so bar and graph agree visually.
+    return midY - Math.tanh(clamped / 350) * (height / 2 - 4);
+  };
+
+  const pathD = points.map((point, index) => `${index === 0 ? "M" : "L"}${(index * step).toFixed(1)},${scale(point.whiteCp).toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L${((points.length - 1) * step).toFixed(1)},${height} L0,${height} Z`;
+
+  const markers = points
+    .map((point, index) => {
+      const move = state.moves.find((m) => m.ply === point.ply);
+      const quality = move?.qualityKey;
+      if (!quality || !["blunder", "mistake", "missed_win", "inaccuracy"].includes(quality)) return "";
+      const cx = (index * step).toFixed(1);
+      const cy = scale(point.whiteCp).toFixed(1);
+      return `<circle class="eval-graph-marker ${qualityClassName(quality)}" cx="${cx}" cy="${cy}" r="3" data-ply="${point.ply}"></circle>`;
+    })
+    .filter(Boolean)
+    .join("");
+
+  return `
+    <article class="mini-card eval-graph-card">
+      <span class="label">Evaluation graph</span>
+      <svg id="evalGraphSvg" class="eval-graph" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Evaluation over time">
+        <line x1="0" y1="${midY}" x2="${width}" y2="${midY}" class="eval-graph-mid"></line>
+        <path d="${areaD}" class="eval-graph-area"></path>
+        <path d="${pathD}" class="eval-graph-line"></path>
+        ${markers}
+      </svg>
+    </article>
+  `;
+}
+
+function bindEvalGraphCard() {
+  const svg = document.querySelector("#evalGraphSvg");
+  if (!svg) return;
+  svg.querySelectorAll(".eval-graph-marker").forEach((circle) => {
+    circle.addEventListener("click", () => {
+      state.reviewPly = Number(circle.dataset.ply);
+      renderReviewPanel();
+    });
+  });
+  svg.addEventListener("click", (event) => {
+    if (event.target.tagName === "circle") return; // handled above
+    const rect = svg.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const totalPoints = state.moves.length;
+    if (!totalPoints) return;
+    const index = Math.round((x / rect.width) * (totalPoints - 1));
+    const move = state.moves[Math.min(Math.max(index, 0), totalPoints - 1)];
+    if (move) {
+      state.reviewPly = move.ply;
+      renderReviewPanel();
+    }
+  });
+}
+
+// ─────────── Variation replay ───────────
+
+function startVariationReplay(fen, uciList) {
+  if (!Array.isArray(uciList) || !uciList.length) return;
+  const chess = new Chess(fen);
+  const moves = [];
+  for (const uci of uciList) {
+    const move = chess.move(moveFromUci(uci));
+    if (!move) break;
+    moves.push({ uci, san: move.san, fenAfter: chess.fen() });
+  }
+  if (!moves.length) return;
+  // Rewind the sim to the start position; index tracks how far the user has stepped.
+  chess.load(fen);
+  state.variationReplay = { baseFen: fen, chess, moves, index: 0 };
+  clearSelection({ render: false });
+  renderAll();
+}
+
+function stepVariationReplay(direction) {
+  const replay = state.variationReplay;
+  if (!replay) return;
+  if (direction === "forward" && replay.index < replay.moves.length) {
+    replay.chess.move(moveFromUci(replay.moves[replay.index].uci));
+    replay.index += 1;
+  } else if (direction === "back" && replay.index > 0) {
+    replay.index -= 1;
+    replay.chess.load(replay.index === 0 ? replay.baseFen : replay.moves[replay.index - 1].fenAfter);
+  }
+  renderBoard();
+  renderCurrentPanel();
+}
+
+function stopVariationReplay() {
+  state.variationReplay = null;
+  renderAll();
+}
+
+function renderVariationReplayCard() {
+  const replay = state.variationReplay;
+  if (!replay) return "";
+  const sans = replay.moves.map((move, index) => (
+    `<span class="pv-step ${index < replay.index ? "played" : ""} ${index === replay.index ? "next" : ""}">${escapeHtml(move.san)}</span>`
+  )).join(" ");
+  return `
+    <article class="mini-card replay-card">
+      <span class="label">Replaying engine line · ${replay.index}/${replay.moves.length}</span>
+      <div class="pv-steps">${sans}</div>
+      <div class="button-row">
+        <button id="replayBackButton" type="button" ${replay.index === 0 ? "disabled" : ""}>◀ Back</button>
+        <button class="primary-action" id="replayForwardButton" type="button" ${replay.index >= replay.moves.length ? "disabled" : ""}>Forward ▶</button>
+        <button id="replayExitButton" type="button">Exit replay</button>
+      </div>
+    </article>
+  `;
+}
+
+function bindVariationReplayCard() {
+  document.querySelector("#replayForwardButton")?.addEventListener("click", () => stepVariationReplay("forward"));
+  document.querySelector("#replayBackButton")?.addEventListener("click", () => stepVariationReplay("back"));
+  document.querySelector("#replayExitButton")?.addEventListener("click", stopVariationReplay);
+}
+
+function bindReplayPvButtons(root) {
+  root.querySelectorAll("[data-replay-pv]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const move = state.moves.find((entry) => entry.id === button.dataset.replayPv);
+      if (move) startVariationReplay(move.beforeFen, move.principalVariation || []);
+    });
+  });
 }
 
 function getReviewTurningPoints() {
@@ -3522,6 +3871,41 @@ function bindOpeningTrainerSection() {
   });
 }
 
+function renderMateLadderSection() {
+  const grouped = matesByRung();
+  if (!grouped.size) return "<p class=\"empty-state\">No mate positions available yet.</p>";
+  const rungs = [...grouped.keys()].sort((a, b) => a - b);
+  const solvedSet = new Set(state.mateLadder.solved || []);
+  const cards = rungs.map((rung) => {
+    const unlocked = isRungUnlocked(rung, state.mateLadder);
+    const positions = grouped.get(rung);
+    return `
+      <div class="mate-rung ${unlocked ? "" : "locked"}">
+        <div class="mate-rung-head">
+          <strong>Rung ${rung}</strong>
+          <span>${unlocked ? "unlocked" : "solve 3 on lower rungs to unlock"}</span>
+        </div>
+        <div class="mate-list">
+          ${positions.map((position) => `
+            <button class="practice-card mate-card ${solvedSet.has(position.id) ? "solved" : ""}" type="button" data-start-mate="${escapeAttr(position.id)}" ${unlocked ? "" : "disabled"}>
+              <strong>${escapeHtml(position.label)}</strong>
+              <p>${escapeHtml(position.hint)}</p>
+              ${solvedSet.has(position.id) ? "<span class=\"tag good\">Solved</span>" : ""}
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }).join("");
+  return `<div class="stack">${cards}</div>`;
+}
+
+function bindMateLadderSection() {
+  els.practicePanel.querySelectorAll("[data-start-mate]").forEach((button) => {
+    button.addEventListener("click", () => startMateDrill(button.dataset.startMate));
+  });
+}
+
 function renderWeaknessLabsSection() {
   const sorted = prioritizeSkills().slice(0, 4);
   const cards = sorted.map((skill) => {
@@ -3592,6 +3976,7 @@ function renderPracticePanel() {
   els.practicePanel.innerHTML = `
     <h2>Practice</h2>
     <div class="stack">
+      ${renderDailyPlanCard()}
       ${renderOpeningDrillCard()}
       ${trainer}
       ${nextFocus ? `
@@ -3603,6 +3988,8 @@ function renderPracticePanel() {
       ` : ""}
       <h3>Due Drills</h3>
       ${dueCards || "<p class=\"empty-state\">Nothing due right now. Drills from your mistakes come back on a spaced schedule.</p>"}
+      <h3>Checkmate Ladder</h3>
+      ${renderMateLadderSection()}
       <h3>My Openings</h3>
       ${renderOpeningTrainerSection()}
       <h3>Weakness Labs</h3>
@@ -3616,6 +4003,7 @@ function renderPracticePanel() {
   document.querySelector("#practiceRetryButton")?.addEventListener("click", retryPracticePuzzle);
   bindOpeningDrillCard();
   bindOpeningTrainerSection();
+  bindMateLadderSection();
   bindWeaknessLabsSection();
   document.querySelector("#practiceNextButton")?.addEventListener("click", startNextPracticePuzzle);
   document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
@@ -3758,6 +4146,27 @@ function renderSettingsPanel() {
           <option value="silent"${state.settings.coachMode === "silent" ? " selected" : ""}>Silent</option>
         </select>
       </label>
+      <label class="field">
+        <span>Time control</span>
+        <select id="timeControlInput">
+          <option value="unlimited"${state.settings.timeControl === "unlimited" ? " selected" : ""}>Unlimited</option>
+          <option value="5+0"${state.settings.timeControl === "5+0" ? " selected" : ""}>5 min blitz</option>
+          <option value="10+0"${state.settings.timeControl === "10+0" ? " selected" : ""}>10 min rapid</option>
+          <option value="15+10"${state.settings.timeControl === "15+10" ? " selected" : ""}>15 + 10 rapid</option>
+        </select>
+      </label>
+      <label class="field checkbox-field">
+        <input id="soundEnabledInput" type="checkbox"${state.settings.soundEnabled !== false ? " checked" : ""}>
+        <span>Move sounds</span>
+      </label>
+      <label class="field checkbox-field">
+        <input id="showBestArrowInput" type="checkbox"${state.settings.showBestArrow !== false ? " checked" : ""}>
+        <span>Show best-move arrow after mistakes</span>
+      </label>
+      <label class="field checkbox-field">
+        <input id="showEvalBarInput" type="checkbox"${state.settings.showEvalBar !== false ? " checked" : ""}>
+        <span>Show evaluation bar</span>
+      </label>
       <details class="advanced-settings">
         <summary>Connection details</summary>
         <label class="field">
@@ -3802,7 +4211,62 @@ function getActivePlayerColor() {
   return state.activeDrill ? state.activeDrill.playerColor : state.settings.playerColor;
 }
 
+// Modal-ish overlay anchored above the promotion square. Returns "q"/"r"/"b"/"n"
+// or null if the user dismisses.
+function askForPromotionPiece(color, square) {
+  return new Promise((resolve) => {
+    const host = els.board.parentElement;
+    if (!host) { resolve("q"); return; }
+    const squareEl = els.board.querySelector(`[data-square="${square}"]`);
+    if (!squareEl) { resolve("q"); return; }
+
+    const overlay = document.createElement("div");
+    overlay.className = "promotion-overlay";
+
+    const menu = document.createElement("div");
+    menu.className = `promotion-menu ${color === "w" ? "for-white" : "for-black"}`;
+    const hostRect = host.getBoundingClientRect();
+    const squareRect = squareEl.getBoundingClientRect();
+    menu.style.left = `${squareRect.left - hostRect.left + squareRect.width / 2}px`;
+    // Anchor above for white (promoting to top rank) and below for black.
+    if (color === "w") {
+      menu.style.top = `${squareRect.bottom - hostRect.top - squareRect.width * 0.2}px`;
+    } else {
+      menu.style.top = `${squareRect.top - hostRect.top - squareRect.width * 3.8}px`;
+    }
+
+    const pieces = ["q", "r", "b", "n"];
+    for (const type of pieces) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "promotion-choice";
+      button.innerHTML = `<img src="${pieceSpriteUrl(color, type)}" alt="${pieceName(type)}" draggable="false">`;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        cleanup();
+        playGameSound("click");
+        resolve(type);
+      });
+      menu.append(button);
+    }
+
+    function cleanup() {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+    }
+    function onKey(event) {
+      if (event.key === "Escape") { cleanup(); resolve(null); }
+    }
+    overlay.addEventListener("click", () => { cleanup(); resolve(null); });
+    document.addEventListener("keydown", onKey);
+
+    overlay.append(menu);
+    host.append(overlay);
+  });
+}
+
 function canInteractWithBoard() {
+  if (isInReplay()) return false;
   const playerColor = getActivePlayerColor();
   return !state.thinking && !state.game.isGameOver() && state.game.turn() === playerColor;
 }
@@ -3835,9 +4299,20 @@ async function handleSquareClick(square) {
 
 async function attemptPlayerMove(from, to, options = {}) {
   const beforeFen = state.game.fen();
+
+  // Detect a pawn promotion: if any legal move from→to has a promotion flag,
+  // ask the player which piece to promote to instead of auto-queening.
+  const legal = state.game.moves({ verbose: true }).filter((m) => m.from === from && m.to === to);
+  if (legal.length && legal[0].promotion && !options.promotion) {
+    clearSelection();
+    const choice = await askForPromotionPiece(state.game.turn(), to);
+    if (!choice) return false;
+    return attemptPlayerMove(from, to, { ...options, promotion: choice });
+  }
+
   let move = null;
   try {
-    move = state.game.move({ from, to, promotion: "q" });
+    move = state.game.move({ from, to, promotion: options.promotion || "q" });
   } catch {
     move = null;
   }
@@ -3846,6 +4321,8 @@ async function attemptPlayerMove(from, to, options = {}) {
     clearSelection();
     return false;
   }
+
+  playSoundForMove(move, state.game);
 
   if (state.activeDrill) {
     clearSelection({ render: false });
@@ -3912,6 +4389,7 @@ async function maybeEngineMove() {
       if (played) {
         engineAnimation = animateBoardMove(played);
         recordMove(played, beforeFen, "engine");
+        playSoundForMove(played, state.game);
         break;
       }
     }
@@ -4004,6 +4482,7 @@ function recordMove(move, beforeFen, role) {
     record.note = "Engine reply.";
   }
 
+  onMoveClockUpdate(record);
   state.moves.push(record);
   state.lastMove = { from: move.from, to: move.to };
   saveCurrentGame();
@@ -4849,6 +5328,7 @@ async function playScriptedOpponentMove() {
   state.thinking = false;
   if (played) {
     state.lastMove = { from: played.from, to: played.to };
+    playSoundForMove(played, state.game);
     drill.plyIndex += 1;
     if (entry.why) {
       state.drillMessage = `${entry.san}: ${entry.why}`;
@@ -4929,9 +5409,287 @@ function toggleMyOpening(openingId) {
   renderPracticePanel();
 }
 
+// ─────────── Checkmate ladder ───────────
+
+function isMateDrill() {
+  return Boolean(state.activeDrill?.matePositionId);
+}
+
+function startMateDrill(positionId) {
+  const position = getMatePositionById(positionId);
+  if (!position) return;
+  if (!state.activeDrill) saveCurrentGame();
+  state.activeDrill = {
+    id: `mate:${position.id}`,
+    matePositionId: position.id,
+    rung: position.rung,
+    title: position.label,
+    type: "Checkmate ladder",
+    objective: position.hint,
+    playerColor: position.fen.split(" ")[1] || "w",
+    expected: position.solution,
+    stepIndex: 0,
+    hintShown: false,
+    solved: false,
+    category: "missed_mate",
+    source: "mate",
+  };
+  state.drillMessage = position.hint;
+  state.game = new Chess(position.fen);
+  state.moves = [];
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+  state.lastMove = null;
+  switchTab("practice");
+  renderAll();
+}
+
+async function handleMateDrillMove(move) {
+  const drill = state.activeDrill;
+  const expected = drill.expected[drill.stepIndex];
+  const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
+  const normalizedExpected = expected.length === 5 ? expected : expected.slice(0, 4);
+  const normalizedPlayed = playedUci.length === 5 ? playedUci : playedUci.slice(0, 4);
+
+  if (normalizedPlayed !== normalizedExpected) {
+    state.game.undo();
+    drill.hintShown = true;
+    state.drillMessage = `Not quite. ${drill.objective}`;
+    playGameSound("drillMissed");
+    state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, false);
+    saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
+    renderAll();
+    return;
+  }
+
+  state.lastMove = { from: move.from, to: move.to };
+  drill.stepIndex += 1;
+  playGameSound("drillSolved");
+
+  if (drill.stepIndex >= drill.expected.length) {
+    drill.solved = true;
+    const position = getMatePositionById(drill.matePositionId);
+    state.drillMessage = position?.explanation || "Mate delivered.";
+    state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, true);
+    saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
+    markDailyItemComplete("mate");
+    renderAll();
+    return;
+  }
+
+  state.drillMessage = "Good — keep going.";
+  renderAll();
+}
+
+// ─────────── Daily plan + streaks ───────────
+
+function todayLocalKey(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function ensureTodayDaily() {
+  const today = todayLocalKey();
+  if (state.daily.date !== today) {
+    state.daily = { ...state.daily, date: today, todayCompleted: {} };
+    saveJson(STORAGE_KEYS.daily, state.daily);
+  }
+  return state.daily;
+}
+
+function markDailyItemComplete(itemKey) {
+  const daily = ensureTodayDaily();
+  if (daily.todayCompleted?.[itemKey]) return;
+  daily.todayCompleted = { ...daily.todayCompleted, [itemKey]: new Date().toISOString() };
+
+  const today = daily.date;
+  if (daily.lastCompletedDate !== today) {
+    // Streak: extends if last completion was yesterday, otherwise resets to 1.
+    const yesterday = todayLocalKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    daily.streak = daily.lastCompletedDate === yesterday ? (daily.streak || 0) + 1 : 1;
+    daily.lastCompletedDate = today;
+  }
+  state.daily = daily;
+  saveJson(STORAGE_KEYS.daily, state.daily);
+}
+
+function getDailyItems() {
+  const daily = ensureTodayDaily();
+  const done = daily.todayCompleted || {};
+  const dueCount = selectDue(state.practiceQueue.map((item) => ensureSrs(item))).length;
+  const mateRung = ACTIVE_MATE_POSITIONS.find((p) => isRungUnlocked(p.rung, state.mateLadder) && !state.mateLadder.solved?.includes(p.id));
+  return [
+    {
+      key: "drill",
+      label: dueCount > 0 ? `Solve a due drill (${dueCount} waiting)` : "No drills due — try a foundation puzzle",
+      done: Boolean(done.drill),
+    },
+    {
+      key: "mate",
+      label: mateRung ? `Practice mate: ${mateRung.label}` : "All ladder rungs complete!",
+      done: Boolean(done.mate),
+    },
+    {
+      key: "play",
+      label: "Play one game",
+      done: Boolean(done.play),
+    },
+    {
+      key: "review",
+      label: "Review your last game with the coach",
+      done: Boolean(done.review),
+    },
+  ];
+}
+
+// ─────────── Game clocks ───────────
+
+const TIME_CONTROLS = {
+  unlimited: null,
+  "5+0": { baseMs: 5 * 60 * 1000, incrementMs: 0 },
+  "10+0": { baseMs: 10 * 60 * 1000, incrementMs: 0 },
+  "15+10": { baseMs: 15 * 60 * 1000, incrementMs: 10 * 1000 },
+};
+
+function getActiveTimeControl() {
+  return TIME_CONTROLS[state.settings.timeControl] || null;
+}
+
+function initClocksForNewGame() {
+  stopClockTicker();
+  const tc = getActiveTimeControl();
+  if (!tc || state.activeDrill) {
+    state.clocks = null;
+    renderClocks();
+    return;
+  }
+  state.clocks = {
+    white: tc.baseMs,
+    black: tc.baseMs,
+    incrementMs: tc.incrementMs,
+    side: state.game.turn(),
+    lastTick: Date.now(),
+    intervalId: null,
+    flagged: null,
+  };
+  startClockTicker();
+  renderClocks();
+}
+
+function startClockTicker() {
+  if (!state.clocks || state.clocks.intervalId) return;
+  state.clocks.lastTick = Date.now();
+  state.clocks.intervalId = window.setInterval(tickClock, 250);
+}
+
+function stopClockTicker() {
+  if (state.clocks?.intervalId) {
+    window.clearInterval(state.clocks.intervalId);
+    state.clocks.intervalId = null;
+  }
+}
+
+function tickClock() {
+  const clocks = state.clocks;
+  if (!clocks || clocks.flagged || state.rethink.active) return;
+  const now = Date.now();
+  const elapsed = now - clocks.lastTick;
+  clocks.lastTick = now;
+  const side = clocks.side;
+  clocks[side === "w" ? "white" : "black"] -= elapsed;
+  if (clocks[side === "w" ? "white" : "black"] <= 0) {
+    clocks[side === "w" ? "white" : "black"] = 0;
+    clocks.flagged = side;
+    stopClockTicker();
+    onClockFlagged(side);
+  }
+  renderClocks();
+}
+
+// Called by recordMove: gives the mover the increment and switches sides.
+function onMoveClockUpdate(record) {
+  const clocks = state.clocks;
+  if (!clocks || clocks.flagged) return;
+  const moverKey = record.color === "w" ? "white" : "black";
+  // Record time spent on the move for coach context.
+  const now = Date.now();
+  const elapsed = now - clocks.lastTick;
+  clocks[moverKey] = Math.max(0, clocks[moverKey] - elapsed);
+  record.timeSpentMs = elapsed;
+  if (clocks.incrementMs) clocks[moverKey] += clocks.incrementMs;
+  clocks.side = record.color === "w" ? "b" : "w";
+  clocks.lastTick = now;
+  renderClocks();
+}
+
+async function onClockFlagged(side) {
+  // Convert to a game-over result and finalize.
+  const winner = side === "w" ? "b" : "w";
+  const label = `${colorName(winner)} wins on time`;
+  state.game.header?.("Result", "*");
+  state.moves.forEach((m) => m); // no-op to keep the record intact
+  // We fake game-over by setting result via saveCurrentGame path.
+  saveCurrentGame(label);
+  playGameSound(state.settings.playerColor === winner ? "gameWin" : "gameLoss");
+  pushChatMessage("assistant", `Flag fell — ${label}.`);
+  if (state.currentTab === "coach") renderCoachPanel();
+  renderAll();
+}
+
+function formatClockMs(ms) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSeconds / 60);
+  const s = String(totalSeconds % 60).padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+function renderClocks() {
+  if (!els.playerClock || !els.opponentClock) return;
+  const clocks = state.clocks;
+  if (!clocks) {
+    els.playerClock.hidden = true;
+    els.opponentClock.hidden = true;
+    return;
+  }
+  els.playerClock.hidden = false;
+  els.opponentClock.hidden = false;
+  const playerColor = state.settings.playerColor;
+  const playerMs = playerColor === "w" ? clocks.white : clocks.black;
+  const opponentMs = playerColor === "w" ? clocks.black : clocks.white;
+  els.playerClock.textContent = formatClockMs(playerMs);
+  els.opponentClock.textContent = formatClockMs(opponentMs);
+  els.playerClock.classList.toggle("running", clocks.side === playerColor && !clocks.flagged);
+  els.opponentClock.classList.toggle("running", clocks.side !== playerColor && !clocks.flagged);
+  els.playerClock.classList.toggle("low", playerMs < 30_000);
+  els.opponentClock.classList.toggle("low", opponentMs < 30_000);
+}
+
+function renderDailyPlanCard() {
+  if (!isCalibrationComplete()) return "";
+  const items = getDailyItems();
+  const daily = ensureTodayDaily();
+  const streak = daily.streak || 0;
+  const completedToday = items.filter((item) => item.done).length;
+  return `
+    <article class="mini-card daily-plan-card">
+      <span class="label">Today · streak ${streak} 🔥</span>
+      <strong>Daily plan · ${completedToday}/${items.length}</strong>
+      <ul class="daily-list">
+        ${items.map((item) => `<li class="daily-item ${item.done ? "done" : ""}">${item.done ? "✓" : "○"} ${escapeHtml(item.label)}</li>`).join("")}
+      </ul>
+    </article>
+  `;
+}
+
 async function handleDrillMove(move, beforeFen) {
   if (isOpeningDrill()) {
     await handleOpeningDrillMove(move);
+    return;
+  }
+  if (isMateDrill()) {
+    await handleMateDrillMove(move);
     return;
   }
   if (isPracticeTrainerDrill()) {
@@ -4993,6 +5751,7 @@ async function handlePracticeTrainerMove(move, beforeFen) {
     state.game.undo();
     trainer.status = "missed";
     trainer.scoreDelta = -3;
+    playGameSound("drillMissed");
     if (!trainer.hintIndex && puzzle.hintSteps?.length) {
       trainer.hintIndex = 1;
     }
@@ -5013,6 +5772,7 @@ async function handlePracticeTrainerMove(move, beforeFen) {
   trainer.lastMoveUci = playedUci;
   trainer.scoreDelta = trainer.attempts === 1 && !trainer.hintIndex ? 10 : 6;
   trainer.feedback = puzzle.successText || "Correct.";
+  playGameSound("drillSolved");
   state.drillMessage = trainer.feedback;
   recordPracticeHistory(puzzle, "solved", beforeFen, playedUci);
 
@@ -5030,6 +5790,7 @@ function rescheduleQueueItem(id, grade) {
   item.srs = applyGrade(ensureSrs(item).srs, grade);
   item.lastResult = grade === GRADE_SOLVED ? "solved" : "missed";
   item.attemptedAt = new Date().toISOString();
+  if (grade === GRADE_SOLVED) markDailyItemComplete("drill");
   saveJson(STORAGE_KEYS.practice, state.practiceQueue);
 }
 
@@ -5150,11 +5911,17 @@ async function finalizeIfGameOver() {
   if (!state.game.isGameOver()) return;
   const existing = state.localGames.find((game) => game.id === state.currentGameId);
   if (existing?.result && existing.result !== "in_progress") return;
+  stopClockTicker();
+  markDailyItemComplete("play");
   const result = getResultLabel();
   const wasCalibrating = !isCalibrationComplete();
   saveCurrentGame(result);
   recordCompletedGameForCalibration(result);
   if (!state.activeDrill) updateSkillFromGameResult(result);
+  const playerColor = state.settings.playerColor;
+  if (result.includes(`${colorName(playerColor)} wins`)) playGameSound("gameWin");
+  else if (result.startsWith("Draw")) playGameSound("move");
+  else if (result.includes("wins")) playGameSound("gameLoss");
   await syncGameEnd(result);
 
   if (wasCalibrating && isCalibrationComplete()) {
@@ -5545,6 +6312,10 @@ async function saveSettingsFromPanel(options = {}) {
   state.settings.displayName = normalizeDisplayName(document.querySelector("#displayNameInput").value);
   state.settings.playerColor = document.querySelector("#playerColorInput").value;
   state.settings.coachMode = document.querySelector("#coachModeInput").value;
+  state.settings.timeControl = document.querySelector("#timeControlInput")?.value || "unlimited";
+  state.settings.soundEnabled = document.querySelector("#soundEnabledInput")?.checked !== false;
+  state.settings.showBestArrow = document.querySelector("#showBestArrowInput")?.checked !== false;
+  state.settings.showEvalBar = document.querySelector("#showEvalBarInput")?.checked !== false;
   state.supabaseConfig.url = document.querySelector("#supabaseUrlInput").value.trim();
   state.supabaseConfig.anonKey = document.querySelector("#supabaseKeyInput").value.trim();
   saveJson(STORAGE_KEYS.settings, state.settings);
@@ -5705,6 +6476,7 @@ function newGame() {
   state.practiceTrainer.status = "idle";
   saveCurrentGame();
   syncGameStart();
+  initClocksForNewGame();
   renderAll();
 
   if (state.settings.playerColor === "b") {
@@ -5723,6 +6495,9 @@ function switchTab(tab) {
     renderGameMeta();
   }
   renderCurrentPanel();
+  // Arrows depend on the current tab (played+best in Review, only-on-mistake
+  // in play) so tab switches must repaint them.
+  paintBoardArrows();
 }
 
 function escapeHtml(value) {
@@ -5809,6 +6584,12 @@ function boot() {
   renderAll();
   verifyRequiredServices();
   initEngine();
+  // Only start a clock on boot for a game we haven't recorded time on yet.
+  // (Persisting live clocks across reloads is out of scope; users can just
+  // start a new game to reset.)
+  if (!state.game.isGameOver() && !state.moves.length) {
+    initClocksForNewGame();
+  }
 
   if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
     maybeEngineMove();
