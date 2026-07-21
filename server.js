@@ -43,6 +43,7 @@ const PUBLIC_FILES = new Set([
   "lib/classify.mjs",
   "lib/mates.mjs",
   "lib/password-strength.mjs",
+  "lib/puzzle-packs.mjs",
   "lib/repertoire.mjs",
   "lib/review-model.mjs",
   "lib/skill-rating.mjs",
@@ -52,6 +53,7 @@ const PUBLIC_FILES = new Set([
   "lib/stockfish-engine.mjs",
   "lib/tag-verify.mjs",
   "vendor/chess/chess.js",
+  "vendor/puzzles/lichess-pack.json",
   "vendor/stockfish/stockfish-nnue-16-single.js",
   "vendor/stockfish/stockfish-nnue-16-single.wasm",
   ...["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"]

@@ -21,6 +21,32 @@ test("every active mate position's solution ends in checkmate", () => {
   }
 });
 
+test("solutions alternate sides so scripted defender replies stay playable", () => {
+  for (const position of ACTIVE_MATE_POSITIONS) {
+    const solverColor = position.fen.split(" ")[1];
+    const game = new Chess(position.fen);
+    for (const [index, uci] of position.solution.entries()) {
+      const expectedColor = index % 2 === 0 ? solverColor : (solverColor === "w" ? "b" : "w");
+      assert.equal(game.turn(), expectedColor, `${position.id} ply ${index + 1} has the wrong side to move`);
+      game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    }
+    // The mate must be delivered by the solver, never the scripted defender.
+    assert.equal(position.solution.length % 2, 1, `${position.id} should end on the solver's move`);
+  }
+});
+
+test("every rung has enough positions to satisfy its own unlock rule", () => {
+  const grouped = matesByRung();
+  const rungs = [...grouped.keys()].sort((a, b) => a - b);
+  assert.deepEqual(rungs, [1, 2, 3], "ladder should span three rungs");
+  for (const rung of rungs.slice(0, -1)) {
+    assert.ok(
+      grouped.get(rung).length >= 3,
+      `rung ${rung} needs at least 3 positions so rung ${rung + 1} can unlock`,
+    );
+  }
+});
+
 test("positions have unique ids", () => {
   const ids = ACTIVE_MATE_POSITIONS.map((p) => p.id);
   assert.equal(new Set(ids).size, ids.length);

@@ -23,6 +23,7 @@ import { selectKeyMoments } from "./lib/review-model.mjs";
 import { REPERTOIRE, getOpeningById, getLineById, learnerPlaysAt } from "./lib/repertoire.mjs";
 import { ACTIVE_MATE_POSITIONS, getMatePositionById, matesByRung, isRungUnlocked, recordMateAttempt } from "./lib/mates.mjs";
 import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrade, selectDue, nextDueLabel } from "./lib/srs.mjs";
+import { normalizePackPuzzle, ratingBandForScore, selectRatedPuzzle } from "./lib/puzzle-packs.mjs";
 
 const PIECE_SPRITE_BASE = "/vendor/pieces/merida/";
 
@@ -728,6 +729,11 @@ const state = {
     cancelled: false,
     done: 0,
     total: 0,
+  },
+  // Imported rated tactics (vendor/puzzles/lichess-pack.json).
+  puzzlePack: {
+    status: "idle", // idle | loading | ready | error
+    puzzles: [],
   },
   openAI: {
     configured: false,
@@ -3807,7 +3813,7 @@ function selectNextPracticePuzzle(options = {}) {
   if (personalPick) return personalPick;
 
   const solvedKeys = getRecentlySolvedPracticeKeys();
-  const curated = CURATED_PRACTICE_PUZZLES
+  const curated = [...CURATED_PRACTICE_PUZZLES, ...getRatedPuzzlesNearLevel()]
     .map(normalizePracticePuzzle)
     .filter(Boolean)
     .sort((a, b) => {
@@ -3825,6 +3831,48 @@ function selectNextPracticePuzzle(options = {}) {
     || null;
 }
 
+// ─────────── Rated tactics pack (Lichess CC0 import) ───────────
+
+async function loadPuzzlePack() {
+  if (state.puzzlePack.status === "loading" || state.puzzlePack.status === "ready") return;
+  state.puzzlePack.status = "loading";
+  try {
+    const response = await fetch("/vendor/puzzles/lichess-pack.json");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    state.puzzlePack.puzzles = (data.puzzles || []).map(normalizePackPuzzle).filter(Boolean);
+    state.puzzlePack.status = "ready";
+  } catch (error) {
+    console.warn("Rated tactics pack could not load", error);
+    state.puzzlePack.status = "error";
+  }
+  if (state.currentTab === "practice") renderPracticePanel();
+}
+
+// Pack puzzles within one difficulty band of the player's level, for the
+// autostart rotation.
+function getRatedPuzzlesNearLevel() {
+  if (state.puzzlePack.status !== "ready") return [];
+  const band = ratingBandForScore(getEstimatedTrainingScore());
+  return state.puzzlePack.puzzles.filter((puzzle) => Math.abs((puzzle.band || 2) - band) <= 1);
+}
+
+function getWeaknessCategoriesRanked() {
+  return Object.values(state.profile)
+    .sort((a, b) => (b.count * b.severity) - (a.count * a.severity))
+    .map((entry) => entry.category);
+}
+
+function startRatedPuzzle() {
+  const puzzle = selectRatedPuzzle(state.puzzlePack.puzzles, {
+    score: getEstimatedTrainingScore(),
+    solvedKeys: getRecentlySolvedPracticeKeys(60),
+    weaknessCategories: getWeaknessCategoriesRanked(),
+    excludeKey: getPracticeSourceKey(state.activeDrill),
+  });
+  if (puzzle) startPracticePuzzle(puzzle, { render: true });
+}
+
 function resetPracticeTrainerState() {
   state.practiceTrainer = {
     attempts: 0,
@@ -3833,6 +3881,7 @@ function resetPracticeTrainerState() {
     lastMoveUci: "",
     scoreDelta: 0,
     feedback: "",
+    hadMiss: false,
   };
 }
 
@@ -3848,6 +3897,14 @@ function startPracticePuzzle(puzzle, options = {}) {
   state.activeDrill = structuredClone(normalized);
   state.activeDrill.step = 0;
   state.activeDrill.source = normalized.source;
+  // Multi-move puzzles restart from the top of the scripted line (a retry may
+  // pass a drill whose lineIndex/hints advanced mid-solve).
+  if (Array.isArray(state.activeDrill.solutionLine) && state.activeDrill.solutionLine.length) {
+    const first = state.activeDrill.solutionLine[0];
+    state.activeDrill.lineIndex = 0;
+    state.activeDrill.targetSquares = [first.slice(2, 4)];
+    state.activeDrill.hintSquares = [first.slice(0, 2)];
+  }
   state.drillMessage = normalized.plainGoal;
   resetPracticeTrainerState();
   state.game = normalized.fen === "start" ? new Chess() : new Chess(normalized.fen);
@@ -4158,6 +4215,8 @@ function renderPracticePanel() {
       ` : ""}
       <h3>Due Drills</h3>
       ${dueCards || "<p class=\"empty-state\">Nothing due right now. Drills from your mistakes come back on a spaced schedule.</p>"}
+      <h3>Rated Tactics</h3>
+      ${renderRatedTacticsSection()}
       <h3>Checkmate Ladder</h3>
       ${renderMateLadderSection()}
       <h3>My Openings</h3>
@@ -4177,6 +4236,7 @@ function renderPracticePanel() {
   bindWeaknessLabsSection();
   document.querySelector("#practiceNextButton")?.addEventListener("click", startNextPracticePuzzle);
   document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
+  document.querySelector("#startRatedPuzzleButton")?.addEventListener("click", startRatedPuzzle);
   els.practicePanel.querySelectorAll("[data-practice-board]").forEach((button) => {
     button.addEventListener("click", () => startQueuedPractice(button.dataset.practiceBoard));
   });
@@ -4184,6 +4244,40 @@ function renderPracticePanel() {
     const puzzle = CURATED_PRACTICE_PUZZLES.find((item) => item.id === button.dataset.startPuzzle);
     button.addEventListener("click", () => startPracticePuzzle(puzzle, { render: true }));
   });
+
+  if (state.puzzlePack.status === "idle") {
+    loadPuzzlePack();
+  }
+}
+
+// Rated tactics pulled from the imported Lichess pack (CC0), matched to the
+// player's current level and weakness profile.
+function renderRatedTacticsSection() {
+  const pack = state.puzzlePack;
+  if (pack.status === "error") {
+    return "<p class=\"empty-state\">The rated tactics pack could not load. Reload the app to retry.</p>";
+  }
+  if (pack.status !== "ready") {
+    return "<p class=\"empty-state\">Loading rated tactics...</p>";
+  }
+
+  const band = ratingBandForScore(getEstimatedTrainingScore());
+  const nearLevel = getRatedPuzzlesNearLevel();
+  const solvedKeys = getRecentlySolvedPracticeKeys(60);
+  const solvedCount = pack.puzzles.filter((puzzle) => solvedKeys.has(puzzle.sourceKey)).length;
+  const bandLabel = ["", "600-899", "900-1199", "1200-1499", "1500-1799"][band] || "";
+
+  return `
+    <article class="mini-card rated-tactics-card">
+      <span class="label">Around your level (${escapeHtml(bandLabel)})</span>
+      <strong>${pack.puzzles.length} real-game puzzles, ${nearLevel.length} near your rating</strong>
+      <p>Multi-move tactics from the Lichess puzzle database, picked for your level and weak spots. Solved recently: ${solvedCount}.</p>
+      <div class="button-row">
+        <button id="startRatedPuzzleButton" type="button" class="primary-action">Solve a rated puzzle</button>
+      </div>
+      <p class="empty-state">Puzzles: Lichess database (CC0).</p>
+    </article>
+  `;
 }
 
 function renderProfilePanel() {
@@ -5806,7 +5900,19 @@ async function handleMateDrillMove(move) {
     return;
   }
 
+  // Multi-move mates: the solution script includes the defender's replies —
+  // play the next one automatically so the player only ever moves their side.
   state.drillMessage = "Good — keep going.";
+  renderAll();
+  await wait(350);
+  const scriptedReply = drill.expected[drill.stepIndex];
+  const reply = state.game.move(moveFromUci(scriptedReply));
+  if (reply) {
+    state.lastMove = { from: reply.from, to: reply.to };
+    drill.stepIndex += 1;
+    playGameSound("move");
+  }
+  state.drillMessage = "Good — keep going. Find the next move.";
   renderAll();
 }
 
@@ -6073,12 +6179,21 @@ async function handlePracticeTrainerMove(move, beforeFen) {
   const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
   const puzzle = state.activeDrill;
   const trainer = state.practiceTrainer;
-  const solved = (puzzle.expectedMoves || []).includes(playedUci);
+  // Multi-move puzzles (imported packs) script the full line: player move
+  // first, then alternating defender replies the trainer plays itself.
+  const line = Array.isArray(puzzle.solutionLine) && puzzle.solutionLine.length > 1
+    ? puzzle.solutionLine
+    : null;
+  const lineIndex = puzzle.lineIndex || 0;
+  const solved = line
+    ? normalizeUciLoose(playedUci) === normalizeUciLoose(line[lineIndex])
+    : (puzzle.expectedMoves || []).includes(playedUci);
   trainer.attempts += 1;
 
   if (!solved) {
     state.game.undo();
     trainer.status = "missed";
+    trainer.hadMiss = true;
     trainer.scoreDelta = -3;
     playGameSound("drillMissed");
     if (!trainer.hintIndex && puzzle.hintSteps?.length) {
@@ -6092,14 +6207,44 @@ async function handlePracticeTrainerMove(move, beforeFen) {
       rescheduleQueueItem(puzzle.queueItemId, GRADE_MISSED);
     }
     await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "missed", playedUci);
+    maybeSendDrillFeedback(puzzle, beforeFen, playedUci);
     renderAll();
     return;
   }
 
   state.lastMove = { from: move.from, to: move.to };
+
+  if (line && lineIndex + 1 < line.length) {
+    // Correct so far — play the scripted defender reply and point the hints
+    // at the next move in the sequence.
+    puzzle.lineIndex = lineIndex + 1;
+    trainer.status = "trying";
+    trainer.feedback = "Good — keep going.";
+    state.drillMessage = trainer.feedback;
+    playGameSound("drillSolved");
+    renderAll();
+
+    await wait(350);
+    const reply = state.game.move(moveFromUci(line[puzzle.lineIndex]));
+    if (reply) {
+      state.lastMove = { from: reply.from, to: reply.to };
+      puzzle.lineIndex += 1;
+      playGameSound("move");
+    }
+    const nextExpected = line[puzzle.lineIndex] || "";
+    if (nextExpected) {
+      puzzle.targetSquares = [nextExpected.slice(2, 4)];
+      puzzle.hintSquares = [nextExpected.slice(0, 2)];
+    }
+    state.drillMessage = "Good — find the next move.";
+    trainer.feedback = state.drillMessage;
+    renderAll();
+    return;
+  }
+
   trainer.status = "solved";
   trainer.lastMoveUci = playedUci;
-  trainer.scoreDelta = trainer.attempts === 1 && !trainer.hintIndex ? 10 : 6;
+  trainer.scoreDelta = !trainer.hadMiss && !trainer.hintIndex ? 10 : 6;
   trainer.feedback = puzzle.successText || "Correct.";
   playGameSound("drillSolved");
   state.drillMessage = trainer.feedback;
@@ -6111,6 +6256,45 @@ async function handlePracticeTrainerMove(move, beforeFen) {
 
   await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "solved", playedUci);
   renderAll();
+}
+
+function normalizeUciLoose(uci) {
+  const value = String(uci || "").toLowerCase();
+  return value.length === 5 ? value : value.slice(0, 4);
+}
+
+// One coach nudge per missed practice puzzle: the drill_feedback event
+// contrasts the player's attempt with the motif without assigning new work.
+// The reply lands in the coach chat and replaces the canned miss text.
+function maybeSendDrillFeedback(puzzle, beforeFen, playedUci) {
+  if (puzzle.coachFeedbackSent) return;
+  if (!isCoachAvailable() || !isCalibrationComplete()) return;
+  puzzle.coachFeedbackSent = true;
+
+  const expectedUci = Array.isArray(puzzle.solutionLine) && puzzle.solutionLine.length
+    ? puzzle.solutionLine[puzzle.lineIndex || 0]
+    : (puzzle.expectedMoves || [])[0];
+
+  const moment = {
+    ply: null,
+    san: uciToSan(beforeFen, playedUci) || playedUci,
+    quality: "missed",
+    cpl: null,
+    bestMoveSan: expectedUci ? uciToSan(beforeFen, expectedUci) : "",
+    principalVariation: [],
+    fenBefore: beforeFen,
+    tags: [puzzle.term || puzzle.category].filter(Boolean),
+  };
+
+  requestCoachChat("drill_feedback", moment)
+    .then((data) => {
+      if (!data?.message) return;
+      if (state.activeDrill !== puzzle || state.practiceTrainer.status !== "missed") return;
+      state.drillMessage = data.message;
+      state.practiceTrainer.feedback = data.message;
+      if (state.currentTab === "practice") renderPracticePanel();
+    })
+    .catch((error) => console.warn("Drill feedback failed", error));
 }
 
 function rescheduleQueueItem(id, grade) {

@@ -30,10 +30,11 @@ Play always works locally (chess.js + bundled Stockfish). The conversational coa
 The platform is a personal chess teacher rather than a generic chessboard.
 
 - Plays full legal games in the browser with `chess.js`, with drag-and-drop or click-to-move on SVG pieces (Merida set).
-- Uses one quick calibration game to establish a baseline, then calibrates continuously from every graded move.
+- Uses one quick calibration game to establish a baseline, then blends the first three games for placement and calibrates continuously from every graded move.
+- Trains rated multi-move tactics imported from the Lichess puzzle database (CC0), matched to the player's level and weakness profile, alongside a three-rung checkmate ladder (mate in 1, 2, and 3).
 - Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks; opponent strength is Elo-limited (`UCI_LimitStrength`) for human-like play.
 - Adapts opponent strength from a per-dimension skill model (tactics, openings, endgames, calculation), recent results, and mistake severity.
-- Reviews learner moves with heuristics, Stockfish eval deltas, best alternatives, and principal variations.
+- Reviews learner moves live with heuristics, Stockfish eval deltas, best alternatives, and principal variations — then re-grades every move at depth 18 once the game ends, cross-checking each heuristic tactic tag against the engine and dropping false positives.
 - Shows post-calibration move-quality cues after each learner move while playing: best, excellent, good, book, inaccuracy, mistake, blunder, and missed win.
 - Highlights played and best moves in Review so the learner can compare choices visually.
 - Tracks recurring weaknesses and turns mistakes into practice positions.
@@ -371,15 +372,14 @@ Future automated checks:
 
 The biggest remaining work is turning strong analysis into a complete training system:
 
-- Variation replay: clickable engine lines, arrows, step-through branches, and "show continuation" controls.
-- Stronger quality labels: reliable brilliant/great detection using sacrifice, only-move, and engine-verification criteria.
-- Deeper motif detection: discovered attacks, overloaded defenders, trapped pieces, back-rank weaknesses, deflection, decoy, and clearance.
-- Spaced repetition: scheduled retry queues, due dates, mastery states, and per-theme retention tracking.
-- Player model: separate ratings for openings, tactics, calculation, endgames, conversion, time management, and recurring habits.
+- Stronger quality labels: reliable brilliant/great detection using sacrifice, only-move, and engine-verification criteria. (Deep depth-18 post-game re-analysis and engine-verified tactic tags shipped.)
+- Deeper motif detection: overloaded defenders, trapped pieces, deflection, decoy, and clearance.
+- Bigger puzzle library: the Lichess CC0 import currently ships 144 curated rated tactics; re-run `scripts/import-lichess-puzzles.mjs` with higher per-bucket counts for more volume.
 - Curriculum pages: opening repertoire, endgame modules, pawn-structure plans, lesson completion, and next-lesson recommendations.
 - Practice analytics: solve streaks, repeated miss tracking, trend charts, and improvement summaries.
-- Teaching polish: better arrows/highlights, mistake comparison cards, coach questions, and cleaner mobile/tablet layouts.
+- Teaching polish: mistake comparison cards and cleaner mobile/tablet layouts.
 - Data hardening: migrations tooling, backup/restore, and more automated sync tests. (Auth, RLS lockdown, and per-user isolation shipped.)
+- Monetization: Stripe trial + subscription, per-user usage quotas and token metering, deployment.
 
 ## Roadmap
 

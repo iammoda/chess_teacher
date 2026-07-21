@@ -270,6 +270,35 @@ test("every browser module import is on the server's static allowlist", async ()
   }
 });
 
+test("deep analysis, rated tactics, and drill feedback are wired in", async () => {
+  const app = await source("app.js");
+  const css = await source("styles.css");
+  const server = await source("server.js");
+  const coachChat = await source("lib/coach-chat.js");
+
+  // Post-game deep re-analysis with cancellation and progress UI.
+  assert.match(app, /function runDeepGameAnalysis/);
+  assert.match(app, /function cancelDeepAnalysis/);
+  assert.match(app, /function applyEngineAnalysisToRecord/);
+  assert.match(app, /verifyTagsWithEngine/);
+  assert.match(app, /function retractWeaknessEvidence/);
+  assert.match(app, /renderDeepAnalysisStatus/);
+  assert.match(css, /\.deep-analysis-card/);
+
+  // Rated tactics pack: served, loaded, selectable, multi-move capable.
+  assert.match(server, /vendor\/puzzles\/lichess-pack\.json/);
+  assert.match(app, /function loadPuzzlePack/);
+  assert.match(app, /function startRatedPuzzle/);
+  assert.match(app, /renderRatedTacticsSection/);
+  assert.match(app, /solutionLine/);
+  assert.match(app, /Lichess database \(CC0\)/);
+
+  // Coach reacts to missed drills.
+  assert.match(app, /function maybeSendDrillFeedback/);
+  assert.match(app, /requestCoachChat\("drill_feedback"/);
+  assert.match(coachChat, /drill_feedback events/);
+});
+
 test("small pill and chip labels share title-case formatting", async () => {
   const html = await source("index.html");
   const app = await source("app.js");
