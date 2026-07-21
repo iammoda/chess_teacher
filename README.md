@@ -79,6 +79,8 @@ Identity uses Supabase Auth (email + password); data access is server-only.
 1. In the Supabase dashboard, enable email auth (on by default) and grab three values from Project Settings -> API: the project URL, the publishable key, and the service role key.
 2. Put them in `.env` as `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`, then restart the server.
 3. Fresh project: run `supabase/schema.sql` in the SQL editor. Existing single-user database: run `supabase/migrations/001_multi_tenant.sql` instead (it adds `user_id` everywhere, re-keys per-user uniqueness, enables RLS, and revokes anon/authenticated grants).
+4. Dashboard settings to match the client: Auth -> URL Configuration -> Site URL = the app origin (e.g. `http://localhost:5173`) so confirmation/reset links land correctly; Auth -> Passwords -> minimum length 8. The client additionally enforces a common-password blocklist and a strength threshold (`lib/password-strength.mjs`, NIST-style: length + blocklist over composition rules).
+5. Before opening signups to others, switch Auth email to custom SMTP — the built-in sender is rate-limited to a few emails per hour.
 
 Security model:
 

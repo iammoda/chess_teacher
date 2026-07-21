@@ -3,6 +3,13 @@ const assert = require("node:assert/strict");
 const { Readable, Writable } = require("node:stream");
 const { handleRequest, resolvePublicFile, __setSupabaseFetchForTests } = require("../server");
 
+// Requiring server.js loads the developer's real .env, which may configure
+// Supabase. Tests need a deterministic unconfigured baseline; withSupabase()
+// opts individual tests back in with fake values.
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.SUPABASE_PUBLISHABLE_KEY;
+
 function requestPath(path) {
   return new Promise((resolve, reject) => {
     const req = new Readable({

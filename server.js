@@ -42,6 +42,7 @@ const PUBLIC_FILES = new Set([
   "lib/coach-client.mjs",
   "lib/classify.mjs",
   "lib/mates.mjs",
+  "lib/password-strength.mjs",
   "lib/repertoire.mjs",
   "lib/review-model.mjs",
   "lib/skill-rating.mjs",

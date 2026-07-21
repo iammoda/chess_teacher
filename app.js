@@ -7,6 +7,7 @@ import { arrowsOverlaySvg, uciToArrow } from "./lib/board-arrows.mjs";
 import { playSound, classifyMoveForSound } from "./lib/sounds.mjs";
 import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, streamCoachChat } from "./lib/coach-client.mjs";
 import { createApiClient, ApiError } from "./lib/api-client.mjs";
+import { scorePassword, MIN_PASSWORD_LENGTH } from "./lib/password-strength.mjs";
 import {
   SKILL_DIMENSIONS,
   DIMENSION_LABELS,
@@ -734,7 +735,12 @@ const state = {
     client: null,
     session: null,
     user: null,
-    mode: "sign_in", // sign_in | sign_up | reset | recovery
+    screen: "sign_in", // sign_in | sign_up | confirm_sent | reset | reset_sent | recovery
+    draft: { name: "", email: "", password: "" },
+    showPassword: false,
+    pendingEmail: "",
+    resendKind: "signup", // signup | reset — which email the sent screen re-sends
+    resendAvailableAt: 0,
     busy: false,
     error: "",
     notice: "",
@@ -6114,6 +6120,16 @@ function restoreActiveGame() {
 // which verifies the token and stamps user_id server-side.
 
 let authGateResolve = null;
+let resendTimerId = null;
+
+// The static veil in index.html covers the app shell until we know whether to
+// show the sign-in gate or the app, so neither ever flashes.
+function dismissBootVeil() {
+  const veil = document.querySelector("#bootVeil");
+  if (!veil) return;
+  veil.classList.add("hidden");
+  window.setTimeout(() => veil.remove(), 300);
+}
 
 async function initAuthClient() {
   const config = state.server.supabaseAuth;
@@ -6138,7 +6154,7 @@ async function initAuthClient() {
     state.auth.user = session?.user || null;
     if (event === "PASSWORD_RECOVERY") {
       state.auth.recovery = true;
-      state.auth.mode = "recovery";
+      state.auth.screen = "recovery";
       renderAuthGate();
     } else if (event === "SIGNED_OUT") {
       window.location.reload();
@@ -6168,12 +6184,102 @@ function ensureSignedIn() {
 }
 
 function finishAuthGate() {
+  if (resendTimerId) {
+    window.clearInterval(resendTimerId);
+    resendTimerId = null;
+  }
   document.querySelector("#authGate")?.remove();
   if (authGateResolve) {
     const resolve = authGateResolve;
     authGateResolve = null;
     resolve();
   }
+}
+
+const AUTH_SCREENS = {
+  sign_in: {
+    title: "Welcome back",
+    sub: "Sign in to continue your training.",
+    submit: "Sign in",
+  },
+  sign_up: {
+    title: "Create your account",
+    sub: "Your games, coach memory, and skill profile follow your account.",
+    submit: "Create account",
+  },
+  confirm_sent: {
+    title: "Confirm your email",
+    sub: "We sent a confirmation link to:",
+  },
+  reset: {
+    title: "Reset your password",
+    sub: "Enter your email and we'll send you a reset link.",
+    submit: "Send reset link",
+  },
+  reset_sent: {
+    title: "Check your email",
+    sub: "We sent a password reset link to:",
+  },
+  recovery: {
+    title: "Set a new password",
+    sub: "Choose a strong password for your account.",
+    submit: "Save new password",
+  },
+};
+
+function switchAuthScreen(screen) {
+  state.auth.screen = screen;
+  state.auth.error = "";
+  state.auth.notice = "";
+  renderAuthGate();
+}
+
+function passwordFieldHtml({ label, autocomplete, withMeter }) {
+  const { draft, showPassword } = state.auth;
+  const meter = withMeter ? passwordMeterHtml(scorePassword(draft.password, { email: draft.email })) : "";
+  return `
+    <label class="field pw-field">
+      <span>${escapeHtml(label)}</span>
+      <input id="authPasswordInput" type="${showPassword ? "text" : "password"}" autocomplete="${autocomplete}"
+        value="${escapeAttr(draft.password)}" placeholder="At least ${MIN_PASSWORD_LENGTH} characters">
+      <button type="button" class="pw-toggle" id="pwToggleButton">${showPassword ? "Hide" : "Show"}</button>
+    </label>
+    ${meter}
+  `;
+}
+
+function passwordMeterHtml(result) {
+  const hasInput = state.auth.draft.password.length > 0;
+  const segments = hasInput ? Math.max(1, result.score) : 0;
+  const segsHtml = [0, 1, 2, 3]
+    .map((index) => `<span class="pw-meter-seg${index < segments ? " on" : ""}"></span>`)
+    .join("");
+  return `
+    <div class="pw-meter ${result.label}" id="pwMeter">
+      <div class="pw-meter-row">
+        <div class="pw-meter-track">${segsHtml}</div>
+        <span class="pw-meter-label">${hasInput ? escapeHtml(result.label) : ""}</span>
+      </div>
+      <p class="pw-meter-hint">${escapeHtml(result.hint)}</p>
+    </div>
+  `;
+}
+
+// Re-scores the meter in place on each keystroke — no form rebuild, so typed
+// values and focus are never disturbed.
+function updatePasswordMeterUI() {
+  const meter = document.querySelector("#pwMeter");
+  if (!meter) return;
+  const result = scorePassword(state.auth.draft.password, { email: state.auth.draft.email });
+  const hasInput = state.auth.draft.password.length > 0;
+  const segments = hasInput ? Math.max(1, result.score) : 0;
+
+  meter.className = `pw-meter ${result.label}`;
+  meter.querySelectorAll(".pw-meter-seg").forEach((seg, index) => {
+    seg.classList.toggle("on", index < segments);
+  });
+  meter.querySelector(".pw-meter-label").textContent = hasInput ? result.label : "";
+  meter.querySelector(".pw-meter-hint").textContent = result.hint;
 }
 
 function renderAuthGate() {
@@ -6185,21 +6291,63 @@ function renderAuthGate() {
     document.body.append(gate);
   }
 
-  const { mode, busy, error, notice } = state.auth;
-  const titles = {
-    sign_in: "Welcome back",
-    sign_up: "Create your account",
-    reset: "Reset your password",
-    recovery: "Set a new password",
-  };
-  const submits = {
-    sign_in: "Sign in",
-    sign_up: "Create account",
-    reset: "Send reset link",
-    recovery: "Save new password",
-  };
-  const wantsEmail = mode !== "recovery";
-  const wantsPassword = mode !== "reset";
+  const { screen, draft, busy, error, notice, pendingEmail } = state.auth;
+  const copy = AUTH_SCREENS[screen] || AUTH_SCREENS.sign_in;
+  const isSentScreen = screen === "confirm_sent" || screen === "reset_sent";
+
+  let formHtml = "";
+  if (screen === "sign_in") {
+    formHtml = `
+      <label class="field">
+        <span>Email</span>
+        <input id="authEmailInput" type="email" autocomplete="email" value="${escapeAttr(draft.email)}" placeholder="you@example.com">
+      </label>
+      ${passwordFieldHtml({ label: "Password", autocomplete: "current-password", withMeter: false })}
+    `;
+  } else if (screen === "sign_up") {
+    formHtml = `
+      <label class="field">
+        <span>Name</span>
+        <input id="authNameInput" type="text" autocomplete="name" maxlength="32" value="${escapeAttr(draft.name)}" placeholder="What should the coach call you?">
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input id="authEmailInput" type="email" autocomplete="email" value="${escapeAttr(draft.email)}" placeholder="you@example.com">
+      </label>
+      ${passwordFieldHtml({ label: "Password", autocomplete: "new-password", withMeter: true })}
+    `;
+  } else if (screen === "reset") {
+    formHtml = `
+      <label class="field">
+        <span>Email</span>
+        <input id="authEmailInput" type="email" autocomplete="email" value="${escapeAttr(draft.email)}" placeholder="you@example.com">
+      </label>
+    `;
+  } else if (screen === "recovery") {
+    formHtml = passwordFieldHtml({ label: "New password", autocomplete: "new-password", withMeter: true });
+  }
+
+  const sentHtml = isSentScreen ? `
+    <div class="auth-sent">
+      <span class="auth-sent-email">${escapeHtml(pendingEmail)}</span>
+      <p class="auth-sub">${screen === "confirm_sent"
+        ? "Click the link in the email to activate your account, then come back and sign in."
+        : "Click the link in the email to choose a new password."}</p>
+      <button type="button" class="auth-resend" id="authResendButton">Resend email</button>
+    </div>
+  ` : "";
+
+  const linksHtml = {
+    sign_in: `
+      <button type="button" data-auth-screen="sign_up">Create account</button>
+      <button type="button" data-auth-screen="reset">Forgot password?</button>
+    `,
+    sign_up: `<button type="button" data-auth-screen="sign_in">Have an account? Sign in</button>`,
+    confirm_sent: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
+    reset: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
+    reset_sent: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
+    recovery: "",
+  }[screen] || "";
 
   gate.innerHTML = `
     <div class="auth-card">
@@ -6207,56 +6355,133 @@ function renderAuthGate() {
         <img src="./assets/squirrel_chess.svg" alt="" aria-hidden="true">
         <strong>Personal Chess Teacher</strong>
       </div>
-      <h2>${escapeHtml(titles[mode] || titles.sign_in)}</h2>
-      <p class="auth-sub">Your games, coach memory, and skill profile follow your account.</p>
-      <form id="authForm" novalidate>
-        ${wantsEmail ? `
-          <label class="field">
-            <span>Email</span>
-            <input id="authEmailInput" type="email" autocomplete="email" required placeholder="you@example.com">
-          </label>
-        ` : ""}
-        ${wantsPassword ? `
-          <label class="field">
-            <span>${mode === "recovery" ? "New password" : "Password"}</span>
-            <input id="authPasswordInput" type="password" autocomplete="${mode === "sign_in" ? "current-password" : "new-password"}" required minlength="8" placeholder="At least 8 characters">
-          </label>
-        ` : ""}
-        ${error ? `<p class="auth-error">${escapeHtml(error)}</p>` : ""}
-        ${notice ? `<p class="auth-notice">${escapeHtml(notice)}</p>` : ""}
-        <button type="submit" class="auth-submit"${busy ? " disabled" : ""}>${busy ? "Working..." : escapeHtml(submits[mode] || "Continue")}</button>
-      </form>
-      <div class="auth-links">
-        ${mode === "sign_in" ? `
-          <button type="button" data-auth-mode="sign_up">Create account</button>
-          <button type="button" data-auth-mode="reset">Forgot password?</button>
-        ` : ""}
-        ${mode === "sign_up" || mode === "reset" ? `
-          <button type="button" data-auth-mode="sign_in">Back to sign in</button>
-        ` : ""}
-      </div>
+      <h2>${escapeHtml(copy.title)}</h2>
+      <p class="auth-sub">${escapeHtml(copy.sub)}</p>
+      ${isSentScreen ? sentHtml : `
+        <form id="authForm" novalidate>
+          ${formHtml}
+          <p class="auth-error" id="authError">${escapeHtml(error)}</p>
+          <p class="auth-notice" id="authNotice">${escapeHtml(notice)}</p>
+          <button type="submit" class="auth-submit" id="authSubmitButton"${busy ? " disabled" : ""}>${busy ? "Working..." : escapeHtml(copy.submit)}</button>
+        </form>
+      `}
+      ${isSentScreen ? `
+        <p class="auth-error" id="authError">${escapeHtml(error)}</p>
+        <p class="auth-notice" id="authNotice">${escapeHtml(notice)}</p>
+      ` : ""}
+      <div class="auth-links">${linksHtml}</div>
     </div>
   `;
 
-  gate.querySelector("#authForm").addEventListener("submit", handleAuthSubmit);
-  for (const button of gate.querySelectorAll("[data-auth-mode]")) {
-    button.addEventListener("click", () => {
-      state.auth.mode = button.dataset.authMode;
-      state.auth.error = "";
-      state.auth.notice = "";
-      renderAuthGate();
-    });
+  bindAuthGate(gate);
+  dismissBootVeil();
+}
+
+function bindAuthGate(gate) {
+  gate.querySelector("#authForm")?.addEventListener("submit", handleAuthSubmit);
+  gate.querySelector("#authResendButton")?.addEventListener("click", handleResendEmail);
+
+  for (const button of gate.querySelectorAll("[data-auth-screen]")) {
+    button.addEventListener("click", () => switchAuthScreen(button.dataset.authScreen));
   }
-  gate.querySelector("#authEmailInput, #authPasswordInput")?.focus();
+
+  // Keep the draft in sync so re-renders (busy, errors, screen switches)
+  // never lose what the user typed.
+  gate.querySelector("#authNameInput")?.addEventListener("input", (event) => {
+    state.auth.draft.name = event.target.value;
+  });
+  gate.querySelector("#authEmailInput")?.addEventListener("input", (event) => {
+    state.auth.draft.email = event.target.value;
+    updatePasswordMeterUI();
+  });
+  gate.querySelector("#authPasswordInput")?.addEventListener("input", (event) => {
+    state.auth.draft.password = event.target.value;
+    updatePasswordMeterUI();
+  });
+
+  gate.querySelector("#pwToggleButton")?.addEventListener("click", () => {
+    state.auth.showPassword = !state.auth.showPassword;
+    const input = gate.querySelector("#authPasswordInput");
+    const toggle = gate.querySelector("#pwToggleButton");
+    if (input && toggle) {
+      input.type = state.auth.showPassword ? "text" : "password";
+      toggle.textContent = state.auth.showPassword ? "Hide" : "Show";
+      input.focus();
+    }
+  });
+
+  updateResendButton();
+
+  const inputs = [...gate.querySelectorAll("input")];
+  const firstEmpty = inputs.find((input) => !input.value) || inputs[0];
+  firstEmpty?.focus();
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Translates GoTrue errors into human copy. Returns { message, screen? } —
+// screen requests a redirect (e.g. unconfirmed email -> confirm_sent).
+function friendlyAuthError(error) {
+  const message = String(error?.message || "");
+  const code = String(error?.code || "");
+
+  if (code === "email_not_confirmed" || /email not confirmed/i.test(message)) {
+    return { message: "", screen: "confirm_sent", notice: "Confirm your email to finish signing in." };
+  }
+  if (code === "invalid_credentials" || /invalid login credentials/i.test(message)) {
+    return { message: "That email and password don't match. Try again, or reset your password." };
+  }
+  if (code === "user_already_exists" || /already registered/i.test(message)) {
+    return { message: "That email already has an account. Sign in instead." };
+  }
+  if (code === "weak_password" || /weak.?password/i.test(code + message)) {
+    return { message: `That password is too weak. Use at least ${MIN_PASSWORD_LENGTH} characters and avoid common passwords.` };
+  }
+  if (code === "over_email_send_rate_limit" || /rate limit/i.test(message)) {
+    return { message: "Too many emails sent recently. Wait a minute and try again." };
+  }
+  if (/failed to fetch|network/i.test(message)) {
+    return { message: "Could not reach the sign-in service. Check your connection." };
+  }
+  return { message: message || "Something went wrong. Try again." };
+}
+
+function validateAuthForm(screen) {
+  const { draft } = state.auth;
+  if (screen === "sign_up" && !draft.name.trim()) {
+    return "Enter your name so the coach knows what to call you.";
+  }
+  if ((screen === "sign_in" || screen === "sign_up" || screen === "reset") && !EMAIL_PATTERN.test(draft.email.trim())) {
+    return "Enter a valid email address.";
+  }
+  if (screen === "sign_in" && !draft.password) {
+    return "Enter your password.";
+  }
+  if (screen === "sign_up" || screen === "recovery") {
+    const result = scorePassword(draft.password, { email: draft.email });
+    if (!result.acceptable) {
+      return result.hint || `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+    }
+  }
+  return "";
 }
 
 async function handleAuthSubmit(event) {
   event.preventDefault();
   if (state.auth.busy || !state.auth.client) return;
 
-  const mode = state.auth.mode;
-  const email = document.querySelector("#authEmailInput")?.value.trim() || "";
-  const password = document.querySelector("#authPasswordInput")?.value || "";
+  const screen = state.auth.screen;
+  const email = state.auth.draft.email.trim();
+  const password = state.auth.draft.password;
+  const name = normalizeDisplayName(state.auth.draft.name);
+
+  const validationError = validateAuthForm(screen);
+  if (validationError) {
+    state.auth.error = validationError;
+    state.auth.notice = "";
+    renderAuthGate();
+    return;
+  }
 
   state.auth.busy = true;
   state.auth.error = "";
@@ -6265,28 +6490,48 @@ async function handleAuthSubmit(event) {
 
   try {
     const auth = state.auth.client.auth;
-    if (mode === "sign_in") {
+    if (screen === "sign_in") {
       const { error } = await auth.signInWithPassword({ email, password });
       if (error) throw error;
-    } else if (mode === "sign_up") {
-      const { data, error } = await auth.signUp({ email, password });
+    } else if (screen === "sign_up") {
+      const { data, error } = await auth.signUp({
+        email,
+        password,
+        options: {
+          data: { display_name: name },
+          emailRedirectTo: window.location.origin,
+        },
+      });
       if (error) throw error;
       if (!data.session) {
-        state.auth.notice = "Check your email to confirm your account, then sign in.";
-        state.auth.mode = "sign_in";
+        // Email confirmation required: move to the sent screen. The signup
+        // email just went out, so start the resend cooldown now.
+        state.auth.pendingEmail = email;
+        state.auth.resendKind = "signup";
+        state.auth.screen = "confirm_sent";
+        startResendCooldown();
       }
-    } else if (mode === "reset") {
+    } else if (screen === "reset") {
       const { error } = await auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
       if (error) throw error;
-      state.auth.notice = "Check your email for the reset link.";
-      state.auth.mode = "sign_in";
-    } else if (mode === "recovery") {
+      state.auth.pendingEmail = email;
+      state.auth.resendKind = "reset";
+      state.auth.screen = "reset_sent";
+      startResendCooldown();
+    } else if (screen === "recovery") {
       const { error } = await auth.updateUser({ password });
       if (error) throw error;
       state.auth.recovery = false;
     }
   } catch (error) {
-    state.auth.error = error.message || "Authentication failed. Try again.";
+    const friendly = friendlyAuthError(error);
+    state.auth.error = friendly.message;
+    if (friendly.notice) state.auth.notice = friendly.notice;
+    if (friendly.screen) {
+      state.auth.pendingEmail = email;
+      state.auth.resendKind = "signup";
+      state.auth.screen = friendly.screen;
+    }
   }
   state.auth.busy = false;
 
@@ -6298,6 +6543,58 @@ async function handleAuthSubmit(event) {
     finishAuthGate();
   } else {
     renderAuthGate();
+  }
+}
+
+// Resend from the confirm/reset sent screens, throttled to once a minute.
+async function handleResendEmail() {
+  const { pendingEmail, resendKind, client } = state.auth;
+  if (!client || !pendingEmail || Date.now() < state.auth.resendAvailableAt) return;
+
+  state.auth.error = "";
+  state.auth.notice = "";
+  try {
+    if (resendKind === "reset") {
+      const { error } = await client.auth.resetPasswordForEmail(pendingEmail, { redirectTo: window.location.origin });
+      if (error) throw error;
+    } else {
+      const { error } = await client.auth.resend({
+        type: "signup",
+        email: pendingEmail,
+        options: { emailRedirectTo: window.location.origin },
+      });
+      if (error) throw error;
+    }
+    state.auth.notice = "Email sent.";
+    startResendCooldown();
+  } catch (error) {
+    state.auth.error = friendlyAuthError(error).message;
+  }
+  renderAuthGate();
+}
+
+function startResendCooldown() {
+  state.auth.resendAvailableAt = Date.now() + 60_000;
+  if (resendTimerId) window.clearInterval(resendTimerId);
+  resendTimerId = window.setInterval(() => {
+    if (Date.now() >= state.auth.resendAvailableAt) {
+      window.clearInterval(resendTimerId);
+      resendTimerId = null;
+    }
+    updateResendButton();
+  }, 500);
+}
+
+function updateResendButton() {
+  const button = document.querySelector("#authResendButton");
+  if (!button) return;
+  const remaining = Math.ceil((state.auth.resendAvailableAt - Date.now()) / 1000);
+  if (remaining > 0) {
+    button.disabled = true;
+    button.textContent = `Resend email (${remaining}s)`;
+  } else {
+    button.disabled = false;
+    button.textContent = "Resend email";
   }
 }
 
@@ -6869,6 +7166,7 @@ async function boot() {
 
   hydrateStateFromStorage();
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+  seedDisplayNameFromAccount();
   normalizeCalibrationState();
   migrateLegacyPlacement();
   if (isCalibrationComplete()) ensureSkillState();
@@ -6876,6 +7174,7 @@ async function boot() {
   restoreActiveGame();
   bindEvents();
   renderAll();
+  dismissBootVeil();
   verifyRequiredServices();
   initEngine();
   // Only start a clock on boot for a game we haven't recorded time on yet.
@@ -6890,6 +7189,20 @@ async function boot() {
   }
 }
 
+// First sign-in on a device: use the name given at signup as the display name
+// until the player customizes it in Settings.
+function seedDisplayNameFromAccount() {
+  if (!isSignedIn()) return;
+  const rawName = String(state.auth.user?.user_metadata?.display_name || "").trim();
+  if (!rawName) return;
+  const current = state.settings.displayName;
+  if (!current || current === DEFAULT_SETTINGS.displayName) {
+    state.settings.displayName = normalizeDisplayName(rawName);
+    saveJson(STORAGE_KEYS.settings, state.settings);
+  }
+}
+
 boot().catch((error) => {
   console.error("Boot failed", error);
+  dismissBootVeil();
 });

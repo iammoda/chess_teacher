@@ -189,10 +189,17 @@ test("settings exposes local history erase and account-scoped remote erase", asy
 
 test("auth gate and server-mediated sync are wired in", async () => {
   const app = await source("app.js");
+  const html = await source("index.html");
   const css = await source("styles.css");
   const apiClient = await source("lib/api-client.mjs");
   const server = await source("server.js");
   const schema = await source("supabase/schema.sql");
+
+  // Boot veil: no app flash before the gate or the app is ready.
+  assert.match(html, /id="bootVeil"/);
+  assert.match(html, /rel="modulepreload"[^>]*supabase-js/);
+  assert.match(app, /function dismissBootVeil/);
+  assert.match(css, /\.boot-veil/);
 
   // Sign-in overlay and per-user storage.
   assert.match(app, /function renderAuthGate/);
@@ -202,6 +209,18 @@ test("auth gate and server-mediated sync are wired in", async () => {
   assert.match(app, /signInWithPassword/);
   assert.match(css, /\.auth-gate/);
   assert.match(css, /\.auth-card/);
+
+  // Distinct signup flow: name capture, strength meter, confirm/resend screens.
+  assert.match(app, /authNameInput/);
+  assert.match(app, /display_name: name/);
+  assert.match(app, /scorePassword/);
+  assert.match(app, /function seedDisplayNameFromAccount/);
+  assert.match(app, /confirm_sent/);
+  assert.match(app, /function handleResendEmail/);
+  assert.match(app, /function friendlyAuthError/);
+  assert.match(app, /pwToggleButton/);
+  assert.match(css, /\.pw-meter/);
+  assert.match(css, /\.auth-resend/);
 
   // The browser must never talk to the database directly or embed keys.
   assert.match(app, /createApiClient/);

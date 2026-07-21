@@ -5,6 +5,13 @@ process.env.OPENAI_API_KEY = "smoke-disabled";
 const require = createRequire(import.meta.url);
 const { createServer } = require("../server.js");
 
+// server.js loads the developer's real .env, which may configure Supabase.
+// The first smoke scenario needs legacy local mode; the auth scenario sets
+// its own fake values below.
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.SUPABASE_PUBLISHABLE_KEY;
+
 let chromium;
 try {
   ({ chromium } = await import("playwright"));
@@ -71,6 +78,9 @@ try {
     throw new Error(`Browser page errors: ${pageErrors.join("; ")}`);
   }
 
+  // Legacy mode must dismiss the boot veil once the app renders.
+  await page.waitForFunction(() => !document.querySelector("#bootVeil"), null, { timeout: 5000 });
+
   // ── Auth-mode smoke: with Supabase configured, the app must gate behind
   // sign-in. supabase-js is stubbed so this works offline and deterministically.
   process.env.SUPABASE_URL = "https://smoke-test.supabase.co";
@@ -88,8 +98,9 @@ try {
         return { auth: {
           onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
           async getSession() { return { data: { session: null } }; },
-          async signInWithPassword() { return { error: new Error("Invalid login credentials") }; },
+          async signInWithPassword() { return { error: { message: "Invalid login credentials", code: "invalid_credentials" } }; },
           async signUp() { return { data: {}, error: null }; },
+          async resend() { return { error: null }; },
           async resetPasswordForEmail() { return { error: null }; },
           async updateUser() { return { error: null }; },
           async signOut() { return { error: null }; },
@@ -100,25 +111,53 @@ try {
     await authPage.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await authPage.locator("#authGate .auth-card").waitFor({ timeout: 7000 });
 
+    // The veil must be gone once the gate is up — no flash of the app shell.
+    await authPage.waitForFunction(() => !document.querySelector("#bootVeil"), null, { timeout: 3000 });
+
     const heading = await authPage.locator("#authGate h2").textContent();
     if (!/welcome back/i.test(heading || "")) {
       throw new Error(`Unexpected auth gate heading: ${heading}`);
     }
 
-    // Mode switching: sign in -> create account -> back.
-    await authPage.locator('[data-auth-mode="sign_up"]').click();
-    await authPage.locator("#authGate h2", { hasText: "Create your account" }).waitFor({ timeout: 3000 });
-    await authPage.locator('[data-auth-mode="sign_in"]').click();
-
-    // A rejected sign-in surfaces the error without dismissing the gate.
+    // A rejected sign-in surfaces a friendly error AND keeps what was typed.
     await authPage.locator("#authEmailInput").fill("smoke@example.com");
     await authPage.locator("#authPasswordInput").fill("wrong-password");
     await authPage.locator(".auth-submit").click();
-    await authPage.locator(".auth-error", { hasText: "Invalid login credentials" }).waitFor({ timeout: 3000 });
+    await authPage.locator("#authError", { hasText: "don't match" }).waitFor({ timeout: 3000 });
 
-    const gateCount = await authPage.locator("#authGate").count();
-    if (gateCount !== 1) {
-      throw new Error("Auth gate should stay up after a failed sign-in.");
+    const preservedEmail = await authPage.locator("#authEmailInput").inputValue();
+    if (preservedEmail !== "smoke@example.com") {
+      throw new Error(`Failed sign-in should preserve the typed email, got "${preservedEmail}".`);
+    }
+
+    // Create-account screen: distinct flow with name capture and a strength meter.
+    await authPage.locator('[data-auth-screen="sign_up"]').click();
+    await authPage.locator("#authGate h2", { hasText: "Create your account" }).waitFor({ timeout: 3000 });
+    await authPage.locator("#authNameInput").waitFor({ timeout: 3000 });
+
+    await authPage.locator("#authNameInput").fill("Smokey");
+    const carriedEmail = await authPage.locator("#authEmailInput").inputValue();
+    if (carriedEmail !== "smoke@example.com") {
+      throw new Error("Email should carry across auth screens.");
+    }
+
+    // Weak/common password: meter shows weak and client-side validation blocks.
+    await authPage.locator("#authPasswordInput").fill("password123");
+    await authPage.locator(".pw-meter.weak").waitFor({ timeout: 3000 });
+    await authPage.locator(".auth-submit").click();
+    await authPage.locator("#authError", { hasText: "common" }).waitFor({ timeout: 3000 });
+
+    // Strong password passes and lands on the confirm-email screen with a
+    // cooled-down resend button.
+    await authPage.locator("#authPasswordInput").fill("horse battery staple chess");
+    await authPage.locator(".pw-meter.strong").waitFor({ timeout: 3000 });
+    await authPage.locator(".auth-submit").click();
+    await authPage.locator("#authGate h2", { hasText: "Confirm your email" }).waitFor({ timeout: 3000 });
+    await authPage.locator(".auth-sent-email", { hasText: "smoke@example.com" }).waitFor({ timeout: 3000 });
+
+    const resendDisabled = await authPage.locator("#authResendButton").isDisabled();
+    if (!resendDisabled) {
+      throw new Error("Resend should start on cooldown right after signup.");
     }
 
     if (authPageErrors.length) {

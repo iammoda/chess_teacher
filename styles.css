@@ -2452,6 +2452,55 @@ textarea {
   }
 }
 
+/* ─────────── Boot veil ─────────── */
+.boot-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(1400px 700px at 50% -10%, #ffffff 0%, transparent 60%),
+    var(--paper);
+  transition: opacity 220ms ease;
+}
+
+.boot-veil.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-veil-inner {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--ink-2);
+}
+
+.boot-veil-inner img {
+  width: 48px;
+  height: 48px;
+}
+
+.boot-veil-inner strong {
+  font-family: "Source Serif 4", serif;
+  font-size: 18px;
+  color: var(--ink);
+}
+
+.boot-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--rule-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: boot-spin 0.8s linear infinite;
+}
+
+@keyframes boot-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ─────────── Auth gate ─────────── */
 .auth-gate {
   position: fixed;
@@ -2532,6 +2581,11 @@ textarea {
   color: var(--danger);
 }
 
+.auth-error:empty,
+.auth-notice:empty {
+  display: none;
+}
+
 .auth-notice {
   margin: 0;
   padding: 8px 10px;
@@ -2556,6 +2610,115 @@ textarea {
 
 .auth-links button:hover {
   text-decoration: underline;
+}
+
+/* Password field with visibility toggle */
+.pw-field {
+  position: relative;
+}
+
+.pw-field input {
+  padding-right: 64px;
+}
+
+.pw-toggle {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 6px 6px;
+}
+
+.pw-toggle:hover {
+  color: var(--accent);
+}
+
+/* Strength meter */
+.pw-meter {
+  display: grid;
+  gap: 6px;
+}
+
+.pw-meter-track {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.pw-meter-seg {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--paper-3);
+  transition: background 160ms ease;
+}
+
+.pw-meter.weak .pw-meter-seg.on { background: var(--danger); }
+.pw-meter.fair .pw-meter-seg.on { background: var(--warn); }
+.pw-meter.strong .pw-meter-seg.on { background: var(--good); }
+
+.pw-meter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pw-meter-label {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.pw-meter.weak .pw-meter-label { color: var(--danger); }
+.pw-meter.fair .pw-meter-label { color: var(--warn); }
+.pw-meter.strong .pw-meter-label { color: var(--good); }
+
+.pw-meter-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* Confirm-email / sent screens */
+.auth-sent {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.auth-sent-email {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.auth-resend {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--card);
+  cursor: pointer;
+}
+
+.auth-resend:hover:not(:disabled) {
+  border-color: var(--rule-2);
+}
+
+.auth-resend:disabled {
+  color: var(--ink-3);
+  cursor: default;
 }
 
 .account-card .button-row {
