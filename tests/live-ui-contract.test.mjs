@@ -258,6 +258,18 @@ test("identity settings and squirrel branding are wired into the UI", async () =
   assert.match(css, /height: var\(--board-size\)/);
 });
 
+test("every browser module import is on the server's static allowlist", async () => {
+  const app = await source("app.js");
+  const server = await source("server.js");
+
+  const imports = [...app.matchAll(/from "\.\/((?:lib|vendor)\/[A-Za-z0-9/_-]+\.(?:mjs|js))"/g)]
+    .map((match) => match[1]);
+  assert.ok(imports.length >= 10, "expected app.js to import browser modules");
+  for (const path of imports) {
+    assert.ok(server.includes(`"${path}"`), `${path} is imported by app.js but missing from PUBLIC_FILES`);
+  }
+});
+
 test("small pill and chip labels share title-case formatting", async () => {
   const html = await source("index.html");
   const app = await source("app.js");

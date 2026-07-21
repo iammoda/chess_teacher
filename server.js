@@ -50,6 +50,7 @@ const PUBLIC_FILES = new Set([
   "lib/srs.mjs",
   "lib/skill-model.mjs",
   "lib/stockfish-engine.mjs",
+  "lib/tag-verify.mjs",
   "vendor/chess/chess.js",
   "vendor/stockfish/stockfish-nnue-16-single.js",
   "vendor/stockfish/stockfish-nnue-16-single.wasm",
