@@ -142,8 +142,9 @@ test("board renders SVG piece sprites with drag-and-drop support", async () => {
   const css = await source("styles.css");
   const drag = await source("lib/board-drag.mjs");
 
-  assert.match(app, /vendor\/pieces\/merida\//);
-  assert.match(app, /function pieceSpriteUrl\(color, type\)/);
+  assert.match(app, /PIECE_SPRITE_ROOT = "\/vendor\/pieces\/"/);
+  assert.match(app, /DEFAULT_PIECE_SET = "merida"/);
+  assert.match(app, /function pieceSpriteUrl\(color, type, set = getActivePieceSet\(\)\)/);
   assert.match(app, /attachDragHandlers/);
   assert.match(app, /attemptPlayerMove/);
   assert.doesNotMatch(app, /"♙"/);
@@ -155,6 +156,44 @@ test("board renders SVG piece sprites with drag-and-drop support", async () => {
   assert.match(css, /\.piece\.drag-source/);
   assert.match(css, /--sq-light: #dee3e6/);
   assert.match(css, /--sq-dark: #8ca2ad/);
+});
+
+test("board themes, piece sets, personas, and family mode are wired in", async () => {
+  const app = await source("app.js");
+  const css = await source("styles.css");
+  const server = await source("server.js");
+  const personas = await source("lib/personas.mjs");
+  const coachChat = await source("lib/coach-chat.js");
+
+  // Board themes: token overrides selected by a data attribute.
+  assert.match(app, /function applyBoardTheme/);
+  assert.match(app, /dataset\.boardTheme/);
+  for (const theme of ["walnut", "green", "ocean", "rosewood", "candy", "nebula", "middle-realm"]) {
+    assert.match(css, new RegExp(`\\[data-board-theme="${theme}"\\]`), theme);
+  }
+  assert.match(app, /renderAppearanceCards/);
+  assert.match(css, /\.theme-swatch/);
+
+  // Piece sets: discovered server-side, chosen client-side, previewed live.
+  assert.match(server, /function discoverPieceSets/);
+  assert.match(server, /pieceSets: PIECE_SETS/);
+  assert.match(app, /function getActivePieceSet/);
+  assert.match(app, /function preloadPieceSet/);
+  assert.match(css, /\.piece-set-option/);
+
+  // Personas: whitelisted voice overlays that never change the method.
+  assert.match(personas, /export const COACH_PERSONAS/);
+  assert.match(personas, /VOICE ONLY/);
+  assert.match(coachChat, /require\("\.\/personas\.mjs"\)/);
+  assert.match(coachChat, /changes tone only/);
+  assert.match(app, /persona: getActivePersonaKey\(\)/);
+  assert.match(app, /renderPersonaCard/);
+
+  // Family mode: gentle persona lock, softened labels, hidden danger zone.
+  assert.match(app, /function isFamilyMode/);
+  assert.match(app, /FAMILY_QUALITY_LABELS/);
+  assert.match(app, /familyModeInput/);
+  assert.match(app, /Family mode keeps Sunny as the coach/);
 });
 
 test("play is never gated on remote services", async () => {

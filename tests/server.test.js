@@ -106,6 +106,22 @@ test("static server denies sensitive repo files", async () => {
   }
 });
 
+test("piece sets are discovered, served, and reported by health", async () => {
+  const health = await requestPath("/api/health");
+  const data = JSON.parse(health.body.toString("utf8"));
+  assert.ok(Array.isArray(data.pieceSets));
+  assert.ok(data.pieceSets.includes("merida"), "merida discovered");
+  assert.ok(data.pieceSets.includes("fantasy"), "fantasy discovered");
+
+  const sprite = await requestPath("/vendor/pieces/fantasy/wK.svg");
+  assert.equal(sprite.status, 200);
+  assert.match(sprite.headers["Content-Type"] || "", /image\/svg\+xml/);
+
+  // Only the 12 canonical sprites are served — licenses stay repo-only.
+  const license = await requestPath("/vendor/pieces/fantasy/LICENSE.md");
+  assert.equal(license.status, 404);
+});
+
 function postJson(path, payload) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);

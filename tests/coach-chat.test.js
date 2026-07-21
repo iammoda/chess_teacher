@@ -172,3 +172,48 @@ test("extractOutputText reads output_text and nested content", () => {
     "a\nb",
   );
 });
+
+// ─────────── Personas ───────────
+
+const { PERSONA_KEYS, COACH_PERSONAS, normalizePersonaKey } = require("../lib/personas.mjs");
+
+test("unknown personas are rejected; known and missing personas pass", () => {
+  assert.match(validateChatPayload(basePayload({ persona: "gordon-ramsay" })), /persona must be one of/);
+  assert.equal(validateChatPayload(basePayload({ persona: "marv" })), null);
+  assert.equal(validateChatPayload(basePayload()), null, "persona stays optional");
+});
+
+test("personas overlay tone without touching the coaching rules", () => {
+  for (const key of PERSONA_KEYS) {
+    const input = buildChatInput(basePayload({ persona: key }));
+    const prompt = input[0].content;
+    assert.match(prompt, /Never invent moves/, `${key} keeps grounding rule`);
+    assert.match(prompt, /do NOT reveal the best move/, `${key} keeps rethink rule`);
+    if (COACH_PERSONAS[key].tone.length) {
+      assert.match(prompt, /Persona voice:/, `${key} adds a voice block`);
+      assert.match(prompt, /changes tone only/, `${key} carries the tone-only guard`);
+      const rulesIndex = prompt.indexOf("Coaching rules:");
+      const personaIndex = prompt.indexOf("Persona voice:");
+      assert.ok(personaIndex > rulesIndex, `${key} voice comes after the rules`);
+    } else {
+      assert.doesNotMatch(prompt, /Persona voice:/, `${key} stays unmodified`);
+    }
+  }
+});
+
+test("sunny is the only persona allowed to use emoji, and stays child-safe", () => {
+  const sunny = buildChatInput(basePayload({ persona: "sunny" }))[0].content;
+  assert.match(sunny, /appropriate for children/);
+  assert.match(sunny, /at most one friendly emoji/);
+
+  for (const key of PERSONA_KEYS.filter((k) => k !== "sunny")) {
+    const prompt = buildChatInput(basePayload({ persona: key }))[0].content;
+    assert.doesNotMatch(prompt, /emoji/, `${key} has no emoji allowance`);
+  }
+});
+
+test("normalizePersonaKey falls back to classic", () => {
+  assert.equal(normalizePersonaKey("blaze"), "blaze");
+  assert.equal(normalizePersonaKey("unknown"), "classic");
+  assert.equal(normalizePersonaKey(undefined), "classic");
+});

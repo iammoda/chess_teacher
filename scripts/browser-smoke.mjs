@@ -81,6 +81,33 @@ try {
   // Legacy mode must dismiss the boot veil once the app renders.
   await page.waitForFunction(() => !document.querySelector("#bootVeil"), null, { timeout: 5000 });
 
+  // Board themes, piece sets, and personas: switching must take effect live.
+  await page.locator('[data-tab="settings"]').click();
+  await page.locator('[data-board-theme-key="walnut"]').click();
+  const themeApplied = await page.evaluate(() => document.documentElement.dataset.boardTheme);
+  if (themeApplied !== "walnut") {
+    throw new Error(`Board theme switch failed: got "${themeApplied}"`);
+  }
+  const darkSquareColor = await page.evaluate(() => {
+    const dark = document.querySelector("#board .square.dark, #board .square:nth-child(2)");
+    return getComputedStyle(dark).backgroundColor;
+  });
+  if (darkSquareColor !== "rgb(181, 136, 99)") {
+    throw new Error(`Walnut dark square should be rgb(181, 136, 99), got ${darkSquareColor}`);
+  }
+
+  await page.locator('[data-piece-set-key="fantasy"]').click();
+  await page.waitForTimeout(300);
+  const spriteSrc = await page.locator("#board img.piece").first().getAttribute("src");
+  if (!spriteSrc.includes("/vendor/pieces/fantasy/")) {
+    throw new Error(`Piece set switch failed: sprite src ${spriteSrc}`);
+  }
+
+  const personaCount = await page.locator("[data-persona-key]").count();
+  if (personaCount < 5) {
+    throw new Error(`Expected 5 persona options, found ${personaCount}`);
+  }
+
   // ── Auth-mode smoke: with Supabase configured, the app must gate behind
   // sign-in. supabase-js is stubbed so this works offline and deterministically.
   process.env.SUPABASE_URL = "https://smoke-test.supabase.co";

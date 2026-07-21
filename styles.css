@@ -2452,6 +2452,185 @@ textarea {
   }
 }
 
+/* ─────────── Board themes ───────────
+   Palettes override the four board tokens via a data attribute on <html>.
+   The default (Slate) lives in :root above. */
+[data-board-theme="walnut"] {
+  --sq-light: #f0d9b5;
+  --sq-dark: #b58863;
+  --coord-dark: #8a6743;
+  --coord-light: #f6ecd8;
+}
+
+[data-board-theme="green"] {
+  --sq-light: #eeeed2;
+  --sq-dark: #769656;
+  --coord-dark: #5d7943;
+  --coord-light: #f4f4e3;
+}
+
+[data-board-theme="ocean"] {
+  --sq-light: #e6eef5;
+  --sq-dark: #88a8c3;
+  --coord-dark: #5e7f9d;
+  --coord-light: #eff5fa;
+}
+
+[data-board-theme="rosewood"] {
+  --sq-light: #f0e0dd;
+  --sq-dark: #ab7168;
+  --coord-dark: #8a564e;
+  --coord-light: #f7ebe9;
+}
+
+[data-board-theme="candy"] {
+  --sq-light: #fdf1f7;
+  --sq-dark: #eda3c9;
+  --coord-dark: #c26d9c;
+  --coord-light: #fef7fb;
+}
+
+[data-board-theme="nebula"] {
+  --sq-light: #6b7a99;
+  --sq-dark: #3d4a66;
+  --coord-dark: #2c374d;
+  --coord-light: #93a1bd;
+}
+
+[data-board-theme="middle-realm"] {
+  --sq-light: #e8e0c0;
+  --sq-dark: #7d8a5c;
+  --coord-dark: #626e46;
+  --coord-light: #f0ead1;
+}
+
+/* Theme swatches + piece set previews in Settings.
+   The .mini-card button rule pins height/padding, so these selectors carry
+   the card scope to win specificity. */
+.theme-swatch-grid,
+.piece-set-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.mini-card .theme-swatch,
+.theme-swatch {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  margin-top: 0;
+  height: auto;
+  padding: 8px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.mini-card .theme-swatch:hover,
+.theme-swatch:hover {
+  border-color: var(--rule-2);
+}
+
+.mini-card .theme-swatch.selected,
+.theme-swatch.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.theme-swatch-preview {
+  display: grid;
+  grid-template-columns: repeat(4, 12px);
+  grid-template-rows: repeat(2, 12px);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.mini-card .piece-set-option,
+.piece-set-option {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  margin-top: 0;
+  height: auto;
+  padding: 8px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.mini-card .piece-set-option:hover,
+.piece-set-option:hover {
+  border-color: var(--rule-2);
+}
+
+.mini-card .piece-set-option.selected,
+.piece-set-option.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.piece-set-preview {
+  display: flex;
+  gap: 2px;
+}
+
+.piece-set-preview img {
+  width: 34px;
+  height: 34px;
+}
+
+/* Persona picker */
+.persona-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mini-card .persona-option,
+.persona-option {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  justify-items: start;
+  margin-top: 0;
+  height: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+}
+
+.mini-card .persona-option:hover,
+.persona-option:hover {
+  border-color: var(--rule-2);
+}
+
+.mini-card .persona-option.selected,
+.persona-option.selected {
+  border-color: var(--accent);
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+.mini-card .persona-option:disabled,
+.persona-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.persona-option strong {
+  font-size: 14px;
+}
+
+.persona-option span {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
 /* ─────────── Deep post-game analysis ─────────── */
 .deep-analysis-card {
   border-color: #c6d6f5;

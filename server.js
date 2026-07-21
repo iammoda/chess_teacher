@@ -43,6 +43,7 @@ const PUBLIC_FILES = new Set([
   "lib/classify.mjs",
   "lib/mates.mjs",
   "lib/password-strength.mjs",
+  "lib/personas.mjs",
   "lib/puzzle-packs.mjs",
   "lib/repertoire.mjs",
   "lib/review-model.mjs",
@@ -56,9 +57,36 @@ const PUBLIC_FILES = new Set([
   "vendor/puzzles/lichess-pack.json",
   "vendor/stockfish/stockfish-nnue-16-single.js",
   "vendor/stockfish/stockfish-nnue-16-single.wasm",
-  ...["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"]
-    .map((piece) => `vendor/pieces/merida/${piece}.svg`),
 ]);
+
+// Piece sets are drop-in content: any folder under vendor/pieces/ containing
+// all 12 canonical sprites is discovered at boot and allowlisted file by file
+// (nothing else in the folder is served — licenses stay repo-only).
+const PIECE_SPRITES = ["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"]
+  .map((piece) => `${piece}.svg`);
+
+function discoverPieceSets() {
+  const piecesDir = path.join(ROOT, "vendor", "pieces");
+  let entries = [];
+  try {
+    entries = fs.readdirSync(piecesDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => /^[a-z0-9-]+$/.test(name))
+    .filter((name) => PIECE_SPRITES.every((file) => fs.existsSync(path.join(piecesDir, name, file))))
+    .sort();
+}
+
+const PIECE_SETS = discoverPieceSets();
+for (const set of PIECE_SETS) {
+  for (const file of PIECE_SPRITES) {
+    PUBLIC_FILES.add(`vendor/pieces/${set}/${file}`);
+  }
+}
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -94,6 +122,7 @@ async function handleRequest(req, res) {
         supabaseAuth: supabase.configured
           ? { url: supabase.url, publishableKey: supabase.publishableKey }
           : null,
+        pieceSets: PIECE_SETS,
       };
 
       if (url.searchParams.get("check") === "1") {

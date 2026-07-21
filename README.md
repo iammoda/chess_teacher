@@ -32,6 +32,7 @@ The platform is a personal chess teacher rather than a generic chessboard.
 - Plays full legal games in the browser with `chess.js`, with drag-and-drop or click-to-move on SVG pieces (Merida set).
 - Uses one quick calibration game to establish a baseline, then blends the first three games for placement and calibrates continuously from every graded move.
 - Trains rated multi-move tactics imported from the Lichess puzzle database (CC0), matched to the player's level and weakness profile, alongside a three-rung checkmate ladder (mate in 1, 2, and 3).
+- Personalizes the experience: eight board themes, swappable piece sets (drop-in custom sets supported), five coach personas (voice only — the pedagogy never changes), and a Family mode with a gentle locked persona and softened feedback language.
 - Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks; opponent strength is Elo-limited (`UCI_LimitStrength`) for human-like play.
 - Adapts opponent strength from a per-dimension skill model (tactics, openings, endgames, calculation), recent results, and mistake severity.
 - Reviews learner moves live with heuristics, Stockfish eval deltas, best alternatives, and principal variations — then re-grades every move at depth 18 once the game ends, cross-checking each heuristic tactic tag against the engine and dropping false positives.
@@ -91,6 +92,19 @@ Security model:
 - Leaving the three variables blank runs the app in legacy local mode: no sign-in, no cloud sync, history stays in the browser.
 
 The Node server serves the app and exposes `/api/coach`. The browser sends chess context to that endpoint; the server adds the API key and calls OpenAI.
+
+## Appearance, Personas, And Family Mode
+
+- **Board themes**: eight palettes (Slate default, Walnut, Green, Ocean, Rosewood, Candy, Nebula, Middle Realm) applied instantly from Settings via CSS token overrides.
+- **Piece sets**: any folder under `vendor/pieces/<name>/` containing the 12 canonical sprites (`wP.svg` ... `bK.svg`) is auto-discovered at server boot and appears in Settings with live previews. Validate a new set first:
+
+```sh
+node scripts/check-piece-set.mjs path/to/my-set
+```
+
+  The checker enforces self-contained square-viewBox SVGs (no scripts, external refs, rasters, or text elements) and writes a `preview.html` showing every piece on every theme at board and tray sizes. Bundled sets: Merida (default, GPLv2+) and Fantasy by Maurizio Monge (MIT) — see `vendor/pieces/*/LICENSE.md`.
+- **Coach personas**: Classic, Marv (dry and neurotic), Axel (first-principles engineer), Blaze (hype), Sunny (gentle, child-appropriate, may use one emoji per message). Personas are validated server-side and only change tone — every coaching rule (Socratic questioning, no move reveals on rethinks, grounded moves only) applies to all of them.
+- **Family mode**: one Settings toggle that locks the coach to Sunny, defaults the board to Candy, softens harsh labels (Blunder becomes "Oops — big one"), and hides the danger zone. Analysis quality is unchanged. The account holder is expected to be an adult or teen (13+); the app is not marketed to children.
 
 ## Calibration And Bot Difficulty
 

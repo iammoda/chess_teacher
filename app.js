@@ -24,11 +24,56 @@ import { REPERTOIRE, getOpeningById, getLineById, learnerPlaysAt } from "./lib/r
 import { ACTIVE_MATE_POSITIONS, getMatePositionById, matesByRung, isRungUnlocked, recordMateAttempt } from "./lib/mates.mjs";
 import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrade, selectDue, nextDueLabel } from "./lib/srs.mjs";
 import { normalizePackPuzzle, ratingBandForScore, selectRatedPuzzle } from "./lib/puzzle-packs.mjs";
+import { COACH_PERSONAS, normalizePersonaKey } from "./lib/personas.mjs";
 
-const PIECE_SPRITE_BASE = "/vendor/pieces/merida/";
+const PIECE_SPRITE_ROOT = "/vendor/pieces/";
+const DEFAULT_PIECE_SET = "merida";
 
-function pieceSpriteUrl(color, type) {
-  return `${PIECE_SPRITE_BASE}${color}${type.toUpperCase()}.svg`;
+// Board palettes: keys map to [data-board-theme] blocks in styles.css; the
+// swatch colors here only draw the Settings previews.
+const BOARD_THEMES = [
+  { key: "slate", label: "Slate", light: "#dee3e6", dark: "#8ca2ad" },
+  { key: "walnut", label: "Walnut", light: "#f0d9b5", dark: "#b58863" },
+  { key: "green", label: "Green", light: "#eeeed2", dark: "#769656" },
+  { key: "ocean", label: "Ocean", light: "#e6eef5", dark: "#88a8c3" },
+  { key: "rosewood", label: "Rosewood", light: "#f0e0dd", dark: "#ab7168" },
+  { key: "candy", label: "Candy", light: "#fdf1f7", dark: "#eda3c9" },
+  { key: "nebula", label: "Nebula", light: "#6b7a99", dark: "#3d4a66" },
+  { key: "middle-realm", label: "Middle Realm", light: "#e8e0c0", dark: "#7d8a5c" },
+];
+
+function normalizeBoardThemeKey(key) {
+  return BOARD_THEMES.some((theme) => theme.key === key) ? key : "slate";
+}
+
+function applyBoardTheme(key) {
+  const theme = normalizeBoardThemeKey(key);
+  if (theme === "slate") {
+    delete document.documentElement.dataset.boardTheme;
+  } else {
+    document.documentElement.dataset.boardTheme = theme;
+  }
+}
+
+function getActivePieceSet() {
+  const configured = state.settings.pieceSet || DEFAULT_PIECE_SET;
+  const available = state.server.pieceSets || [];
+  if (available.length && !available.includes(configured)) return DEFAULT_PIECE_SET;
+  return configured;
+}
+
+function pieceSpriteUrl(color, type, set = getActivePieceSet()) {
+  return `${PIECE_SPRITE_ROOT}${set}/${color}${type.toUpperCase()}.svg`;
+}
+
+// Warm the browser cache so switching sets never flashes empty squares.
+function preloadPieceSet(set) {
+  for (const color of ["w", "b"]) {
+    for (const type of ["p", "n", "b", "r", "q", "k"]) {
+      const img = new Image();
+      img.src = pieceSpriteUrl(color, type, set);
+    }
+  }
 }
 
 function pieceImageHtml(color, type, className = "piece") {
@@ -609,6 +654,10 @@ const DEFAULT_SETTINGS = {
   showEvalBar: true,
   soundEnabled: true,
   timeControl: "unlimited", // "unlimited" | "5+0" | "10+0" | "15+10"
+  boardTheme: "slate",
+  pieceSet: "merida",
+  coachPersona: "classic",
+  familyMode: false,
 };
 
 const SKILL_LAB_MODES = [
@@ -747,6 +796,7 @@ const state = {
     authRequired: false,
     syncConfigured: false,
     supabaseAuth: null, // { url, publishableKey }
+    pieceSets: [DEFAULT_PIECE_SET],
   },
   // Supabase Auth session state (identity only; data goes through /api).
   auth: {
@@ -920,15 +970,34 @@ function getPracticeBoardCue(square) {
   };
 }
 
+// Family mode swaps the display language of harsh labels; keys, symbols, and
+// tone classes (colors) stay identical so analysis and UI wiring never change.
+const FAMILY_QUALITY_LABELS = {
+  blunder: { label: "Oops — big one", reason: "This move gave a lot away. Let's find a safer idea." },
+  mistake: { label: "Not the best", reason: "There was a stronger move here. Worth another look." },
+  missed_win: { label: "Almost had it!", reason: "A winning idea was hiding here. You'll spot it next time." },
+  inaccuracy: { label: "Hmm — look again", reason: "This gave a little bit away." },
+};
+
+function isFamilyMode() {
+  return state.settings.familyMode === true;
+}
+
+function getActivePersonaKey() {
+  if (isFamilyMode()) return "sunny";
+  return normalizePersonaKey(state.settings.coachPersona);
+}
+
 function getMoveQuality(move) {
   if (!move?.qualityKey) return null;
   const key = String(move.qualityKey);
   const display = MOVE_QUALITIES[key] || MOVE_QUALITIES.good;
+  const softened = isFamilyMode() ? FAMILY_QUALITY_LABELS[key] : null;
   return {
     key,
-    label: move.qualityLabel || display.label,
+    label: softened?.label || move.qualityLabel || display.label,
     symbol: move.qualitySymbol || display.symbol,
-    reason: move.qualityReason || display.reason,
+    reason: softened?.reason || move.qualityReason || display.reason,
     tone: display.tone,
   };
 }
@@ -2551,6 +2620,9 @@ function applyServerConfig(data) {
   state.server.authRequired = Boolean(data.authRequired);
   state.server.syncConfigured = Boolean(data.syncConfigured);
   state.server.supabaseAuth = data.supabaseAuth || null;
+  if (Array.isArray(data.pieceSets) && data.pieceSets.length) {
+    state.server.pieceSets = data.pieceSets;
+  }
   state.featureFlags.remoteHistoryEraseEnabled = Boolean(data.remoteHistoryEraseEnabled);
 }
 
@@ -2614,6 +2686,7 @@ function buildChatPayload(event, moment = null) {
   const opening = detectOpening();
   return {
     event,
+    persona: getActivePersonaKey(),
     messages: compactTranscript(getCurrentChatMessages().map(({ role, content }) => ({ role, content }))),
     coachMemory: memoryForPayload(state.coachMemory),
     skillSnapshot: buildSkillSnapshotForChat(),
@@ -4437,10 +4510,17 @@ function renderSettingsPanel() {
         <input id="showEvalBarInput" type="checkbox"${state.settings.showEvalBar !== false ? " checked" : ""}>
         <span>Show evaluation bar</span>
       </label>
+      <label class="field checkbox-field">
+        <input id="familyModeInput" type="checkbox"${isFamilyMode() ? " checked" : ""}>
+        <span>Family mode — gentle coach, softer feedback</span>
+      </label>
+      ${renderAppearanceCards()}
+      ${renderPersonaCard()}
       <div class="button-row">
         <button id="saveSettingsButton" type="button">Save settings</button>
         <button id="testSupabaseButton" type="button">Test cloud sync</button>
       </div>
+      ${isFamilyMode() ? "" : `
       <article class="mini-card danger-zone-card">
         <span class="label">Danger zone</span>
         <strong>Erase history</strong>
@@ -4454,6 +4534,7 @@ function renderSettingsPanel() {
         ${account.status ? `<p class="sync-status-row good-status"><span class="label">Account</span> ${escapeHtml(account.status)}</p>` : ""}
         ${account.error ? `<p class="sync-status-row danger-status"><span class="label">Account</span> ${escapeHtml(account.error)}</p>` : ""}
       </article>
+      `}
     </div>
   `;
 
@@ -4465,6 +4546,114 @@ function renderSettingsPanel() {
   document.querySelector("#eraseRemoteHistoryButton")?.addEventListener("click", eraseRemoteHistory);
   document.querySelector("#signOutButton")?.addEventListener("click", signOut);
   document.querySelector("#exportDataButton")?.addEventListener("click", exportAccountData);
+  document.querySelector("#familyModeInput")?.addEventListener("change", (event) => setFamilyMode(event.target.checked));
+  els.settingsPanel.querySelectorAll("[data-board-theme-key]").forEach((button) => {
+    button.addEventListener("click", () => setBoardTheme(button.dataset.boardThemeKey));
+  });
+  els.settingsPanel.querySelectorAll("[data-piece-set-key]").forEach((button) => {
+    button.addEventListener("click", () => setPieceSet(button.dataset.pieceSetKey));
+  });
+  els.settingsPanel.querySelectorAll("[data-persona-key]").forEach((button) => {
+    button.addEventListener("click", () => setCoachPersona(button.dataset.personaKey));
+  });
+}
+
+// Board theme swatches + piece set previews. Both apply instantly on click.
+function renderAppearanceCards() {
+  const activeTheme = normalizeBoardThemeKey(state.settings.boardTheme);
+  const swatches = BOARD_THEMES.map((theme) => {
+    const cells = [0, 1, 2, 3, 4, 5, 6, 7].map((index) => {
+      const isDark = (index + Math.floor(index / 4)) % 2 === 1;
+      return `<span style="background:${isDark ? theme.dark : theme.light}"></span>`;
+    }).join("");
+    return `
+      <button type="button" class="theme-swatch${theme.key === activeTheme ? " selected" : ""}" data-board-theme-key="${escapeAttr(theme.key)}">
+        <span class="theme-swatch-preview">${cells}</span>
+        ${escapeHtml(theme.label)}
+      </button>
+    `;
+  }).join("");
+
+  const activeSet = getActivePieceSet();
+  const setOptions = (state.server.pieceSets || [DEFAULT_PIECE_SET]).map((set) => `
+    <button type="button" class="piece-set-option${set === activeSet ? " selected" : ""}" data-piece-set-key="${escapeAttr(set)}">
+      <span class="piece-set-preview">
+        <img src="${escapeAttr(pieceSpriteUrl("w", "n", set))}" alt="" draggable="false">
+        <img src="${escapeAttr(pieceSpriteUrl("b", "q", set))}" alt="" draggable="false">
+      </span>
+      ${escapeHtml(toTitleCaseLabel(set))}
+    </button>
+  `).join("");
+
+  return `
+    <article class="mini-card">
+      <strong>Board theme</strong>
+      <div class="theme-swatch-grid">${swatches}</div>
+    </article>
+    <article class="mini-card">
+      <strong>Pieces</strong>
+      <div class="piece-set-grid">${setOptions}</div>
+      <p class="empty-state">Custom sets: drop 12 SVGs into vendor/pieces/&lt;name&gt;/ (validate with scripts/check-piece-set.mjs) and restart the server.</p>
+    </article>
+  `;
+}
+
+// Persona picker: voice only — locked to Sunny while Family mode is on.
+function renderPersonaCard() {
+  const activeKey = getActivePersonaKey();
+  const locked = isFamilyMode();
+  const options = Object.entries(COACH_PERSONAS).map(([key, persona]) => `
+    <button type="button" class="persona-option${key === activeKey ? " selected" : ""}" data-persona-key="${escapeAttr(key)}"${locked ? " disabled" : ""}>
+      <strong>${escapeHtml(persona.label)}</strong>
+      <span>${escapeHtml(persona.description)}</span>
+    </button>
+  `).join("");
+
+  return `
+    <article class="mini-card">
+      <strong>Coach personality</strong>
+      ${locked ? "<p>Family mode keeps Sunny as the coach.</p>" : "<p>Voice only — the coaching itself never changes.</p>"}
+      <div class="persona-list">${options}</div>
+    </article>
+  `;
+}
+
+function setBoardTheme(key) {
+  state.settings.boardTheme = normalizeBoardThemeKey(key);
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  applyBoardTheme(state.settings.boardTheme);
+  renderSettingsPanel();
+}
+
+function setPieceSet(key) {
+  const available = state.server.pieceSets || [DEFAULT_PIECE_SET];
+  state.settings.pieceSet = available.includes(key) ? key : DEFAULT_PIECE_SET;
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  preloadPieceSet(getActivePieceSet());
+  renderBoard();
+  renderGameMeta();
+  renderSettingsPanel();
+}
+
+function setCoachPersona(key) {
+  if (isFamilyMode()) return;
+  state.settings.coachPersona = normalizePersonaKey(key);
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  renderSettingsPanel();
+}
+
+function setFamilyMode(enabled) {
+  state.settings.familyMode = Boolean(enabled);
+  if (state.settings.familyMode) {
+    state.settings.coachPersona = "sunny";
+    if (normalizeBoardThemeKey(state.settings.boardTheme) === "slate") {
+      state.settings.boardTheme = "candy";
+      applyBoardTheme("candy");
+    }
+  }
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  // Quality labels across every panel change with this toggle.
+  renderAll();
 }
 
 // Account card: identity, sign out, data export. Only meaningful when the
@@ -6200,7 +6389,10 @@ async function handlePracticeTrainerMove(move, beforeFen) {
       trainer.hintIndex = 1;
     }
     const hint = getCurrentPracticeHint();
-    trainer.feedback = `${puzzle.missText || "Not yet."}${hint ? ` ${hint}` : ""}`;
+    const missText = isFamilyMode()
+      ? "Oops — let's look again."
+      : (puzzle.missText || "Not yet.");
+    trainer.feedback = `${missText}${hint ? ` ${hint}` : ""}`;
     state.drillMessage = trainer.feedback;
     recordPracticeHistory(puzzle, "missed", beforeFen, playedUci);
     if (puzzle.queueItemId) {
@@ -7587,6 +7779,7 @@ async function boot() {
 
   hydrateStateFromStorage();
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+  applyBoardTheme(state.settings.boardTheme);
   seedDisplayNameFromAccount();
   normalizeCalibrationState();
   migrateLegacyPlacement();
