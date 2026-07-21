@@ -2452,8 +2452,17 @@ textarea {
   }
 }
 
-/* ─────────── Boot veil ─────────── */
-.boot-veil {
+/* ─────────── Deep post-game analysis ─────────── */
+.deep-analysis-card {
+  border-color: #c6d6f5;
+  background: var(--accent-soft);
+}
+
+.deep-analysis-card p {
+  margin: 4px 0 0;
+}
+
+/* ─────────── Boot veil ─────────── */.boot-veil {
   position: fixed;
   inset: 0;
   z-index: 300;

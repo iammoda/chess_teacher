@@ -45,7 +45,7 @@ test("dimensionsForMove maps phases and tactical signals", () => {
   const blunder = dimensionsForMove({ phase: "opening", tags: [], qualityKey: "blunder" });
   assert.ok(blunder.includes("tactics"));
 
-  const bigSwing = dimensionsForMove({ phase: "middlegame", tags: [], evalDelta: -200 });
+  const bigSwing = dimensionsForMove({ phase: "middlegame", tags: [], evalDelta: 200 });
   assert.ok(bigSwing.includes("tactics"));
 });
 
@@ -53,9 +53,9 @@ test("movePerformance rewards best moves and scales with centipawn loss", () => 
   assert.equal(movePerformance({ qualityKey: "best" }), 1);
   assert.equal(movePerformance({ qualityKey: "book" }), 1);
   assert.equal(movePerformance({ evalDelta: 0 }), 1);
-  assert.equal(movePerformance({ evalDelta: -150 }), 0.5);
-  assert.equal(movePerformance({ evalDelta: -300 }), 0);
-  assert.equal(movePerformance({ evalDelta: -900 }), 0);
+  assert.equal(movePerformance({ evalDelta: 150 }), 0.5);
+  assert.equal(movePerformance({ evalDelta: 300 }), 0);
+  assert.equal(movePerformance({ evalDelta: 900 }), 0);
   assert.equal(movePerformance({}), null);
 });
 
@@ -63,7 +63,7 @@ test("EWMA updates move ratings smoothly and confidence grows", () => {
   const state = seedSkillStateFromScore(1000);
   const before = state.dims.calculation.rating;
 
-  applyMoveToSkillState(state, { phase: "middlegame", tags: [], evalDelta: -400, qualityKey: "blunder" });
+  applyMoveToSkillState(state, { phase: "middlegame", tags: [], evalDelta: 400, qualityKey: "blunder" });
   const after = state.dims.calculation.rating;
   assert.ok(after < before, "bad move lowers rating");
   assert.ok(before - after < 120, "one move does not crater the rating");

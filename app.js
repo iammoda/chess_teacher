@@ -1,5 +1,6 @@
 import { Chess } from "./vendor/chess/chess.js";
-import { ANALYSIS_DEPTH, MOVE_QUALITIES, classifyByEval, classifyMoveQuality, normalizeEngineAnalysis } from "./lib/classify.mjs";
+import { ANALYSIS_DEPTH, DEEP_ANALYSIS_DEPTH, MOVE_QUALITIES, classifyByEval, classifyMoveQuality, normalizeEngineAnalysis } from "./lib/classify.mjs";
+import { verifyTagsWithEngine } from "./lib/tag-verify.mjs";
 import { SKILL_CATALOG, getSkillById, getSkillCategories, getSkillForCategory } from "./lib/skill-model.mjs";
 import { StockfishEngine } from "./lib/stockfish-engine.mjs";
 import { attachDragHandlers } from "./lib/board-drag.mjs";
@@ -104,9 +105,12 @@ const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.105.4?bundle
 let supabaseModulePromise = null;
 
 const CALIBRATION_DEPTH = 6;
+// Placement blends the scores of the first N completed games. Features unlock
+// after game one (done: true); games two and three silently refine the score.
+const CALIBRATION_GAME_TARGET = 3;
 const DEFAULT_CALIBRATION = {
   done: false,
-  gameId: null,
+  games: [], // [{ gameId, score, at }]
   estimatedScore: null,
   completedAt: null,
 };
@@ -716,6 +720,14 @@ const state = {
     busy: false,
     status: "",
     error: "",
+  },
+  // Post-game deep engine re-analysis progress (see runDeepGameAnalysis).
+  deepAnalysis: {
+    gameId: null,
+    running: false,
+    cancelled: false,
+    done: 0,
+    total: 0,
   },
   openAI: {
     configured: false,
@@ -2151,7 +2163,17 @@ function getNextTrainingFocus() {
 }
 
 function normalizeCalibrationState() {
-  state.calibration = { ...DEFAULT_CALIBRATION, ...state.calibration };
+  const calibration = { ...DEFAULT_CALIBRATION, ...state.calibration };
+  if (!Array.isArray(calibration.games)) calibration.games = [];
+  // Legacy single-game shape: fold the one recorded score into the list.
+  if (!calibration.games.length && calibration.done && Number.isFinite(calibration.estimatedScore)) {
+    calibration.games = [{
+      gameId: calibration.gameId || null,
+      score: calibration.estimatedScore,
+      at: calibration.completedAt || null,
+    }];
+  }
+  state.calibration = calibration;
 }
 
 // Users who finished (or even started) the old 5-game placement flow already
@@ -2161,11 +2183,13 @@ function migrateLegacyPlacement() {
   if (legacy) {
     const legacyGames = Array.isArray(legacy.games) ? legacy.games.length : 0;
     if (!state.calibration.done && (legacy.completedAt || legacyGames >= 1)) {
+      const score = Number(legacy.estimatedScore) || estimateTrainingScoreFromGames(legacy.games || []);
+      const completedAt = legacy.completedAt || new Date().toISOString();
       state.calibration = {
         done: true,
-        gameId: legacy.games?.[0]?.gameId || null,
-        estimatedScore: Number(legacy.estimatedScore) || estimateTrainingScoreFromGames(legacy.games || []),
-        completedAt: legacy.completedAt || new Date().toISOString(),
+        games: [{ gameId: legacy.games?.[0]?.gameId || null, score, at: completedAt }],
+        estimatedScore: score,
+        completedAt,
       };
       saveJson(STORAGE_KEYS.calibration, state.calibration);
     }
@@ -2332,48 +2356,87 @@ function getOpponentStatusLabel() {
 }
 
 // Average centipawn loss over graded player moves; null with too little data.
+// evalDelta is a POSITIVE centipawn loss (see lib/classify.mjs).
 function computeGameAcpl(moves) {
   const losses = (moves || [])
     .filter((move) => move.role === "player" && Number.isFinite(move.evalDelta))
-    .map((move) => Math.max(0, -move.evalDelta));
+    .map((move) => Math.max(0, move.evalDelta));
   if (losses.length < 4) return null;
   return losses.reduce((sum, value) => sum + value, 0) / losses.length;
 }
 
+// One game's placement score from result + measured centipawn loss.
+function computeCalibrationGameScore(gameRecord, result) {
+  const resultScore = getPlayerResultScore(result, gameRecord.playerColor || state.settings.playerColor);
+  const acpl = computeGameAcpl(gameRecord.moves);
+  const summary = summarizeGameForScore({ ...gameRecord, result });
+  const acplPenalty = acpl === null
+    ? (summary.averageMistakeSeverity || 0) * 40
+    : acpl * 1.6;
+  return clamp(Math.round(600 + CALIBRATION_DEPTH * 70 + resultScore * 260 - acplPenalty), 400, 1800);
+}
+
 function recordCompletedGameForCalibration(result) {
+  if (state.activeDrill) return;
   normalizeCalibrationState();
-  if (state.calibration.done) return;
+  const calibration = state.calibration;
+  if (calibration.games.length >= CALIBRATION_GAME_TARGET) return;
+  if (calibration.games.some((game) => game.gameId === state.currentGameId)) return;
 
   const current = state.localGames.find((game) => game.id === state.currentGameId);
   if (!current) return;
 
-  const resultScore = getPlayerResultScore(result, current.playerColor || state.settings.playerColor);
-  const acpl = computeGameAcpl(current.moves);
-  const summary = summarizeGameForScore({ ...current, result });
-  const acplPenalty = acpl === null
-    ? (summary.averageMistakeSeverity || 0) * 40
-    : acpl * 1.6;
-  const score = clamp(Math.round(600 + CALIBRATION_DEPTH * 70 + resultScore * 260 - acplPenalty), 400, 1800);
-
-  state.calibration = {
-    done: true,
+  const score = computeCalibrationGameScore(current, result);
+  calibration.games = [...calibration.games, {
     gameId: state.currentGameId,
-    estimatedScore: score,
-    completedAt: new Date().toISOString(),
-  };
-  saveJson(STORAGE_KEYS.calibration, state.calibration);
+    score,
+    at: new Date().toISOString(),
+  }];
+  applyCalibrationScores();
+}
 
-  // Seed skill dimensions that the calibration game didn't touch; dims that
-  // already accumulated graded-move data keep it.
+// Recomputes the blended placement score and (re)seeds untouched skill dims.
+function applyCalibrationScores() {
+  const calibration = state.calibration;
+  if (!calibration.games.length) return;
+
+  const mean = calibration.games.reduce((sum, game) => sum + game.score, 0) / calibration.games.length;
+  calibration.estimatedScore = Math.round(mean);
+  calibration.done = true;
+  calibration.completedAt = calibration.completedAt || new Date().toISOString();
+  saveJson(STORAGE_KEYS.calibration, calibration);
+
+  // Seed skill dimensions that real graded moves haven't touched yet; dims
+  // that already accumulated live data keep it.
   const skill = ensureSkillState();
-  const seeded = seedSkillStateFromScore(score);
+  const seeded = seedSkillStateFromScore(calibration.estimatedScore);
   for (const dim of SKILL_DIMENSIONS) {
     if (!skill.dims[dim] || skill.dims[dim].perf === null || skill.dims[dim].samples < 8) {
       skill.dims[dim] = seeded.dims[dim];
     }
   }
-  skill.calibratedAt = state.calibration.completedAt;
+  skill.calibratedAt = calibration.completedAt;
   saveJson(STORAGE_KEYS.skill, skill);
+}
+
+// After the deep post-game pass, the measured centipawn loss is far more
+// trustworthy than the live depth-10 numbers — re-score any placement game.
+function recalibrateFromDeepAnalysis(gameId) {
+  normalizeCalibrationState();
+  const entry = state.calibration.games.find((game) => game.gameId === gameId);
+  if (!entry) return;
+
+  const gameRecord = state.localGames.find((game) => game.id === gameId);
+  if (!gameRecord?.result || gameRecord.result === "in_progress") return;
+
+  const score = computeCalibrationGameScore(gameRecord, gameRecord.result);
+  if (score === entry.score) return;
+  entry.score = score;
+  entry.deepened = true;
+  applyCalibrationScores();
+  if (state.currentTab === "profile" || state.currentTab === "settings") {
+    renderCurrentPanel();
+  }
 }
 
 function getProfileSummary() {
@@ -2529,7 +2592,7 @@ function momentFromMoveRecord(record) {
     ply: record.ply,
     san: record.san,
     quality: record.qualityKey || record.classification || "",
-    cpl: Number.isFinite(record.evalDelta) ? Math.max(0, -record.evalDelta) : null,
+    cpl: Number.isFinite(record.evalDelta) ? Math.max(0, record.evalDelta) : null,
     bestMoveSan: record.bestMoveSan || "",
     principalVariation: (record.principalVariation || []).slice(0, 6),
     fenBefore: record.beforeFen || "",
@@ -2978,6 +3041,19 @@ function bindGuidedReviewCard() {
   });
 }
 
+// Progress card for the deep post-game pass. Quality pills, the eval graph,
+// and turning points refresh live as each ply is re-graded at depth 18.
+function renderDeepAnalysisStatus() {
+  const deep = state.deepAnalysis;
+  if (!deep?.running || deep.gameId !== state.currentGameId) return "";
+  return `
+    <article class="mini-card deep-analysis-card">
+      <span class="label">Deep review</span>
+      <p>Re-checking your moves at depth ${DEEP_ANALYSIS_DEPTH}: ${deep.done}/${deep.total} done. Badges sharpen as it goes.</p>
+    </article>
+  `;
+}
+
 function renderReviewPanel() {
   if (!state.moves.length) {
     els.reviewPanel.innerHTML = `
@@ -2986,7 +3062,6 @@ function renderReviewPanel() {
     `;
     return;
   }
-
   const selectedMove = state.reviewPly != null
     ? state.moves.find((move) => move.ply === state.reviewPly)
     : state.moves[state.moves.length - 1];
@@ -3042,6 +3117,7 @@ function renderReviewPanel() {
   els.reviewPanel.innerHTML = `
     <h2>Review</h2>
     <div class="stack">
+      ${renderDeepAnalysisStatus()}
       ${renderVariationReplayCard()}
       ${renderGuidedReviewCard()}
       ${renderEvalGraphCard()}
@@ -3763,6 +3839,7 @@ function resetPracticeTrainerState() {
 function startPracticePuzzle(puzzle, options = {}) {
   const normalized = normalizePracticePuzzle(puzzle);
   if (!normalized) return false;
+  cancelDeepAnalysis();
 
   if (!state.activeDrill && options.saveCurrent !== false) {
     saveCurrentGame();
@@ -4653,6 +4730,62 @@ function isKnownOpeningMove(record) {
   });
 }
 
+// Applies engine numbers to a move record: assign fields, re-derive the
+// classification from verified tags + eval, cross-check heuristic tactic tags
+// against the engine, and re-grade quality. Shared by the live shallow pass
+// and the post-game deep pass.
+function applyEngineAnalysisToRecord(record, analysis) {
+  Object.assign(record, analysis);
+
+  const verification = verifyTagsWithEngine(record.tags || [], {
+    evalDelta: record.evalDelta,
+    mateBefore: record.mateBefore,
+    mateAfter: record.mateAfter,
+  });
+  if (verification.verified) {
+    record.tags = verification.tags;
+    record.tagsVerified = true;
+    if (verification.removed.length) {
+      // The note must not keep echoing a refuted claim.
+      record.note = record.tags.length ? record.tags[0].note : "";
+      for (const tag of verification.removed) {
+        retractWeaknessEvidence(tag, record);
+      }
+    }
+  }
+
+  if (record.evalDelta !== null) {
+    record.classification = classifyByEval(record.evalDelta, classifyTags(record.tags || []));
+  }
+  updateMoveQuality(record);
+}
+
+// A heuristic tag turned out to be a false positive: walk back the weakness
+// profile evidence and any untouched practice drill created from it.
+function retractWeaknessEvidence(tag, record) {
+  const entry = state.profile[tag.category];
+  if (entry) {
+    entry.count = Math.max(0, (entry.count || 0) - 1);
+    entry.examples = (entry.examples || []).filter(
+      (example) => !(example.fen === record.beforeFen && example.san === record.san),
+    );
+    if (entry.count <= 0) {
+      delete state.profile[tag.category];
+    }
+    saveJson(STORAGE_KEYS.profile, state.profile);
+    syncWeaknessAggregate(tag.category, entry.count > 0 ? entry : { ...entry, count: 0 });
+  }
+
+  const sourceKey = `${record.beforeFen}|${tag.category}`;
+  const remaining = state.practiceQueue.filter(
+    (item) => !(item.sourceKey === sourceKey && !item.lastResult),
+  );
+  if (remaining.length !== state.practiceQueue.length) {
+    state.practiceQueue = remaining;
+    saveJson(STORAGE_KEYS.practice, state.practiceQueue);
+  }
+}
+
 async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise) {
   if (!state.engine?.ready) return;
   try {
@@ -4666,11 +4799,7 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
       bestMoveSan,
     });
 
-    Object.assign(record, analysis);
-    if (record.evalDelta !== null) {
-      record.classification = classifyByEval(record.evalDelta, record.classification);
-    }
-    updateMoveQuality(record);
+    applyEngineAnalysisToRecord(record, analysis);
     updateSkillFromMove(record);
 
     saveCurrentGame();
@@ -4691,6 +4820,83 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
       renderCurrentPanel();
     }
     console.warn("Move enrichment failed", error);
+  }
+}
+
+// ─────────── Deep post-game re-analysis ───────────
+//
+// Live grading runs at ANALYSIS_DEPTH (10) so the bot replies fast; that is
+// noisy in sharp positions. Once a game finishes, every player move is
+// re-graded at DEEP_ANALYSIS_DEPTH (18) on the idle engine: badges, the eval
+// graph, turning points, tactic-tag verification, and the calibration score
+// all firm up. Cancelled instantly when a new game or drill takes the board.
+
+const DEEP_ANALYSIS_EVAL_TIMEOUT_MS = 20_000;
+
+function cancelDeepAnalysis() {
+  if (state.deepAnalysis?.running) {
+    state.deepAnalysis.cancelled = true;
+    state.engine?.stop();
+  }
+}
+
+async function runDeepGameAnalysis() {
+  if (!state.engine?.ready || state.activeDrill) return;
+  if (state.deepAnalysis?.running) return;
+
+  const gameId = state.currentGameId;
+  const gameResult = state.localGames.find((game) => game.id === gameId)?.result || "in_progress";
+  const targets = state.moves.filter((move) =>
+    move.role === "player" &&
+    !move.retracted &&
+    !(move.analysisStatus === "complete" && (move.engineDepth || 0) >= DEEP_ANALYSIS_DEPTH));
+  if (!targets.length) return;
+
+  state.deepAnalysis = { gameId, running: true, cancelled: false, done: 0, total: targets.length };
+  if (state.currentTab === "review") renderCurrentPanel();
+
+  // Positions repeat across records only rarely, but evals are expensive at
+  // this depth — dedupe just in case (e.g. retracted/replayed lines).
+  const evalCache = new Map();
+  const evaluate = async (fen) => {
+    if (evalCache.has(fen)) return evalCache.get(fen);
+    const result = await state.engine.evaluatePosition(fen, DEEP_ANALYSIS_DEPTH, {
+      timeoutMs: DEEP_ANALYSIS_EVAL_TIMEOUT_MS,
+    });
+    evalCache.set(fen, result);
+    return result;
+  };
+
+  for (const record of targets) {
+    if (state.deepAnalysis.cancelled || state.currentGameId !== gameId || state.activeDrill) break;
+    try {
+      const before = await evaluate(record.beforeFen);
+      if (state.deepAnalysis.cancelled) break;
+      const after = await evaluate(record.afterFen);
+      if (state.deepAnalysis.cancelled) break;
+
+      const bestMoveSan = before.bestMove ? uciToSan(record.beforeFen, before.bestMove) : "";
+      const analysis = normalizeEngineAnalysis({ before, after, depth: DEEP_ANALYSIS_DEPTH, bestMoveSan });
+      // A timed-out search must never wipe good shallow numbers.
+      if (analysis.analysisStatus === "complete") {
+        applyEngineAnalysisToRecord(record, analysis);
+        syncMoveAnalysis(record);
+      }
+    } catch (error) {
+      console.warn(`Deep analysis failed at ply ${record.ply}`, error);
+    }
+    state.deepAnalysis.done += 1;
+    if (state.currentTab === "review") renderCurrentPanel();
+  }
+
+  state.deepAnalysis.running = false;
+  if (state.currentGameId === gameId && !state.activeDrill) {
+    saveCurrentGame(gameResult);
+    recalibrateFromDeepAnalysis(gameId);
+    renderBoard();
+    if (["review", "coach", "profile"].includes(state.currentTab)) {
+      renderCurrentPanel();
+    }
   }
 }
 
@@ -5357,6 +5563,7 @@ function startQueuedPractice(id) {
 }
 
 function startTrainingSession(drill, source) {
+  cancelDeepAnalysis();
   if (!state.activeDrill) {
     saveCurrentGame();
   }
@@ -5403,6 +5610,7 @@ function saveRepertoire() {
 function startOpeningDrill(lineId) {
   const found = getLineById(lineId);
   if (!found) return;
+  cancelDeepAnalysis();
   const { opening, line } = found;
 
   if (!state.activeDrill) saveCurrentGame();
@@ -5538,6 +5746,7 @@ function isMateDrill() {
 function startMateDrill(positionId) {
   const position = getMatePositionById(positionId);
   if (!position) return;
+  cancelDeepAnalysis();
   if (!state.activeDrill) saveCurrentGame();
   state.activeDrill = {
     id: `mate:${position.id}`,
@@ -6054,6 +6263,9 @@ async function finalizeIfGameOver() {
       : `That's ${result}. A pretty clean game from you — no single moment decided it.`);
     if (state.currentTab === "coach") renderCoachPanel();
   }
+
+  // Re-grade the finished game at deep depth on the now-idle engine.
+  runDeepGameAnalysis().catch((error) => console.warn("Deep analysis pass failed", error));
 }
 
 function saveCurrentGame(result = "in_progress") {
@@ -6781,6 +6993,25 @@ async function syncWeakness(tag, record, aggregate) {
   });
 }
 
+// Aggregate-only weakness update — used when engine verification retracts a
+// false-positive tag (no new weakness event happened).
+async function syncWeaknessAggregate(category, aggregate) {
+  if (!aggregate) return;
+  await apiSyncOp({
+    op: "upsert",
+    table: "weaknesses",
+    rows: [{
+      category,
+      label: aggregate.label || category,
+      count: aggregate.count || 0,
+      severity: aggregate.severity || 1,
+      last_seen: aggregate.lastSeen || new Date().toISOString(),
+      examples: aggregate.examples || [],
+      updated_at: new Date().toISOString(),
+    }],
+  });
+}
+
 async function syncPosition(record, item) {
   await apiSyncOp({
     op: "insert",
@@ -7017,6 +7248,7 @@ async function deleteSupabaseHistory() {
 }
 
 function newGame() {
+  cancelDeepAnalysis();
   state.game = new Chess();
   state.selectedSquare = null;
   state.legalTargets = new Set();
@@ -7087,6 +7319,11 @@ async function initEngine() {
       await engine.init();
       state.engine = engine;
       renderGameMeta();
+      // A finished game restored from a previous session may still be graded
+      // at shallow depth — deepen it now that the engine is idle.
+      if (state.game.isGameOver() && !state.activeDrill) {
+        runDeepGameAnalysis().catch((error) => console.warn("Deep analysis pass failed", error));
+      }
       return;
     } catch (error) {
       console.warn(`Stockfish ${source.label} engine failed`, error);
