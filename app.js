@@ -7022,6 +7022,9 @@ function friendlyAuthError(error) {
   if (code === "user_already_exists" || /already registered/i.test(message)) {
     return { message: "That email already has an account. Sign in instead." };
   }
+  if (code === "signup_disabled" || /signups? not allowed/i.test(message)) {
+    return { message: "Sign-ups are currently invite-only. Ask for an invite, then try again." };
+  }
   if (code === "weak_password" || /weak.?password/i.test(code + message)) {
     return { message: `That password is too weak. Use at least ${MIN_PASSWORD_LENGTH} characters and avoid common passwords.` };
   }
@@ -7654,8 +7657,14 @@ function newGame() {
   }
 }
 
-function switchTab(tab) {
+function switchTab(tab, options = {}) {
   state.currentTab = tab;
+  // Mobile CSS hides the board stage on board-less tabs via this attribute,
+  // and Android's back button walks the tab history before leaving the app.
+  document.body.dataset.activeTab = tab;
+  if (!options.fromHistory && window.history.state?.tab !== tab) {
+    window.history.pushState({ tab }, "", "");
+  }
   const boardChanged = tab === "practice" && ensurePracticeTrainer();
   els.tabs.forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
   els.panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
@@ -7668,6 +7677,7 @@ function switchTab(tab) {
   // Arrows depend on the current tab (played+best in Review, only-on-mistake
   // in play) so tab switches must repaint them.
   paintBoardArrows();
+  document.querySelector(".ctx-body")?.scrollTo({ top: 0 });
 }
 
 function escapeHtml(value) {
@@ -7715,6 +7725,14 @@ function bindEvents() {
   els.newGameButton.addEventListener("click", newGame);
   els.tabs.forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
+  });
+
+  // Back button (Android especially) steps back through visited tabs.
+  window.addEventListener("popstate", (event) => {
+    const tab = event.state?.tab;
+    if (tab && tab !== state.currentTab) {
+      switchTab(tab, { fromHistory: true });
+    }
   });
 
   boardDrag = attachDragHandlers(els.board, {
@@ -7787,6 +7805,8 @@ async function boot() {
   state.startedAt = new Date().toISOString();
   restoreActiveGame();
   bindEvents();
+  document.body.dataset.activeTab = state.currentTab;
+  window.history.replaceState({ tab: state.currentTab }, "", "");
   renderAll();
   dismissBootVeil();
   verifyRequiredServices();

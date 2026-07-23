@@ -184,7 +184,7 @@ test("board themes, piece sets, personas, and family mode are wired in", async (
   // Personas: whitelisted voice overlays that never change the method.
   assert.match(personas, /export const COACH_PERSONAS/);
   assert.match(personas, /VOICE ONLY/);
-  assert.match(coachChat, /require\("\.\/personas\.mjs"\)/);
+  assert.match(coachChat, /require\("\.\/personas\.cjs"\)/);
   assert.match(coachChat, /changes tone only/);
   assert.match(app, /persona: getActivePersonaKey\(\)/);
   assert.match(app, /renderPersonaCard/);
@@ -336,6 +336,40 @@ test("deep analysis, rated tactics, and drill feedback are wired in", async () =
   assert.match(app, /function maybeSendDrillFeedback/);
   assert.match(app, /requestCoachChat\("drill_feedback"/);
   assert.match(coachChat, /drill_feedback events/);
+});
+
+test("mobile layout, touch hardening, and PWA metadata are wired in", async () => {
+  const app = await source("app.js");
+  const html = await source("index.html");
+  const css = await source("styles.css");
+  const server = await source("server.js");
+  const smoke = await source("scripts/browser-smoke.mjs");
+
+  // Responsive shell: bottom tab bar tier + tablet tier + dvh fallbacks.
+  assert.match(css, /@media \(max-width: 900px\)/);
+  assert.match(css, /@media \(max-width: 1200px\)/);
+  assert.match(css, /height: 100dvh/);
+  assert.match(css, /env\(safe-area-inset-bottom/);
+  assert.match(css, /touch-action: none/);
+  assert.match(css, /@media \(pointer: coarse\)/);
+  assert.match(css, /body\[data-active-tab="settings"\] \.stage/);
+
+  // Tab state + Android back navigation.
+  assert.match(app, /document\.body\.dataset\.activeTab = tab/);
+  assert.match(app, /pushState\(\{ tab \}/);
+  assert.match(app, /popstate/);
+
+  // PWA metadata served and linked.
+  assert.match(html, /viewport-fit=cover/);
+  assert.match(html, /rel="manifest"/);
+  assert.match(html, /apple-touch-icon/);
+  assert.match(server, /"manifest\.json"/);
+  assert.match(server, /assets\/icon-180\.png/);
+
+  // Cross-engine mobile smoke exists.
+  assert.match(smoke, /webkit/);
+  assert.match(smoke, /iPhone 14/);
+  assert.match(smoke, /Pixel 7/);
 });
 
 test("small pill and chip labels share title-case formatting", async () => {

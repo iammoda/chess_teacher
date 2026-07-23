@@ -382,55 +382,46 @@ Future automated checks:
 - Practice queue deduplicates repeated positions.
 - Engine adapter handles timeout and fallback.
 
-## What Is Left To Build
+## Product Roadmap
 
-The biggest remaining work is turning strong analysis into a complete training system:
+### Shipped
 
-- Stronger quality labels: reliable brilliant/great detection using sacrifice, only-move, and engine-verification criteria. (Deep depth-18 post-game re-analysis and engine-verified tactic tags shipped.)
-- Deeper motif detection: overloaded defenders, trapped pieces, deflection, decoy, and clearance.
-- Bigger puzzle library: the Lichess CC0 import currently ships 144 curated rated tactics; re-run `scripts/import-lichess-puzzles.mjs` with higher per-bucket counts for more volume.
-- Curriculum pages: opening repertoire, endgame modules, pawn-structure plans, lesson completion, and next-lesson recommendations.
-- Practice analytics: solve streaks, repeated miss tracking, trend charts, and improvement summaries.
-- Teaching polish: mistake comparison cards and cleaner mobile/tablet layouts.
-- Data hardening: migrations tooling, backup/restore, and more automated sync tests. (Auth, RLS lockdown, and per-user isolation shipped.)
-- Monetization: Stripe trial + subscription, per-user usage quotas and token metering, deployment.
+- Accounts and multi-tenancy: Supabase Auth identity, server-mediated data access with the service role key, RLS lockdown with per-user row isolation, per-user rate limits, GDPR-ready export/delete endpoints.
+- Login experience: boot veil (no app flash), distinct signup with name capture, NIST-style password strength with a live meter, confirm/resend/reset/recovery screens.
+- Teaching quality: depth-18 post-game re-analysis with live progress, engine-verified tactic tags (false positives retracted from the weakness profile), 3-game calibration blend, rated multi-move tactics imported from the Lichess CC0 database, complete 3-rung checkmate ladder, coach feedback on missed drills.
+- Personalization: eight board themes, drop-in piece sets with a validator + preview tool, five coach personas (voice only), Family mode with softened feedback.
+- Mobile and cross-platform: responsive layout down to 320px phones (bottom tab bar, board-first column), iPad tiers, real-touch drag and tap-to-move, iOS Safari engine fixes verified on WebKit, Android back-button tab navigation, installable web app manifest.
 
-## Roadmap
+### Phase 3: Monetization
 
-### Phase 1: Personal MVP
+- Stripe Checkout subscription with a card-required trial; webhook-driven entitlements table.
+- Coach endpoints gated on active trial/subscription.
+- Per-user usage quotas (daily coach messages) and token metering logged server-side.
+- Global monthly spend kill-switch; cheaper model tier for proactive comments if costs demand it.
 
-- Browser chessboard.
-- Engine opponent.
-- Move history and PGN.
-- Heuristic coach.
-- Weakness profile.
-- Practice queue.
-- Supabase persistence.
+### Phase 4: Launch Readiness
 
-### Phase 2: Stronger Analysis
+- Deployment: single Node service on Fly.io/Render behind TLS, HOST=0.0.0.0, platform-managed secrets.
+- Custom SMTP for auth emails (the built-in Supabase sender is rate-limited to a few per hour).
+- Error tracking (Sentry) and lightweight product analytics; uptime monitoring; database backups.
+- Legal: Terms of Service (13+ accounts), Privacy Policy, Stockfish GPL attribution page, piece-set license credits.
+- Abuse hardening: Cloudflare Turnstile on auth, per-user quota tuning.
 
-- Reliable bundled Stockfish assets with CDN and heuristic fallbacks.
-- Evaluation-before and evaluation-after comparison, including mate-aware scoring.
-- Persisted engine analysis fields for move review and long-term learning.
-- Best engine alternatives and short principal variations in the review screen.
-- Better tactic motif detection and more accurate blunder/mistake/inaccuracy labels.
-- Post-calibration move-quality cues during play.
+### Phase 5: Private Beta
 
-### Phase 3: Adaptive Curriculum
+- 10-20 invited users. Signups stay closed via the Supabase dashboard toggle (Auth -> Sign In/Up -> disable new users); accounts are created by invitation.
+- Measure real cost per game/coach session from the usage metering; set pricing from data.
+- Feedback loop on coaching quality and mobile experience.
 
-- Repetition scheduling.
-- Lesson completion tracking.
-- Opening repertoire pages.
-- Endgame modules.
-- Drill performance trends.
+### Phase 6: Teaching Depth
 
-### Phase 4: Authoring And Polish
-
-- Lesson authoring UI.
-- Branching move trees.
-- Rich lesson templates.
-- Lesson quality checks.
-- Better visual review tools.
+- Bigger puzzle library: re-run `scripts/import-lichess-puzzles.mjs` with higher per-bucket counts.
+- Brilliant/great move detection (sacrifice, only-move, engine-verification criteria).
+- Deeper motif detection: overloaded defenders, trapped pieces, deflection, decoy, clearance.
+- Curriculum pages: opening repertoire, endgame modules, pawn-structure plans, lesson recommendations.
+- Practice analytics: solve streaks, repeated-miss tracking, trend charts.
+- Custom piece art: owner-supplied sets via the drop-in pipeline; commissioned wizard-academy/safari sets.
+- Progressive Web App offline shell (service worker) if beta users ask for it.
 
 ## Implementation Notes
 
@@ -438,3 +429,4 @@ The biggest remaining work is turning strong analysis into a complete training s
 - `index.html`, `styles.css`, and `app.js` are the whole runnable app; `server.js` serves it and owns every secret.
 - Stockfish is loaded from bundled files in `vendor/stockfish` first, then jsDelivr. If both fail, the app falls back to a heuristic opponent.
 - The browser holds no database credentials. Supabase Auth issues session tokens (via the server-provided publishable key); the server verifies each token and performs all database access with the service role key. Local storage is a per-account cache, namespaced by user id.
+- Mobile: below 900px the nav rail becomes a bottom tab bar and the board caps at `min(640px, 100vw - 54px, 100dvh - 350px)`; the browser smoke test exercises iPhone/iPad profiles on real WebKit and Android-class profiles on Chromium (`npx playwright install webkit` enables the iOS-engine checks).

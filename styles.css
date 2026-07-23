@@ -65,6 +65,7 @@ textarea {
   display: grid;
   grid-template-columns: 188px minmax(0, 1fr) 380px;
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
 }
 
@@ -201,6 +202,7 @@ textarea {
 /* ─────────── Stage ─────────── */
 .stage {
   --board-size: min(780px, calc(100vh - 190px), calc(100vw - 188px - 380px - 72px));
+  --board-size: min(780px, calc(100dvh - 190px), calc(100vw - 188px - 380px - 72px));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -331,6 +333,8 @@ textarea {
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1;
+  white-space: nowrap;
+  flex: none;
   letter-spacing: 0;
   color: var(--ink-2);
   text-align: center;
@@ -490,6 +494,7 @@ textarea {
   height: var(--board-size);
   max-width: 100%;
   max-height: calc(100vh - 190px);
+  max-height: calc(100dvh - 190px);
   position: relative;
   border-radius: 4px;
   overflow: hidden;
@@ -507,6 +512,10 @@ textarea {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   grid-template-rows: repeat(8, 1fr);
+  /* Touch: the board owns its gestures — no panning, no double-tap zoom,
+     no tap flash. Pointer-event drags then work on every mobile browser. */
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .square {
@@ -992,6 +1001,12 @@ textarea {
 }
 
 /* clocks */
+/* display:inline-flex would otherwise defeat the hidden attribute and leave
+   an empty box when clocks are off. */
+.clock[hidden] {
+  display: none;
+}
+
 .clock {
   display: inline-flex;
   align-items: center;
@@ -1327,6 +1342,7 @@ textarea {
   overflow-y: auto;
   min-height: 180px;
   max-height: calc(100vh - 340px);
+  max-height: calc(100dvh - 340px);
   padding: 4px 2px;
 }
 
@@ -2417,6 +2433,7 @@ textarea {
 
   .stage {
     --board-size: min(780px, calc(100vh - 178px), calc(100vw - 64px - 340px - 56px));
+    --board-size: min(780px, calc(100dvh - 178px), calc(100vw - 64px - 340px - 56px));
   }
 
   .rail {
@@ -2911,4 +2928,196 @@ textarea {
 
 .account-card .button-row {
   margin-top: 4px;
+}
+
+/* ─────────── Touch devices (any width) ─────────── */
+@media (pointer: coarse) {
+  /* 16px inputs stop iOS Safari's focus auto-zoom; taller controls give
+     comfortable 40px+ touch targets everywhere. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+    min-height: 42px;
+  }
+
+  .mini-card button,
+  .lesson-card button,
+  .skill-card button,
+  .lab-mode-card button,
+  .practice-card button,
+  .button-row button {
+    height: auto;
+    min-height: 40px;
+  }
+}
+
+/* ─────────── Mobile / tablet portrait (≤900px) ───────────
+   Single column: compact board stage on top, the context panel filling and
+   scrolling beneath it, and the nav rail reflowed into a fixed bottom tab
+   bar (same DOM, same bindings). */
+@media (max-width: 900px) {
+  body {
+    overscroll-behavior-y: contain;
+  }
+
+  .shell {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Bottom tab bar */
+  .rail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 120;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: stretch;
+    gap: 0;
+    height: calc(56px + env(safe-area-inset-bottom, 0px));
+    padding: 0 6px env(safe-area-inset-bottom, 0px);
+    border-right: none;
+    border-top: 1px solid var(--rule);
+    background: var(--card);
+  }
+
+  .rail-brand,
+  .rail-section,
+  .rail-foot {
+    display: none;
+  }
+
+  .nav-item {
+    position: relative;
+    flex: 1;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    height: auto;
+    min-width: 44px;
+    padding: 6px 2px;
+    border-radius: 10px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .nav-item .nav-mono {
+    width: auto;
+  }
+
+  .nav-item .nav-label {
+    display: block;
+    font-size: 9.5px;
+    letter-spacing: 0.02em;
+  }
+
+  .nav-item .nav-badge {
+    display: block;
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    transform: translateX(8px);
+  }
+
+  .nav-item.active::before {
+    display: none;
+  }
+
+  .nav-item.active {
+    background: var(--accent-soft);
+  }
+
+  /* Stage: board capped so the panel below keeps real estate on tablets */
+  .stage {
+    order: 0;
+    flex: none;
+    --board-size: min(640px, calc(100vw - 54px), calc(100dvh - 350px));
+    padding: 8px 12px 4px;
+    gap: 4px;
+  }
+
+  .seat {
+    padding: 3px 2px;
+    gap: 8px;
+    width: 100%;
+    max-width: 640px;
+  }
+
+  /* Narrow phones: names truncate and trays shrink so the turn pill never
+     pushes past the viewport. */
+  .seat .who {
+    min-width: 0;
+  }
+
+  .seat .who .name,
+  .seat .who .sub {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .seat .seat-meta {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+  }
+
+  .seat .capture-tray {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* Empty trays read as stray boxes at phone sizes — show them only once
+     something has actually been captured. */
+  .seat .capture-tray.empty {
+    display: none;
+  }
+
+  /* Context panel: fills the rest, scrolls, and clears the tab bar */
+  .context {
+    order: 1;
+    flex: 1;
+    min-height: 0;
+    border-left: none;
+    border-top: 1px solid var(--rule);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .ctx-head {
+    padding: 10px 16px 8px;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ctx-head .meta {
+    max-width: 55%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: none;
+  }
+
+  .ctx-body {
+    padding: 12px 14px 16px;
+    overscroll-behavior: contain;
+  }
+
+  .ctx-foot {
+    padding: 8px 12px;
+  }
+
+  .coach-chat-log {
+    min-height: 120px;
+    max-height: 45vh;
+    max-height: 45dvh;
+  }
+
+  /* Profile and Settings don't need the board — give them the full screen. */
+  body[data-active-tab="profile"] .stage,
+  body[data-active-tab="settings"] .stage {
+    display: none;
+  }
 }

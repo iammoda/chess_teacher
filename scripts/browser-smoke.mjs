@@ -202,3 +202,122 @@ try {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
 }
+
+// ── Mobile / tablet smoke across engines ──
+// Chromium stands in for Android; WebKit is iOS Safari's actual engine.
+// WebKit is skipped with a warning when the binary isn't installed, so
+// `npm test` stays runnable on fresh clones (`npx playwright install webkit`).
+const mobileServer = createServer();
+await new Promise((resolve, reject) => {
+  mobileServer.once("error", reject);
+  mobileServer.listen(0, "127.0.0.1", resolve);
+});
+const mobileBaseUrl = `http://127.0.0.1:${mobileServer.address().port}`;
+const { devices, webkit } = await import("playwright");
+
+async function checkMobileLayout(engineBrowser, engineName, profileName, device) {
+  const label = `${engineName}/${profileName}`;
+  const context = await engineBrowser.newContext({ ...device });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  await page.goto(mobileBaseUrl, { waitUntil: "domcontentloaded" });
+  // Geometry assertions need the stylesheet applied, not just the DOM —
+  // WebKit can render unstyled squares before styles.css finishes loading.
+  await page.waitForLoadState("load");
+  await page.locator("#board .square").first().waitFor({ timeout: 10000 });
+
+  const viewport = page.viewportSize();
+  const isMobileLayout = viewport.width <= 900;
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  if (overflow > 1) throw new Error(`${label}: horizontal overflow of ${overflow}px`);
+
+  const board = await page.locator(".board-host").boundingBox();
+  if (!board || board.width > viewport.width) {
+    throw new Error(`${label}: board missing or wider than the viewport`);
+  }
+
+  if (isMobileLayout) {
+    const rail = await page.evaluate(() => {
+      const el = document.querySelector(".rail");
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return { position: style.position, bottomGap: window.innerHeight - rect.bottom };
+    });
+    if (rail.position !== "fixed" || rail.bottomGap > 1) {
+      throw new Error(`${label}: bottom tab bar not pinned (${JSON.stringify(rail)})`);
+    }
+
+    const navBox = await page.locator('[data-tab="settings"]').boundingBox();
+    if (!navBox || navBox.height < 40) {
+      throw new Error(`${label}: nav touch target too small (${navBox?.height}px)`);
+    }
+
+    // Tap-to-move with real touch events.
+    await page.tap('[data-square="e2"]');
+    await page.tap('[data-square="e4"]');
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-square="e4"] img.piece')),
+      null,
+      { timeout: 5000 },
+    );
+
+    // Settings: the board stage frees the screen, inputs never trigger iOS zoom.
+    await page.tap('[data-tab="settings"]');
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".stage")).display === "none",
+      null,
+      { timeout: 3000 },
+    );
+    const inputFont = await page.evaluate(() =>
+      parseFloat(getComputedStyle(document.querySelector("#displayNameInput")).fontSize));
+    if (inputFont < 16) throw new Error(`${label}: ${inputFont}px inputs cause focus zoom`);
+
+    // Back button walks tab history instead of leaving the app.
+    await page.goBack();
+    await page.waitForFunction(() => document.body.dataset.activeTab === "coach", null, { timeout: 3000 });
+  } else {
+    const railPosition = await page.evaluate(() => getComputedStyle(document.querySelector(".rail")).position);
+    if (railPosition === "fixed") {
+      throw new Error(`${label}: side rail unexpectedly became a bottom bar at ${viewport.width}px`);
+    }
+  }
+
+  if (errors.length) throw new Error(`${label}: page errors: ${errors.join("; ")}`);
+  await context.close();
+  console.log(`  mobile ok: ${label} (${viewport.width}x${viewport.height})`);
+}
+
+const mobileChromium = await chromium.launch({ headless: true });
+try {
+  await checkMobileLayout(mobileChromium, "chromium", "Pixel 7", devices["Pixel 7"]);
+  await checkMobileLayout(mobileChromium, "chromium", "touch laptop", {
+    viewport: { width: 1280, height: 800 },
+    hasTouch: true,
+  });
+
+  let webkitBrowser = null;
+  try {
+    webkitBrowser = await webkit.launch({ headless: true });
+  } catch {
+    console.warn("  (webkit not installed — skipping iOS-engine checks; run `npx playwright install webkit`)");
+  }
+
+  if (webkitBrowser) {
+    try {
+      await checkMobileLayout(webkitBrowser, "webkit", "iPhone 14", devices["iPhone 14"]);
+      await checkMobileLayout(webkitBrowser, "webkit", "iPhone SE", devices["iPhone SE"]);
+      await checkMobileLayout(webkitBrowser, "webkit", "iPad portrait", devices["iPad Pro 11"]);
+      await checkMobileLayout(webkitBrowser, "webkit", "iPad landscape", devices["iPad Pro 11 landscape"]);
+    } finally {
+      await webkitBrowser.close();
+    }
+  }
+
+  console.log("Mobile smoke passed.");
+} finally {
+  await mobileChromium.close();
+  await new Promise((resolve) => mobileServer.close(resolve));
+}

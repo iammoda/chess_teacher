@@ -1,0 +1,9 @@
+.env
+.env.*
+.vercel
+.git
+node_modules
+tests
+supabase
+scripts
+README.md

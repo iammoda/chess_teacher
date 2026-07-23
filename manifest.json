@@ -1,0 +1,21 @@
+{
+  "name": "Personal Chess Teacher",
+  "short_name": "Chess Teacher",
+  "description": "A personal chess coach that plays you, reviews your games, and turns your mistakes into training.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f8fa",
+  "theme_color": "#f6f8fa",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
