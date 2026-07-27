@@ -217,7 +217,7 @@ test("settings exposes local history erase and account-scoped remote erase", asy
   assert.match(envExample, /SUPABASE_SERVICE_ROLE_KEY=/);
   assert.match(app, /remoteHistoryEraseEnabled/);
   assert.match(app, /Erase local history/);
-  assert.match(app, /Erase local \+ Supabase history/);
+  assert.match(app, /Erase local \+ cloud history/);
   assert.match(app, /deleteSupabaseHistory/);
   assert.match(app, /accountDelete/);
   assert.match(app, /canCloudSync/);
@@ -292,9 +292,13 @@ test("identity settings and squirrel branding are wired into the UI", async () =
   assert.match(html, /id="playerAvatar"/);
   assert.match(app, /displayName: "You"/);
   assert.match(app, /displayNameInput/);
-  assert.match(app, /Calibration MoBot/);
-  assert.match(app, /Adaptive MoBot/);
-  assert.match(app, /"MO"/);
+  // Opponent bot: customer-friendly default name with inline click-to-rename.
+  assert.match(app, /botName: "Opponent"/);
+  assert.match(app, /function startOpponentRename/);
+  assert.match(app, /function normalizeBotName/);
+  assert.match(html, /id="opponentSeatName"/);
+  assert.match(html, /seat-rename/);
+  assert.doesNotMatch(app, /MoBot/);
   assert.match(css, /--board-size/);
   assert.match(css, /width: var\(--board-size\)/);
   assert.match(css, /height: var\(--board-size\)/);

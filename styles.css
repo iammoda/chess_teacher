@@ -287,6 +287,53 @@ textarea {
   text-transform: uppercase;
 }
 
+/* click-to-edit opponent name */
+button.seat-rename {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+button.seat-rename:not(:disabled):hover::after,
+button.seat-rename:not(:disabled):focus-visible::after {
+  content: " ✎";
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+button.seat-rename:not(:disabled):hover {
+  text-decoration: underline dotted var(--ink-3);
+  text-underline-offset: 3px;
+}
+
+button.seat-rename:disabled {
+  cursor: default;
+  color: var(--ink);
+}
+
+.seat .who .seat-rename-input {
+  width: auto;
+  max-width: 220px;
+  min-height: 0;
+  padding: 0 4px;
+  margin: 0;
+  border: 1px solid var(--rule-2);
+  border-radius: 4px;
+  background: var(--paper);
+  font-family: "Source Serif 4", Georgia, serif;
+  font-weight: 500;
+  font-size: 16px;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+}
+
 .seat .seat-spacer {
   flex: 1;
 }
@@ -1043,9 +1090,10 @@ textarea {
 
 /* checkbox settings */
 .checkbox-field {
-  flex-direction: row-reverse;
+  display: flex;
+  flex-direction: row;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 10px;
 }
 
@@ -1054,6 +1102,7 @@ textarea {
   height: 18px;
   min-height: 18px;
   margin: 0;
+  flex: none;
   cursor: pointer;
 }
 

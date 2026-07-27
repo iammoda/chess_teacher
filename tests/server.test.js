@@ -168,7 +168,7 @@ test("coach chat endpoint reports unconfigured without an API key", async () => 
     const response = await postJson("/api/coach/chat", { event: "user_message", messages: [], game: { fen: "x" } });
     assert.equal(response.status, 200);
     assert.equal(response.body.configured, false);
-    assert.match(response.body.message, /offline/i);
+    assert.match(response.body.message, /not set up/i);
   } finally {
     if (previous !== undefined) process.env.OPENAI_API_KEY = previous;
   }
@@ -333,7 +333,7 @@ test("health reports auth requirements from supabase configuration", async () =>
 test("sync endpoint reports unconfigured without supabase env", async () => {
   const response = await request("/api/sync", { method: "POST", payload: { op: "insert", table: "moves", rows: [{ san: "e4" }] } });
   assert.equal(response.status, 503);
-  assert.match(response.body.error, /not configured/i);
+  assert.match(response.body.error, /not set up/i);
 });
 
 test("sync endpoint requires a bearer token and a valid session", async () => {

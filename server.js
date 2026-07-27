@@ -245,7 +245,7 @@ async function requireUser(req, res, { optional = false } = {}) {
   const admin = getSupabaseAdmin();
   if (!admin) {
     if (optional) return { userId: null };
-    sendJson(res, 503, { error: "Cloud sync is not configured on the server. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env." });
+    sendJson(res, 503, { error: "Cloud sync is not set up on this server." });
     return null;
   }
 
@@ -273,7 +273,7 @@ async function requireUser(req, res, { optional = false } = {}) {
 async function checkSupabaseStatus() {
   const admin = getSupabaseAdmin();
   if (!admin) {
-    return { dataOnline: false, dataError: "Supabase is not configured on the server." };
+    return { dataOnline: false, dataError: "Cloud sync is not set up on this server." };
   }
   try {
     await admin.ping();
@@ -616,7 +616,7 @@ async function checkOpenAIStatus() {
   if (!process.env.OPENAI_API_KEY) {
     return {
       openaiOnline: false,
-      openaiError: "OPENAI_API_KEY is not set.",
+      openaiError: "The coach is not set up on this server.",
     };
   }
 
@@ -635,7 +635,7 @@ async function checkOpenAIStatus() {
     if (!response.ok) {
       return {
         openaiOnline: false,
-        openaiError: data.error?.message || `OpenAI returned HTTP ${response.status}.`,
+        openaiError: data.error?.message || `The coach service returned an error (HTTP ${response.status}).`,
       };
     }
 
@@ -647,8 +647,8 @@ async function checkOpenAIStatus() {
     return {
       openaiOnline: false,
       openaiError: error.name === "AbortError"
-        ? "OpenAI health check timed out."
-        : "Could not reach OpenAI.",
+        ? "The coach service timed out."
+        : "Could not reach the coach service.",
     };
   } finally {
     clearTimeout(timeout);
@@ -689,7 +689,7 @@ async function handleCoachChatRequest(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     sendJson(res, 200, {
       configured: false,
-      message: "The coach is offline. Add OPENAI_API_KEY to .env and restart the server to talk.",
+      message: "The coach is not set up on this server, so chat is unavailable right now.",
       question: null,
       offer_rethink: false,
       memory_note: null,
@@ -767,7 +767,7 @@ async function handleCoachChatRequest(req, res) {
   if (!response.ok) {
     sendJson(res, response.status, {
       configured: true,
-      error: data.error?.message || "OpenAI request failed",
+      error: data.error?.message || "The coach request failed.",
     });
     return;
   }
@@ -784,7 +784,7 @@ async function handleCoachChatStreamRequest(req, res) {
     // Fall back to the non-streaming response shape so the client can render.
     sendJson(res, 200, {
       configured: false,
-      message: "The coach is offline. Add OPENAI_API_KEY to .env and restart the server to talk.",
+      message: "The coach is not set up on this server, so chat is unavailable right now.",
       question: null,
       offer_rethink: false,
       memory_note: null,
@@ -874,7 +874,7 @@ async function handleCoachChatStreamRequest(req, res) {
   if (!upstream.ok || !upstream.body) {
     clearTimeout(timeout);
     const err = await upstream.text().catch(() => "");
-    sendEvent("error", { message: err ? `OpenAI ${upstream.status}: ${err.slice(0, 200)}` : `OpenAI ${upstream.status}` });
+    sendEvent("error", { message: err ? `Coach service error ${upstream.status}: ${err.slice(0, 200)}` : `Coach service error ${upstream.status}.` });
     res.end();
     return;
   }
@@ -907,7 +907,7 @@ async function handleCoachChatStreamRequest(req, res) {
         } else if (event.type === "response.error" || event.type === "error") {
           // Terminal: a partial reply must never masquerade as a complete one.
           upstreamErrored = true;
-          sendEvent("error", { message: event.error?.message || "OpenAI stream error." });
+          sendEvent("error", { message: event.error?.message || "The coach stream was interrupted." });
           break;
         }
       }

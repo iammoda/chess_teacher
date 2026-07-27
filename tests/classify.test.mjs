@@ -111,7 +111,7 @@ test("classifyMoveQuality identifies engine-best and clean moves", () => {
       label: "Best",
       symbol: "*",
       tone: "positive",
-      reason: "Stockfish also preferred this move.",
+      reason: "The engine also preferred this move.",
     },
   );
 

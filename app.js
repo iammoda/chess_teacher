@@ -451,6 +451,7 @@ const CURATED_PRACTICE_PUZZLES = [
 
 const DEFAULT_SETTINGS = {
   displayName: "You",
+  botName: "Opponent",
   playerColor: "w",
   engineDepth: 5,
   coachMode: "hints",
@@ -579,6 +580,8 @@ const state = {
     status: "",
     error: "",
   },
+  // Inline rename of the opponent seat name (click-to-edit).
+  opponentRename: { active: false },
   // Post-game deep engine re-analysis progress (see runDeepGameAnalysis).
   deepAnalysis: {
     gameId: null,
@@ -596,7 +599,7 @@ const state = {
     configured: false,
     online: false,
     model: "",
-    status: "Checking OpenAI coach...",
+    status: "Checking coach...",
   },
   // Server-provided config from /api/health.
   server: {
@@ -1159,6 +1162,15 @@ function getAvatarLabel(name = getDisplayName()) {
   return normalizeDisplayName(name).slice(0, 1).toUpperCase() || "Y";
 }
 
+function normalizeBotName(name) {
+  const normalized = String(name || "").trim().replace(/\s+/g, " ");
+  return normalized.slice(0, 32) || DEFAULT_SETTINGS.botName;
+}
+
+function getBotName() {
+  return normalizeBotName(state.settings.botName);
+}
+
 function getOpponentSeatLabels() {
   if (state.activeDrill) {
     if (isPracticeTrainerDrill()) {
@@ -1167,11 +1179,58 @@ function getOpponentSeatLabels() {
     return { name: "Training Board", sub: state.activeDrill.type || "Drill" };
   }
   const fallbackSuffix = state.engineFallback && !state.engine ? " · simplified engine" : "";
+  const name = getBotName();
   if (!isCalibrationComplete()) {
-    return { name: "Calibration MoBot", sub: `First game · finding your level${fallbackSuffix}` };
+    return { name, sub: `First game · finding your level${fallbackSuffix}` };
   }
   const score = getEstimatedTrainingScore();
-  return { name: "Adaptive MoBot", sub: `${score ? `Adaptive · score ${score}` : "Adaptive"}${fallbackSuffix}` };
+  return { name, sub: `${score ? `Adaptive · score ${score}` : "Adaptive"}${fallbackSuffix}` };
+}
+
+// Click-to-edit rename for the opponent seat: the name button swaps to a
+// text input; Enter/blur commits, Escape cancels. Disabled during drills
+// (the seat is a trainer/lab label there, not the bot).
+function startOpponentRename() {
+  if (state.activeDrill || state.opponentRename.active) return;
+  state.opponentRename.active = true;
+
+  const nameButton = els.opponentSeatName;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = 32;
+  input.value = getBotName();
+  input.className = "seat-rename-input";
+  input.setAttribute("aria-label", "Opponent name");
+
+  nameButton.hidden = true;
+  nameButton.insertAdjacentElement("afterend", input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (commit) => {
+    if (finished) return;
+    finished = true;
+    if (commit) {
+      state.settings.botName = normalizeBotName(input.value);
+      saveJson(STORAGE_KEYS.settings, state.settings);
+    }
+    input.remove();
+    nameButton.hidden = false;
+    state.opponentRename.active = false;
+    renderGameMeta();
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
 }
 
 function sortCapturedPieces(pieces) {
@@ -1267,20 +1326,20 @@ function getRequiredServiceRows() {
       detail: syncDetail,
     },
     {
-      name: "OpenAI coach",
+      name: "Personal coach",
       ready: isOpenAIReady(),
       detail: isOpenAIReady()
-        ? `Online${state.openAI.model ? ` with ${state.openAI.model}` : ""}.`
-        : state.openAI.status || "OpenAI must be configured and reachable.",
+        ? "Online."
+        : state.openAI.status || "The coach is not available right now.",
     },
     {
       name: "Chess engine",
       ready: Boolean(state.engine),
       detail: state.engine
-        ? "Stockfish is running in your browser."
+        ? "Ready — runs on your device."
         : state.engineFallback
-          ? "Stockfish failed to load — you're facing a simplified opponent and move review uses heuristics only. Reload to retry."
-          : "Loading Stockfish...",
+          ? "The engine failed to load — you're facing a simplified opponent and move review uses basic analysis only. Reload to retry."
+          : "Loading the engine...",
     },
   ];
 }
@@ -1300,7 +1359,7 @@ function renderRequiredServicesCard() {
     <article class="mini-card service-gate-card">
       <span class="label">Services</span>
       <strong>Coach and sync status</strong>
-      <p>Play always works locally. The personal coach needs OpenAI; long-term history sync needs a signed-in account.</p>
+      <p>Play always works on this device. The personal coach and long-term history sync need a connection and a signed-in account.</p>
       <div class="service-list">${rows}</div>
       <div class="button-row">
         <button id="checkRequiredServicesButton" type="button">Check services</button>
@@ -1320,7 +1379,7 @@ function renderCoachOfflineBanner() {
   return `
     <article class="mini-card coach-offline-banner">
       <span class="label">Coach offline</span>
-      <p>Playing with local analysis only. ${escapeHtml(state.openAI.status || "Connect OpenAI in Settings for personal coaching.")}</p>
+      <p>Playing with local analysis only. ${escapeHtml(state.openAI.status || "The personal coach is offline right now — check Settings.")}</p>
     </article>
   `;
 }
@@ -1334,10 +1393,13 @@ function renderGameMeta() {
 
   // Opponent seat
   const opponentLabels = getOpponentSeatLabels();
-  els.opponentSeatName.textContent = opponentLabels.name;
+  if (!state.opponentRename?.active) {
+    els.opponentSeatName.textContent = opponentLabels.name;
+  }
+  els.opponentSeatName.disabled = Boolean(state.activeDrill);
   els.opponentSeatSub.textContent = opponentLabels.sub;
   if (els.opponentAvatar) {
-    els.opponentAvatar.textContent = state.activeDrill ? "LAB" : "MO";
+    els.opponentAvatar.textContent = state.activeDrill ? "LAB" : getAvatarLabel(getBotName());
   }
 
   // Player seat
@@ -1412,8 +1474,11 @@ function ctxHeadMetaFor(tab) {
   switch (tab) {
     case "coach":
       return calibrated ? "Adaptive" : "Calibration game";
-    case "review":
-      return state.moves.length ? `${state.moves.length} ${state.moves.length === 1 ? "ply" : "plies"}` : "";
+    case "review": {
+      if (!isCurrentGameFinished()) return "";
+      const moveCount = Math.ceil(state.moves.length / 2);
+      return moveCount ? `${moveCount} ${moveCount === 1 ? "move" : "moves"}` : "";
+    }
     case "practice": {
       if (calibrated) {
         const stats = getPracticeStats();
@@ -1425,7 +1490,7 @@ function ctxHeadMetaFor(tab) {
     case "profile":
       return "";
     case "settings":
-      return state.openAI.status || "";
+      return "";
     default:
       return "";
   }
@@ -2428,7 +2493,7 @@ function getProfileSummary() {
 }
 
 async function checkOpenAIHealth(options = {}) {
-  state.openAI.status = "Checking OpenAI coach...";
+  state.openAI.status = "Checking coach...";
   state.openAI.online = false;
   if (options.render !== false) renderAll();
 
@@ -2439,10 +2504,10 @@ async function checkOpenAIHealth(options = {}) {
     state.openAI.model = data.model || "";
     state.openAI.online = Boolean(data.openaiOnline);
     state.openAI.status = state.openAI.online
-      ? "OpenAI coach online"
+      ? "Coach online"
       : state.openAI.configured
-        ? data.openaiError || "OpenAI coach is configured, but the API is not reachable."
-        : "Missing OPENAI_API_KEY";
+        ? data.openaiError || "The coach is set up, but the service is not reachable right now."
+        : "The coach is not set up on this server.";
     if ("dataOnline" in data && !data.dataOnline && data.dataError) {
       state.sync.health = data.dataError;
     }
@@ -2451,7 +2516,7 @@ async function checkOpenAIHealth(options = {}) {
     state.openAI.online = false;
     state.openAI.model = "";
     state.featureFlags.remoteHistoryEraseEnabled = false;
-    state.openAI.status = error.message || "Start the Node server with npm start.";
+    state.openAI.status = error.message || "Could not reach the server. Check your connection and try again.";
   }
 
   if (options.render !== false) {
@@ -2475,7 +2540,7 @@ function applyServerConfig(data) {
 
 async function verifyRequiredServices() {
   state.sync.health = "Testing cloud sync...";
-  state.openAI.status = "Checking OpenAI coach...";
+  state.openAI.status = "Checking coach...";
   state.openAI.online = false;
   renderAll();
 
@@ -3185,12 +3250,21 @@ function loadGameForReview(gameId) {
   }
 }
 
+// Review is a post-game activity: the current game only unlocks its
+// breakdown once it has actually ended (checkmate, draw, or a clock flag).
+function isCurrentGameFinished() {
+  return state.game.isGameOver() || Boolean(state.clocks?.flagged);
+}
+
 function renderReviewPanel() {
-  if (!state.moves.length) {
+  if (!isCurrentGameFinished() || !state.moves.length) {
+    const explainer = state.moves.length
+      ? "Game in progress. When it ends, your coach breaks it down here move by move."
+      : "When you finish a game, your coach breaks it down here move by move.";
     els.reviewPanel.innerHTML = `
       <h2>Review</h2>
       <div class="stack">
-        <p class="empty-state">No moves yet. Play a game to review it here.</p>
+        <p class="empty-state">${explainer}</p>
         ${renderGamePickerCard()}
       </div>
     `;
@@ -3365,7 +3439,7 @@ function renderSelectedMoveAnalysis(move) {
       <article class="mini-card">
         <span class="label">Engine analysis</span>
         <strong>Analysis pending</strong>
-        <p>Stockfish is evaluating the position before and after this move.</p>
+        <p>The engine is evaluating the position before and after this move.</p>
       </article>
     `;
   }
@@ -3376,22 +3450,22 @@ function renderSelectedMoveAnalysis(move) {
       <article class="mini-card">
         <span class="label">${quality ? "Move quality" : "Engine analysis"}</span>
         <strong>${quality ? escapeHtml(quality.label) : "Unavailable"}</strong>
-        <p>${escapeHtml(quality?.reason || "Stockfish was not available for this move, so the review is using heuristic tags only.")}</p>
+        <p>${escapeHtml(quality?.reason || "The engine was not available for this move, so the review is using quick heuristics only.")}</p>
       </article>
     `;
   }
 
   const bestMove = move.bestMoveSan || move.bestMoveUci || "No best move returned";
   const bestText = !move.bestMoveUci
-    ? "Stockfish did not return a best alternative for this move."
+    ? "The engine did not return a best alternative for this move."
     : move.bestMoveUci === move.uci
-      ? `Stockfish also preferred ${bestMove}.`
-      : `Stockfish preferred ${bestMove} over ${move.san}.`;
+      ? `The engine also preferred ${bestMove}.`
+      : `The engine preferred ${bestMove} over ${move.san}.`;
   const pv = formatPrincipalVariation(move.beforeFen, move.principalVariation || []);
 
   return `
     <article class="mini-card">
-      <span class="label">Engine analysis${move.engineSource ? ` · ${escapeHtml(move.engineSource)}` : ""}${move.engineDepth ? ` · depth ${move.engineDepth}` : ""}</span>
+      <span class="label">Engine analysis${move.engineDepth ? ` · depth ${move.engineDepth}` : ""}</span>
       <strong>${quality ? escapeHtml(quality.label) : formatEvalDelta(move) || "No centipawn loss"}</strong>
       <p>${escapeHtml(quality ? `${quality.reason} ${bestText}` : bestText)}</p>
       <div class="candidate-list">
@@ -4550,9 +4624,9 @@ function renderSettingsPanel() {
           : "Calibration mode is active. Finish your first game and the opponent starts adapting to you."}</p>
       </article>
       <article class="mini-card">
-        <strong>OpenAI personal coach</strong>
-        <p>${isOpenAIReady() ? `Online through the local server${state.openAI.model ? ` using ${escapeHtml(state.openAI.model)}` : ""}.` : escapeHtml(state.openAI.status || "Not connected. Add OPENAI_API_KEY to .env, then restart the Node server.")}</p>
-        <button id="testOpenAIButton" type="button">Test OpenAI coach</button>
+        <strong>Personal coach</strong>
+        <p>${isOpenAIReady() ? "Online and ready to coach." : escapeHtml(state.openAI.status || "The coach is not available right now.")}</p>
+        <button id="testOpenAIButton" type="button">Test coach</button>
       </article>
       <article class="mini-card">
         <strong>Cloud sync</strong>
@@ -4623,7 +4697,7 @@ function renderSettingsPanel() {
         ${erase.error ? `<p class="sync-status-row danger-status"><span class="label">Error</span> ${escapeHtml(erase.error)}</p>` : ""}
         <div class="button-row">
           <button id="eraseLocalHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local history</button>
-          ${remoteEraseAvailable ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + Supabase history</button>` : ""}
+          ${remoteEraseAvailable ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + cloud history</button>` : ""}
         </div>
         ${account.status ? `<p class="sync-status-row good-status"><span class="label">Account</span> ${escapeHtml(account.status)}</p>` : ""}
         ${account.error ? `<p class="sync-status-row danger-status"><span class="label">Account</span> ${escapeHtml(account.error)}</p>` : ""}
@@ -6760,9 +6834,10 @@ async function completeGameWithResult(result) {
   } else if (isCalibrationComplete() && coachModeAllows("postgame")) {
     const moments = selectKeyMoments(state.moves);
     pushChatMessage("assistant", moments.length
-      ? `That's ${result}. Want to walk through the ${moments.length === 1 ? "key moment" : `${moments.length} key moments`} together? Open Review and hit "Start guided review".`
+      ? `That's ${result}. Want to walk through the ${moments.length === 1 ? "key moment" : `${moments.length} key moments`} together? Hit "Start guided review".`
       : `That's ${result}. A pretty clean game from you — no single moment decided it.`);
-    if (state.currentTab === "coach") renderCoachPanel();
+    // Review is post-game: now that the game is over, take the player there.
+    switchTab("review");
   }
 
   // Re-grade the finished game at deep depth on the now-idle engine.
@@ -7396,7 +7471,7 @@ async function syncGameStart() {
 async function verifyCloudSync(options = {}) {
   if (!state.server.syncConfigured) {
     state.sync.reachable = false;
-    state.sync.health = "Cloud sync is not configured on the server. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.";
+    state.sync.health = "Cloud sync is not set up on this server. Your history stays on this device.";
     if (options.render !== false) renderAll();
     return false;
   }
@@ -7736,13 +7811,13 @@ async function eraseLocalHistory() {
 
 async function eraseRemoteHistory() {
   if (!canCloudSync() && !state.featureFlags.remoteHistoryEraseEnabled) return;
-  if (!confirmHistoryErase("Erase local and Supabase history? This permanently deletes your cloud games, moves, calibration, profile, and practice history for this account. Settings stay saved.")) {
+  if (!confirmHistoryErase("Erase local and cloud history? This permanently deletes your cloud games, moves, calibration, profile, and practice history for this account. Settings stay saved.")) {
     return;
   }
 
   state.historyErase = {
     busy: true,
-    status: "Erasing Supabase history...",
+    status: "Erasing cloud history...",
     error: "",
   };
   renderAll();
@@ -7757,7 +7832,7 @@ async function eraseRemoteHistory() {
     state.sync.reachable = true;
     state.historyErase = {
       busy: false,
-      status: "Local and Supabase history erased. Calibration is reset.",
+      status: "Local and cloud history erased. Calibration is reset.",
       error: "",
     };
   } catch (error) {
@@ -7893,6 +7968,7 @@ async function initEngine() {
 
 function bindEvents() {
   els.newGameButton.addEventListener("click", newGame);
+  els.opponentSeatName?.addEventListener("click", startOpponentRename);
   els.tabs.forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
   });
