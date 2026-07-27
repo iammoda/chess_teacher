@@ -208,6 +208,24 @@ test("play is never gated on remote services", async () => {
   assert.match(app, /renderCoachOfflineBanner/);
 });
 
+test("customer-facing copy stays free of dev jargon", async () => {
+  const app = await source("app.js");
+  const classify = await source("lib/classify.mjs");
+
+  // Dev instructions and internal tooling must never render in the UI.
+  assert.doesNotMatch(app, /drop 12 SVGs/);
+  assert.doesNotMatch(app, /check-piece-set/);
+  assert.doesNotMatch(app, /Check the server logs/);
+  assert.doesNotMatch(app, /watching quietly/);
+  // Engine numbers render as pawn units, never raw centipawns.
+  assert.doesNotMatch(app, /\}cp`/);
+  assert.match(app, /function formatPawns/);
+  assert.match(classify, /pawns of advantage/);
+  assert.doesNotMatch(classify, /centipawns\.`/);
+  // Raw error.message dumps go through the friendly mapper.
+  assert.match(app, /function friendlyServiceMessage/);
+});
+
 test("settings exposes local history erase and account-scoped remote erase", async () => {
   const app = await source("app.js");
   const envExample = await source(".env.example");

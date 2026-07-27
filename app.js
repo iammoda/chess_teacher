@@ -1559,8 +1559,8 @@ function renderCoachPanel() {
       <div class="stack">
         <article class="mini-card calibration-card">
           <span class="label">Calibration game</span>
-          <strong>Play one game so I can meet you</strong>
-          <p>I'm watching quietly — no hints, no commentary. Play the moves you would normally play. When this game ends, coaching, move feedback, and adaptive difficulty all unlock.</p>
+          <strong>Play your first game</strong>
+          <p>No hints or commentary during this one — just play the moves you'd normally play. When it ends, coaching, move feedback, and an opponent matched to your level all unlock.</p>
         </article>
         ${renderCoachOfflineBanner()}
       </div>
@@ -2492,6 +2492,18 @@ function getProfileSummary() {
   };
 }
 
+// Failures reaching the UI carry messages written for people ("Sign in
+// required.") as often as messages written for logs ("Request failed with
+// HTTP 502.", "Failed to fetch"). Pass the human ones through and swap the
+// technical ones for a friendly fallback.
+function friendlyServiceMessage(error, fallback) {
+  const message = String(error?.message || "").trim();
+  if (!message) return fallback;
+  if (/HTTP\s*\d{3}/i.test(message)) return fallback;
+  if (/^(failed to fetch|load failed|networkerror|typeerror|the operation was aborted)/i.test(message)) return fallback;
+  return message;
+}
+
 async function checkOpenAIHealth(options = {}) {
   state.openAI.status = "Checking coach...";
   state.openAI.online = false;
@@ -2516,7 +2528,7 @@ async function checkOpenAIHealth(options = {}) {
     state.openAI.online = false;
     state.openAI.model = "";
     state.featureFlags.remoteHistoryEraseEnabled = false;
-    state.openAI.status = error.message || "Could not reach the server. Check your connection and try again.";
+    state.openAI.status = friendlyServiceMessage(error, "Could not reach the server. Check your connection and try again.");
   }
 
   if (options.render !== false) {
@@ -2756,7 +2768,7 @@ async function performCoachChat(event, moment) {
   } catch (error) {
     state.coachThinking = false;
     removeStreamingBubble();
-    const message = error.message || "Coach request failed.";
+    const message = friendlyServiceMessage(error, "The coach couldn't respond. Try again in a moment.");
     state.coachError = message;
     // A hard failure means the "Online" badge is stale — reflect reality so
     // the Services card stops claiming the coach works. Rate limiting and
@@ -3144,7 +3156,7 @@ function renderDeepAnalysisStatus() {
   return `
     <article class="mini-card deep-analysis-card">
       <span class="label">Deep review</span>
-      <p>Re-checking your moves at depth ${DEEP_ANALYSIS_DEPTH}: ${deep.done}/${deep.total} done. Badges sharpen as it goes.</p>
+      <p>Double-checking your moves with deeper analysis: ${deep.done}/${deep.total} done. Badges sharpen as it goes.</p>
     </article>
   `;
 }
@@ -3310,11 +3322,11 @@ function renderReviewPanel() {
   const turningPointHtml = turningPoints.length ? `
     <article class="mini-card">
       <strong>Turning points</strong>
-      <p>Your biggest centipawn drops this game.</p>
+      <p>The moments where the game swung most against you.</p>
       <div class="candidate-list">
         ${turningPoints.map((point) => `
           <button type="button" class="candidate turning-point" data-ply="${point.ply}">
-            ${point.ply}. ${escapeHtml(point.san)} <span class="move-eval">-${point.evalDelta}cp</span>
+            ${point.ply}. ${escapeHtml(point.san)} <span class="move-eval">-${formatPawns(point.evalDelta)}</span>
           </button>
         `).join("")}
       </div>
@@ -3405,7 +3417,7 @@ function renderReviewBoardCard(move, boardFen) {
 
   return `
     <article class="mini-card review-board-card">
-      <span class="label">Move view${quality ? ` · ${escapeHtml(quality.label)}` : move.evalDelta ? ` · -${move.evalDelta}cp` : ""}</span>
+      <span class="label">Move view${quality ? ` · ${escapeHtml(quality.label)}` : formatEvalDelta(move) ? ` · ${formatEvalDelta(move)}` : ""}</span>
       <div class="review-board-grid">
         <div class="review-board-panel">
           <span class="label">Played ${escapeHtml(move.ply)}. ${escapeHtml(move.san)}</span>
@@ -3450,7 +3462,7 @@ function renderSelectedMoveAnalysis(move) {
       <article class="mini-card">
         <span class="label">${quality ? "Move quality" : "Engine analysis"}</span>
         <strong>${quality ? escapeHtml(quality.label) : "Unavailable"}</strong>
-        <p>${escapeHtml(quality?.reason || "The engine was not available for this move, so the review is using quick heuristics only.")}</p>
+        <p>${escapeHtml(quality?.reason || "The engine was not available for this move, so the review is using quick estimates only.")}</p>
       </article>
     `;
   }
@@ -3465,8 +3477,8 @@ function renderSelectedMoveAnalysis(move) {
 
   return `
     <article class="mini-card">
-      <span class="label">Engine analysis${move.engineDepth ? ` · depth ${move.engineDepth}` : ""}</span>
-      <strong>${quality ? escapeHtml(quality.label) : formatEvalDelta(move) || "No centipawn loss"}</strong>
+      <span class="label">Engine analysis</span>
+      <strong>${quality ? escapeHtml(quality.label) : formatEvalDelta(move) || "No advantage lost"}</strong>
       <p>${escapeHtml(quality ? `${quality.reason} ${bestText}` : bestText)}</p>
       <div class="candidate-list">
         <span class="candidate">Before ${escapeHtml(formatEngineScore(move.evalBefore, move.mateBefore))}</span>
@@ -3475,7 +3487,7 @@ function renderSelectedMoveAnalysis(move) {
       ${pv ? `
         <div class="candidate-list coach-candidates">
           <div class="candidate-row">
-            <strong>PV</strong>
+            <strong>Engine line</strong>
             <span>${escapeHtml(pv)}</span>
           </div>
         </div>
@@ -3487,10 +3499,20 @@ function renderSelectedMoveAnalysis(move) {
   `;
 }
 
+// Engine scores are centipawns internally; players see pawn units ("+1.5"),
+// the same convention chess sites use.
+function formatPawns(cp) {
+  return (Math.abs(cp) / 100).toFixed(1);
+}
+
 function formatEngineScore(scoreCp, mate) {
-  if (typeof mate === "number") return mate > 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
-  if (typeof scoreCp === "number") return `${scoreCp > 0 ? "+" : ""}${scoreCp}cp`;
-  return "n/a";
+  if (typeof mate === "number") {
+    return mate > 0 ? `Mate in ${mate}` : `Mate in ${Math.abs(mate)} against you`;
+  }
+  if (typeof scoreCp === "number") {
+    return `${scoreCp > 0 ? "+" : scoreCp < 0 ? "-" : ""}${formatPawns(scoreCp)}`;
+  }
+  return "—";
 }
 
 function formatPrincipalVariation(fen, pv) {
@@ -3676,7 +3698,7 @@ function getReviewTurningPoints() {
 
 function formatEvalDelta(move) {
   if (typeof move.evalDelta !== "number" || move.evalDelta < 50) return "";
-  return `-${move.evalDelta}cp`;
+  return `-${formatPawns(move.evalDelta)}`;
 }
 
 function reviewClassClass(classification) {
@@ -4362,7 +4384,7 @@ function renderWeaknessLabsSection() {
     const counts = getSkillLabCounts(skill);
     return `
       <article class="practice-card">
-        <span class="label">${skill.priority > 0 ? `Recommended · priority ${skill.priority}` : "Skill"}</span>
+        <span class="label">${skill.priority > 0 ? "Recommended focus" : "Skill"}</span>
         <strong>${escapeHtml(skill.label)}</strong>
         <p>${escapeHtml(skill.summary)}</p>
         <div class="button-row">
@@ -4761,7 +4783,6 @@ function renderAppearanceCards() {
     <article class="mini-card">
       <strong>Pieces</strong>
       <div class="piece-set-grid">${setOptions}</div>
-      <p class="empty-state">Custom sets: drop 12 SVGs into vendor/pieces/&lt;name&gt;/ (validate with scripts/check-piece-set.mjs) and restart the server.</p>
     </article>
   `;
 }
@@ -6829,7 +6850,7 @@ async function completeGameWithResult(result) {
   await syncGameEnd(result);
 
   if (wasCalibrating && isCalibrationComplete()) {
-    pushChatMessage("assistant", `Good — that's all I needed. I've set your starting level around ${state.calibration.estimatedScore || "your play"}. From here I'll talk with you during games and everything adapts to how you actually play. Ready when you are.`);
+    pushChatMessage("assistant", `Nice — first game done. I've set your starting level around ${state.calibration.estimatedScore || "your play"}. From here I'll chat with you during games and everything adapts to how you play. Ready when you are.`);
     if (state.currentTab === "coach") renderCoachPanel();
   } else if (isCalibrationComplete() && coachModeAllows("postgame")) {
     const moments = selectKeyMoments(state.moves);
@@ -6948,7 +6969,7 @@ function dismissBootVeil() {
 async function initAuthClient() {
   const config = state.server.supabaseAuth;
   if (!config?.url || !config?.publishableKey) {
-    state.auth.error = "The server did not provide sign-in configuration.";
+    state.auth.error = "Sign-in isn't available right now. Try again shortly.";
     return false;
   }
 
@@ -6959,7 +6980,7 @@ async function initAuthClient() {
     });
   } catch (error) {
     console.warn("Auth client could not load", error);
-    state.auth.error = "Could not load the sign-in module. Check your connection and reload.";
+    state.auth.error = "Sign-in couldn't load. Check your connection and try again.";
     return false;
   }
 
@@ -7442,7 +7463,7 @@ async function exportAccountData() {
     URL.revokeObjectURL(url);
     state.account = { busy: false, status: "Export downloaded.", error: "" };
   } catch (error) {
-    state.account = { busy: false, status: "", error: error.message || "Export failed." };
+    state.account = { busy: false, status: "", error: friendlyServiceMessage(error, "Export didn't go through. Try again in a moment.") };
   }
   renderSettingsPanel();
 }
@@ -7493,7 +7514,7 @@ async function verifyCloudSync(options = {}) {
   if (saved) {
     state.sync.health = "Cloud sync is online and writable.";
   } else if (state.sync.health === "Testing cloud sync...") {
-    state.sync.health = "Cloud sync failed. Check the server logs.";
+    state.sync.health = "Cloud sync isn't responding right now. Try again in a moment.";
   }
   if (options.render !== false) renderAll();
   return saved;
@@ -7839,7 +7860,7 @@ async function eraseRemoteHistory() {
     state.historyErase = {
       busy: false,
       status: "",
-      error: error.message || "History erase failed.",
+      error: friendlyServiceMessage(error, "History erase didn't go through. Try again in a moment."),
     };
     state.sync.health = `Cloud history erase failed: ${state.historyErase.error}`;
   }
