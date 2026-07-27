@@ -25,9 +25,12 @@ import { ACTIVE_MATE_POSITIONS, getMatePositionById, matesByRung, isRungUnlocked
 import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrade, selectDue, nextDueLabel } from "./lib/srs.mjs";
 import { normalizePackPuzzle, ratingBandForScore, selectRatedPuzzle } from "./lib/puzzle-packs.mjs";
 import { COACH_PERSONAS, normalizePersonaKey } from "./lib/personas.mjs";
+import { coachModeAllows as coachModeAllowsForMode } from "./lib/coach-mode.mjs";
 
 const PIECE_SPRITE_ROOT = "/vendor/pieces/";
 const DEFAULT_PIECE_SET = "merida";
+// Single source of truth for the version shown in the rail footer.
+const APP_VERSION = "0.7";
 
 // Board palettes: keys map to [data-board-theme] blocks in styles.css; the
 // swatch colors here only draw the Settings previews.
@@ -167,51 +170,6 @@ const LEGACY_STORAGE_KEYS = {
   placementCardDismissed: "chess_teacher_placement_card_dismissed_v1",
 };
 
-const STARTER_LESSONS = [
-  {
-    id: "loose-pieces",
-    title: "Loose pieces",
-    category: "hanging_piece",
-    summary: "Check which pieces are attacked and which pieces are not defended before choosing a plan.",
-    concepts: ["undefended pieces", "captures", "candidate moves"],
-  },
-  {
-    id: "checks-captures-threats",
-    title: "Checks, captures, threats",
-    category: "candidate_moves",
-    summary: "Look at forcing moves first so tactics are not missed during quiet positions.",
-    concepts: ["checks", "captures", "threats"],
-  },
-  {
-    id: "opening-principles",
-    title: "Opening principles",
-    category: "opening_principle",
-    summary: "Fight for the center, develop pieces once, and castle before starting side operations.",
-    concepts: ["center", "development", "castling"],
-  },
-  {
-    id: "king-safety",
-    title: "King safety",
-    category: "king_safety",
-    summary: "Treat exposed kings and weakened shelter as tactical liabilities.",
-    concepts: ["castling", "king shelter", "open files"],
-  },
-  {
-    id: "trade-quality",
-    title: "Trade quality",
-    category: "poor_trade",
-    summary: "Before capturing, calculate the recapture and compare what remains on the board.",
-    concepts: ["recapture", "piece value", "simplification"],
-  },
-  {
-    id: "candidate-moves",
-    title: "Candidate moves",
-    category: "candidate_moves",
-    summary: "Build a short list of forcing moves, improving moves, and opponent threats before moving.",
-    concepts: ["checks", "captures", "threats", "worst piece"],
-  },
-];
-
 const LESSON_GUIDES = {
   hanging_piece: {
     why: "Most tactics start because a piece is undefended or overloaded. Before calculating a long line, identify what can be taken safely.",
@@ -240,84 +198,46 @@ const LESSON_GUIDES = {
   },
 };
 
-const TRAINING_MODULES = [
+const OPENING_BOOK = [
   {
-    id: "scholars-mate-line",
-    title: "Four-move checkmate",
-    type: "Opening trap",
-    category: "candidate_moves",
-    playerColor: "w",
-    fen: "start",
-    objective: "Practice the Scholar's Mate pattern as a forcing line.",
-    steps: [
-      { move: "e2e4", reply: "e7e5", idea: "Open lines for the queen and bishop." },
-      { move: "f1c4", reply: "b8c6", idea: "Aim the bishop at f7, the weakest pawn near Black's king." },
-      { move: "d1h5", reply: "g8f6", idea: "Create a direct threat on f7." },
-      { move: "h5f7", reply: null, idea: "Qxf7# works because the bishop supports the queen." },
-    ],
+    name: "Ruy Lopez",
+    moves: ["e4", "e5", "Nf3", "Nc6", "Bb5"],
+    plans: ["Castle quickly", "Build pressure on e5", "Prepare c3 and d4"],
   },
   {
-    id: "defend-scholars-mate",
-    title: "Defend four-move checkmate",
-    type: "Opening defense",
-    category: "king_safety",
-    playerColor: "b",
-    fen: "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 1 2",
-    objective: "Stop the early queen attack before it becomes mate on f7.",
-    expectedMoves: ["g7g6", "b8c6"],
-    successText: "Good. You either attacked the queen or defended the e5/f7 problem.",
+    name: "Italian Game",
+    moves: ["e4", "e5", "Nf3", "Nc6", "Bc4"],
+    plans: ["Castle quickly", "Prepare c3 and d4", "Watch tactics on f7"],
   },
   {
-    id: "queen-king-mate",
-    title: "Queen and king checkmate",
-    type: "Checkmate",
-    category: "candidate_moves",
-    playerColor: "w",
-    fen: "6k1/8/6K1/8/8/8/8/5Q2 w - - 0 1",
-    objective: "Finish the basic queen mate with king support.",
-    expectedMoves: ["f1f7"],
-    successText: "Qf7# works because your king protects the queen and the queen controls g8.",
+    name: "Scotch Game",
+    moves: ["e4", "e5", "Nf3", "Nc6", "d4"],
+    plans: ["Open the center", "Develop with tempo", "Avoid early queen exposure"],
   },
   {
-    id: "back-rank-mate",
-    title: "Back-rank mate",
-    type: "Checkmate",
-    category: "candidate_moves",
-    playerColor: "w",
-    fen: "4r1k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1",
-    objective: "Use the back rank weakness to force mate.",
-    expectedMoves: ["e1e8"],
-    successText: "Rxe8# works because the king's own pawns remove its escape squares.",
+    name: "Queen's Gambit",
+    moves: ["d4", "d5", "c4"],
+    plans: ["Pressure the center", "Develop smoothly", "Use the c-file later"],
   },
   {
-    id: "italian-development",
-    title: "Italian Game development",
-    type: "Opening",
-    category: "opening_principle",
-    playerColor: "w",
-    fen: "start",
-    objective: "Practice a clean opening setup: center, knight, bishop, castle.",
-    steps: [
-      { move: "e2e4", reply: "e7e5", idea: "Take central space." },
-      { move: "g1f3", reply: "b8c6", idea: "Develop while attacking e5." },
-      { move: "f1c4", reply: "g8f6", idea: "Develop toward the king side." },
-      { move: "e1g1", reply: null, idea: "Castle before starting side attacks." },
-    ],
+    name: "London System",
+    moves: ["d4", "d5", "Bf4"],
+    plans: ["Support e5", "Develop the kingside", "Avoid autopilot piece placement"],
   },
   {
-    id: "queens-gambit-development",
-    title: "Queen's Gambit development",
-    type: "Opening",
-    category: "opening_principle",
-    playerColor: "w",
-    fen: "start",
-    objective: "Practice the first moves and the development plan behind the Queen's Gambit.",
-    steps: [
-      { move: "d2d4", reply: "d7d5", idea: "Claim central space." },
-      { move: "c2c4", reply: "e7e6", idea: "Pressure Black's center." },
-      { move: "b1c3", reply: "g8f6", idea: "Develop and support d5 pressure." },
-      { move: "c1g5", reply: null, idea: "Develop with pressure on the knight." },
-    ],
+    name: "Sicilian Defense",
+    moves: ["e4", "c5"],
+    plans: ["Control d4", "Watch tactics on the c-file", "Balance development with counterplay"],
+  },
+  {
+    name: "French Defense",
+    moves: ["e4", "e6"],
+    plans: ["Challenge the center with d5", "Solve the light bishop", "Attack pawn chains"],
+  },
+  {
+    name: "Caro-Kann Defense",
+    moves: ["e4", "c6"],
+    plans: ["Challenge e4 with d5", "Develop before pawn grabs", "Aim for solid structure"],
   },
 ];
 
@@ -529,127 +449,15 @@ const CURATED_PRACTICE_PUZZLES = [
   },
 ];
 
-const INTERACTIVE_LESSONS = {
-  "loose-pieces": {
-    id: "lesson-loose-pieces",
-    title: "Loose pieces",
-    type: "Lesson",
-    category: "hanging_piece",
-    playerColor: "w",
-    fen: "4k3/4q3/8/8/8/8/8/4R1K1 w - - 0 1",
-    objective: "Your rook is lined up with an undefended queen. Win the loose piece and notice why it works.",
-    expectedMoves: ["e1e7"],
-    successText: "Good. Rxe7+ wins the undefended queen because the rook has a clear file and gives check.",
-  },
-  "checks-captures-threats": {
-    id: "lesson-checks-captures-threats",
-    title: "Checks, captures, threats",
-    type: "Lesson",
-    category: "candidate_moves",
-    playerColor: "w",
-    fen: "4r1k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1",
-    objective: "Start with forcing moves. White has a check that is also a capture and mate.",
-    expectedMoves: ["e1e8"],
-    successText: "Correct. Rxe8# is the forcing move: check, capture, and mate because the king has no escape squares.",
-  },
-  "opening-principles": {
-    id: "lesson-opening-principles",
-    title: "Opening principles",
-    type: "Lesson",
-    category: "opening_principle",
-    playerColor: "w",
-    fen: "start",
-    objective: "Build a clean opening: center, knight, bishop, castle.",
-    steps: [
-      { move: "e2e4", reply: "e7e5", idea: "Take central space first." },
-      { move: "g1f3", reply: "b8c6", idea: "Develop a knight while attacking e5." },
-      { move: "f1c4", reply: "g8f6", idea: "Develop the bishop toward the king side." },
-      { move: "e1g1", reply: null, idea: "Castle before starting side attacks." },
-    ],
-  },
-  "king-safety": {
-    id: "lesson-king-safety",
-    title: "King safety",
-    type: "Lesson",
-    category: "king_safety",
-    playerColor: "b",
-    fen: "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 1 2",
-    objective: "White is aiming at f7. Stop the attack instead of making a random developing move.",
-    expectedMoves: ["g7g6", "b8c6"],
-    successText: "Good. You either hit the queen or defend the key square before the attack becomes mate.",
-  },
-  "trade-quality": {
-    id: "lesson-trade-quality",
-    title: "Trade quality",
-    type: "Lesson",
-    category: "poor_trade",
-    playerColor: "w",
-    fen: "4k3/8/8/3q4/3R4/8/8/4K3 w - - 0 1",
-    objective: "Before trading, count the final position. Here the capture wins the queen cleanly.",
-    expectedMoves: ["d4d5"],
-    successText: "Correct. Rxd5 wins the queen. The key habit is calculating what remains after the capture.",
-  },
-  "candidate-moves": {
-    id: "lesson-candidate-moves",
-    title: "Candidate moves",
-    type: "Lesson",
-    category: "candidate_moves",
-    playerColor: "w",
-    fen: "6k1/5ppp/8/8/8/8/5PPP/5RK1 w - - 0 1",
-    objective: "Compare checks, captures, and threats. There is a direct mate pattern available.",
-    expectedMoves: ["f1e1"],
-    successText: "Good. Re1 creates a back-rank mating pattern. Candidate moves reveal forcing ideas before quiet moves.",
-  },
-};
-
-const OPENING_BOOK = [
-  {
-    name: "Ruy Lopez",
-    moves: ["e4", "e5", "Nf3", "Nc6", "Bb5"],
-    plans: ["Castle quickly", "Build pressure on e5", "Prepare c3 and d4"],
-  },
-  {
-    name: "Italian Game",
-    moves: ["e4", "e5", "Nf3", "Nc6", "Bc4"],
-    plans: ["Castle quickly", "Prepare c3 and d4", "Watch tactics on f7"],
-  },
-  {
-    name: "Scotch Game",
-    moves: ["e4", "e5", "Nf3", "Nc6", "d4"],
-    plans: ["Open the center", "Develop with tempo", "Avoid early queen exposure"],
-  },
-  {
-    name: "Queen's Gambit",
-    moves: ["d4", "d5", "c4"],
-    plans: ["Pressure the center", "Develop smoothly", "Use the c-file later"],
-  },
-  {
-    name: "London System",
-    moves: ["d4", "d5", "Bf4"],
-    plans: ["Support e5", "Develop the kingside", "Avoid autopilot piece placement"],
-  },
-  {
-    name: "Sicilian Defense",
-    moves: ["e4", "c5"],
-    plans: ["Control d4", "Watch tactics on the c-file", "Balance development with counterplay"],
-  },
-  {
-    name: "French Defense",
-    moves: ["e4", "e6"],
-    plans: ["Challenge the center with d5", "Solve the light bishop", "Attack pawn chains"],
-  },
-  {
-    name: "Caro-Kann Defense",
-    moves: ["e4", "c6"],
-    plans: ["Challenge e4 with d5", "Develop before pawn grabs", "Aim for solid structure"],
-  },
-];
-
 const DEFAULT_SETTINGS = {
   displayName: "You",
   playerColor: "w",
   engineDepth: 5,
-  coachMode: "post_game",
+  coachMode: "hints",
+  // Older builds ignored coachMode entirely, so persisted values don't
+  // reflect a deliberate choice. This flag marks settings written after the
+  // setting became functional (see boot()).
+  coachModeV2: true,
   showBestArrow: true,
   showEvalBar: true,
   soundEnabled: true,
@@ -825,6 +633,7 @@ const state = {
     error: "",
   },
   engine: null,
+  engineFallback: false,
 };
 
 // Storage-backed state, re-read whenever the storage namespace changes.
@@ -1107,6 +916,7 @@ function renderAll() {
   }
   renderBoard();
   renderGameMeta();
+  renderClocks();
   renderCurrentPanel();
   saveJson(STORAGE_KEYS.settings, state.settings);
   saveJson(STORAGE_KEYS.profile, state.profile);
@@ -1254,11 +1064,17 @@ function getActiveBoardArrows() {
   const latest = getLatestPlayerMove();
   if (!latest) return arrows;
   if (state.currentTab === "review") {
-    // In Review, show a comparison for the selected move: played + best.
+    // In Review, show a comparison for the selected move: played + best —
+    // but only when the big board actually displays the position that move
+    // was played in (the latest one). For earlier plies the main board still
+    // shows the final position, so arrows there would point at squares
+    // occupied by entirely different pieces.
     const selected = state.reviewPly != null
       ? state.moves.find((move) => move.ply === state.reviewPly)
       : null;
     const focus = selected?.role === "player" ? selected : latest;
+    const lastPly = state.moves.length ? state.moves[state.moves.length - 1].ply : null;
+    if (focus?.ply !== lastPly && selected) return arrows;
     if (focus?.uci) arrows.push({ from: focus.uci.slice(0, 2), to: focus.uci.slice(2, 4), kind: "played" });
     if (focus?.bestMoveUci && focus.bestMoveUci !== focus.uci) {
       arrows.push({ ...uciToArrow(focus.bestMoveUci, "best") });
@@ -1350,11 +1166,12 @@ function getOpponentSeatLabels() {
     }
     return { name: "Training Board", sub: state.activeDrill.type || "Drill" };
   }
+  const fallbackSuffix = state.engineFallback && !state.engine ? " · simplified engine" : "";
   if (!isCalibrationComplete()) {
-    return { name: "Calibration MoBot", sub: "First game · finding your level" };
+    return { name: "Calibration MoBot", sub: `First game · finding your level${fallbackSuffix}` };
   }
   const score = getEstimatedTrainingScore();
-  return { name: "Adaptive MoBot", sub: score ? `Adaptive · score ${score}` : "Adaptive" };
+  return { name: "Adaptive MoBot", sub: `${score ? `Adaptive · score ${score}` : "Adaptive"}${fallbackSuffix}` };
 }
 
 function sortCapturedPieces(pieces) {
@@ -1456,6 +1273,15 @@ function getRequiredServiceRows() {
         ? `Online${state.openAI.model ? ` with ${state.openAI.model}` : ""}.`
         : state.openAI.status || "OpenAI must be configured and reachable.",
     },
+    {
+      name: "Chess engine",
+      ready: Boolean(state.engine),
+      detail: state.engine
+        ? "Stockfish is running in your browser."
+        : state.engineFallback
+          ? "Stockfish failed to load — you're facing a simplified opponent and move review uses heuristics only. Reload to retry."
+          : "Loading Stockfish...",
+    },
   ];
 }
 
@@ -1542,11 +1368,11 @@ function renderGameMeta() {
   }
   if (els.playerCaptureTray) {
     els.playerCaptureTray.classList.toggle("empty", captures.player.length === 0);
-    els.playerCaptureTray.innerHTML = renderCapturedTray("You captured", captures.player, materialBalance > 0 ? `+${materialBalance}` : "");
+    setTrayContent(els.playerCaptureTray, renderCapturedTray("You captured", captures.player, materialBalance > 0 ? `+${materialBalance}` : ""));
   }
   if (els.opponentCaptureTray) {
     els.opponentCaptureTray.classList.toggle("empty", captures.opponent.length === 0);
-    els.opponentCaptureTray.innerHTML = renderCapturedTray("They captured", captures.opponent, materialBalance < 0 ? `+${Math.abs(materialBalance)}` : "");
+    setTrayContent(els.opponentCaptureTray, renderCapturedTray("They captured", captures.opponent, materialBalance < 0 ? `+${Math.abs(materialBalance)}` : ""));
   }
 
   // Seat turn indicator
@@ -1613,6 +1439,15 @@ function renderCurrentPanel() {
   if (state.currentTab === "settings") renderSettingsPanel();
 }
 
+// The capture trays are aria-live regions: rewriting identical markup on
+// every render makes screen readers re-announce "You captured …" after every
+// move. Only touch the DOM when the content actually changed.
+function setTrayContent(tray, html) {
+  if (tray.dataset.sig === html) return;
+  tray.dataset.sig = html;
+  tray.innerHTML = html;
+}
+
 function renderCoachPanel() {
   if (state.activeDrill) {
     if (isPracticeTrainerDrill()) {
@@ -1668,14 +1503,16 @@ function renderCoachPanel() {
     return;
   }
 
+  const draft = captureChatDraft();
   els.coachPanel.innerHTML = `
     <h2>Coach</h2>
     <div class="coach-chat">
       ${renderCoachOfflineBanner()}
       ${renderRethinkCard()}
-      <div class="coach-chat-log" id="coachChatLog" aria-live="polite">
+      <div class="coach-chat-log" id="coachChatLog">
         ${renderChatMessages()}
       </div>
+      <div id="coachChatAnnouncer" class="visually-hidden" aria-live="polite"></div>
       <form class="coach-chat-form" id="coachChatForm">
         <input
           id="coachChatInput"
@@ -1689,26 +1526,108 @@ function renderCoachPanel() {
     </div>
   `;
   bindCoachChat();
+  restoreChatDraft(draft);
+  announceLatestCoachMessage();
   scrollChatToBottom();
 }
 
 function renderChatMessages() {
   const messages = getCurrentChatMessages();
-  if (!messages.length) {
-    return `<p class="empty-state coach-chat-empty">I'm here for the whole game — I'll speak up at important moments, and you can ask me anything: plans, threats, what to study.</p>`;
-  }
-  const rows = messages.map((message) => `
-    <div class="chat-message ${message.role === "user" ? "from-user" : "from-coach"} ${message.isQuestion ? "coach-question" : ""}">
-      ${escapeHtml(message.content)}
-    </div>
-  `).join("");
-  const thinking = state.coachThinking
+  // IMPORTANT: bubbles use `white-space: pre-wrap`, so this markup must not
+  // contain any incidental template whitespace — it would render as phantom
+  // padding inside every bubble.
+  const rows = messages.map(chatBubbleHtml).join("");
+  const streamingHasContent = messages.some((message) => message.streaming && message.content);
+  const thinking = state.coachThinking && !streamingHasContent
     ? '<div class="chat-message from-coach chat-thinking"><span></span><span></span><span></span></div>'
     : "";
   const error = state.coachError
     ? `<div class="chat-message chat-error">${escapeHtml(state.coachError)}</div>`
     : "";
+  if (!rows && !thinking && !error) {
+    return `<p class="empty-state coach-chat-empty">I'm here for the whole game — I'll speak up at important moments, and you can ask me anything: plans, threats, what to study.</p>`;
+  }
   return rows + thinking + error;
+}
+
+function chatBubbleHtml(message) {
+  if (message.kind === "divider") {
+    return `<div class="chat-divider"><span>${escapeHtml(message.content || "New game")}</span></div>`;
+  }
+  // An empty in-flight bubble would render as a bare pill; the thinking dots
+  // cover that phase until the first streamed delta arrives.
+  if (message.streaming && !message.content) return "";
+  const classes = ["chat-message", message.role === "user" ? "from-user" : "from-coach"];
+  if (message.isQuestion) classes.push("coach-question");
+  return `<div class="${classes.join(" ")}"${message.streaming ? ` data-streaming="${escapeAttr(message.streaming)}"` : ""}>${escapeHtml(message.content)}</div>`;
+}
+
+function captureChatDraft() {
+  const input = document.querySelector("#coachChatInput");
+  if (!input) return null;
+  return {
+    value: input.value,
+    focused: document.activeElement === input,
+    start: input.selectionStart,
+    end: input.selectionEnd,
+  };
+}
+
+function restoreChatDraft(draft) {
+  if (!draft || (!draft.value && !draft.focused)) return;
+  const input = document.querySelector("#coachChatInput");
+  if (!input) return;
+  input.value = draft.value;
+  if (draft.focused) {
+    input.focus();
+    try {
+      input.setSelectionRange(draft.start, draft.end);
+    } catch {
+      /* selection restore is best-effort */
+    }
+  }
+}
+
+// Screen-reader announcements: the chat log itself is NOT a live region
+// (innerHTML repaints would re-announce the whole transcript). Instead, the
+// latest completed coach message is mirrored once into a hidden announcer.
+let lastAnnouncedChatAt = "";
+
+function announceLatestCoachMessage() {
+  const announcer = document.querySelector("#coachChatAnnouncer");
+  if (!announcer) return;
+  const messages = getCurrentChatMessages();
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.kind || message.streaming) continue;
+    if (message.role !== "assistant") return;
+    if (message.at === lastAnnouncedChatAt) return;
+    lastAnnouncedChatAt = message.at;
+    announcer.textContent = message.content;
+    return;
+  }
+}
+
+// Targeted chat update: repaints the log and form state without rebuilding
+// the whole panel, so an in-progress draft (and its caret) is never touched.
+function renderChatLog() {
+  if (state.currentTab !== "coach") return;
+  const log = document.querySelector("#coachChatLog");
+  if (!log) {
+    renderCoachPanel();
+    return;
+  }
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  log.innerHTML = renderChatMessages();
+  announceLatestCoachMessage();
+  const form = document.querySelector("#coachChatForm");
+  if (form) {
+    const button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = !(isCoachAvailable() && !state.coachThinking);
+    const input = form.querySelector("input");
+    if (input) input.placeholder = state.pendingCoachQuestion ? "Answer the coach..." : "Ask your coach anything...";
+  }
+  if (nearBottom) log.scrollTop = log.scrollHeight;
 }
 
 function scrollChatToBottom() {
@@ -1728,41 +1647,9 @@ function bindCoachChat() {
   bindRethinkCard();
 }
 
-function renderSkillFocusCard() {
-  if (!isCalibrationComplete()) return "";
-  const focus = getNextTrainingFocus();
-  if (!focus) return "";
-  const skill = getSkillById(focus.skillId);
-  if (!skill) return "";
-  const counts = getSkillLabCounts(skill);
-  return `
-    <article class="mini-card skill-focus-card">
-      <span class="label">Today's skill focus</span>
-      <strong>${escapeHtml(skill.label)}</strong>
-      <p>${escapeHtml(focus.reason)}</p>
-      <div class="tag-list">
-        <span class="tag">${escapeHtml(formatCountLabel(counts.focus, "focus board", "focus boards"))}</span>
-        <span class="tag">${escapeHtml(formatCountLabel(counts.game_transfer, "from your game", "from your games"))}</span>
-      </div>
-      <div class="button-row">
-        <button class="primary-action" type="button" data-open-skill-lab="${escapeAttr(skill.id)}">Open skill lab</button>
-        <button type="button" data-start-focus-lab="${escapeAttr(skill.id)}">Start focus board</button>
-      </div>
-    </article>
-  `;
-}
-
-function bindSkillFocusButtons(root = document) {
-  root.querySelectorAll("[data-open-skill-lab]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedSkillId = button.dataset.openSkillLab;
-      switchTab("practice");
-    });
-  });
-  root.querySelectorAll("[data-start-focus-lab]").forEach((button) => {
-    button.addEventListener("click", () => startSkillLab(button.dataset.startFocusLab, "focus"));
-  });
-}
+// ("Today's skill focus" card removed here: it had regressed into
+// unreachable dead code. Phase 2's coach action buttons reintroduce the
+// skill-focus handoff properly.)
 
 function renderPositionBriefCard() {
   const brief = getPositionBrief();
@@ -2214,16 +2101,6 @@ function prioritizeSkills() {
     .sort((a, b) => b.priority - a.priority || a.label.localeCompare(b.label));
 }
 
-function prioritizeTrainingModules() {
-  return TRAINING_MODULES
-    .map((module) => ({
-      ...module,
-      priority: getCategoryPriority(module.category),
-      reason: getSkillPriorityReason(getSkillForCategory(module.category)),
-    }))
-    .sort((a, b) => b.priority - a.priority || a.title.localeCompare(b.title));
-}
-
 function getNextTrainingFocus() {
   const skills = prioritizeSkills();
   const top = skills[0];
@@ -2330,7 +2207,11 @@ function ensureSkillState() {
 }
 
 function updateSkillFromMove(record) {
-  if (!record || record.role !== "player" || state.activeDrill) return;
+  // Records are only ever created for real games (drill moves never reach
+  // recordMove), so gate on the record itself — checking state.activeDrill
+  // here would silently drop a live-game move whose grade happened to
+  // resolve while a drill owned the board.
+  if (!record || record.role !== "player") return;
   const skill = ensureSkillState();
   applyMoveToSkillState(skill, {
     phase: getPhase(record.beforeFen || state.game.fen()),
@@ -2546,40 +2427,6 @@ function getProfileSummary() {
   };
 }
 
-function addPracticeFromLesson(lessonId) {
-  const lesson = STARTER_LESSONS.find((item) => item.id === lessonId);
-  if (!lesson) return;
-
-  const candidates = rankCandidateMoves(state.game.fen()).slice(0, 3).map((candidate) => ({
-    san: candidate.san,
-    uci: `${candidate.from}${candidate.to}${candidate.promotion || ""}`,
-  }));
-
-  const guide = LESSON_GUIDES[lesson.category] || LESSON_GUIDES.candidate_moves;
-  const skill = getSkillForCategory(lesson.category);
-  const item = {
-    id: crypto.randomUUID(),
-    sourceKey: `${state.game.fen()}|lesson|${lesson.id}`,
-    gameId: state.currentGameId,
-    moveId: null,
-    fen: state.game.fen(),
-    title: lesson.title,
-    category: lesson.category,
-    skillId: skill?.id || "",
-    labMode: "focus",
-    prompt: guide.drill,
-    candidates,
-    createdAt: new Date().toISOString(),
-  };
-
-  const exists = state.practiceQueue.some((entry) => entry.sourceKey === item.sourceKey);
-  state.practiceQueue = exists
-    ? state.practiceQueue
-    : [item, ...state.practiceQueue].slice(0, 50);
-  saveJson(STORAGE_KEYS.practice, state.practiceQueue);
-  switchTab("practice");
-}
-
 async function checkOpenAIHealth(options = {}) {
   state.openAI.status = "Checking OpenAI coach...";
   state.openAI.online = false;
@@ -2641,17 +2488,51 @@ async function verifyRequiredServices() {
 
 // ─────────── Conversational coach ───────────
 
+const CHAT_HISTORY_LIMIT = 80;
+
+// Adds (or relabels) a divider row marking a game boundary in the transcript.
+function appendChatDivider(label) {
+  const messages = Array.isArray(state.coachChat.messages) ? state.coachChat.messages : [];
+  const last = messages[messages.length - 1];
+  if (last?.kind === "divider") {
+    last.content = label;
+  } else if (messages.length) {
+    messages.push({ kind: "divider", role: "system", content: label, at: new Date().toISOString() });
+  }
+  state.coachChat.messages = messages.slice(-CHAT_HISTORY_LIMIT);
+}
+
 function getCurrentChatMessages() {
   if (state.coachChat.gameId !== state.currentGameId) {
-    state.coachChat = { gameId: state.currentGameId, messages: [] };
+    // Keep the visible transcript across games — a divider marks the boundary
+    // instead of wiping the history the player may still want to re-read.
+    appendChatDivider("New game");
+    state.coachChat.gameId = state.currentGameId;
+    persistCoachChat();
   }
+  if (!Array.isArray(state.coachChat.messages)) state.coachChat.messages = [];
   return state.coachChat.messages;
+}
+
+// Only the current game's turns go to the model: everything after the last
+// divider. Older games stay visible in the UI but out of the LLM context.
+function currentGameChatTurns() {
+  const messages = getCurrentChatMessages();
+  let start = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].kind === "divider") {
+      start = i + 1;
+      break;
+    }
+  }
+  return messages.slice(start).filter((message) => !message.kind);
 }
 
 function pushChatMessage(role, content, options = {}) {
   const messages = getCurrentChatMessages();
   messages.push({ role, content, isQuestion: Boolean(options.isQuestion), at: new Date().toISOString() });
-  saveJson(STORAGE_KEYS.coachChat, state.coachChat);
+  if (messages.length > CHAT_HISTORY_LIMIT) messages.splice(0, messages.length - CHAT_HISTORY_LIMIT);
+  persistCoachChat();
 }
 
 function saveCoachMemory() {
@@ -2687,7 +2568,7 @@ function buildChatPayload(event, moment = null) {
   return {
     event,
     persona: getActivePersonaKey(),
-    messages: compactTranscript(getCurrentChatMessages().map(({ role, content }) => ({ role, content }))),
+    messages: compactTranscript(currentGameChatTurns().map(({ role, content }) => ({ role, content }))),
     coachMemory: memoryForPayload(state.coachMemory),
     skillSnapshot: buildSkillSnapshotForChat(),
     weaknesses: Object.values(state.profile)
@@ -2708,14 +2589,41 @@ function buildChatPayload(event, moment = null) {
   };
 }
 
+// Coach requests are serialized: concurrent streams would cross-write each
+// other's bubbles and race the coachThinking flag. Disposable coach-initiated
+// events (proactive commentary, drill nudges) are dropped instead of queued
+// when a stream is already active — they are moment-bound and would land
+// stale. User messages and structured flows queue up in order.
+let coachChatChain = Promise.resolve();
+let coachStreamSeq = 0;
+let activeCoachAbort = null;
+const DISPOSABLE_CHAT_EVENTS = new Set(["proactive_comment", "drill_feedback"]);
+
+// Never persist an in-flight streaming bubble: reloading mid-stream would
+// resurrect it as a permanently empty message.
+function persistCoachChat() {
+  saveJson(STORAGE_KEYS.coachChat, {
+    gameId: state.coachChat.gameId,
+    messages: (state.coachChat.messages || []).filter((message) => !message.streaming),
+  });
+}
+
 async function requestCoachChat(event, moment = null) {
+  if (state.coachThinking && DISPOSABLE_CHAT_EVENTS.has(event)) return null;
+  const run = coachChatChain.then(() => performCoachChat(event, moment));
+  coachChatChain = run.catch(() => {});
+  return run;
+}
+
+async function performCoachChat(event, moment) {
   state.coachThinking = true;
   state.coachError = "";
-  // Push an empty streaming bubble that fills in as deltas arrive.
-  const streamingMessage = { role: "assistant", content: "", isQuestion: false, at: new Date().toISOString(), streaming: true };
+  // Push an empty streaming bubble that fills in as deltas arrive. The unique
+  // id ties deltas to THIS bubble even if another request follows immediately.
+  const streamId = String(++coachStreamSeq);
+  const streamingMessage = { role: "assistant", content: "", isQuestion: false, at: new Date().toISOString(), streaming: streamId };
   getCurrentChatMessages().push(streamingMessage);
-  saveJson(STORAGE_KEYS.coachChat, state.coachChat);
-  if (state.currentTab === "coach") renderCoachPanel();
+  renderChatLog();
 
   const removeStreamingBubble = () => {
     const messages = getCurrentChatMessages();
@@ -2723,21 +2631,27 @@ async function requestCoachChat(event, moment = null) {
     if (index !== -1) messages.splice(index, 1);
   };
 
+  const controller = new AbortController();
+  activeCoachAbort = controller;
+
   try {
     const data = await streamCoachChat(buildChatPayload(event, moment), {
       fetchImpl: api.authedFetch,
+      signal: controller.signal,
       onDelta: (partial) => {
         streamingMessage.content = partial;
-        // Cheap live update: rewrite the last bubble's text without re-rendering.
+        if (state.currentTab !== "coach") return;
         const log = document.querySelector("#coachChatLog");
-        if (log) {
-          const bubbles = log.querySelectorAll(".chat-message.from-coach");
-          const last = bubbles[bubbles.length - 1];
-          if (last) {
-            last.textContent = partial;
-            log.scrollTop = log.scrollHeight;
-          }
+        if (!log) return;
+        const bubble = log.querySelector(`[data-streaming="${streamId}"]`);
+        if (bubble) {
+          // Cheap live update: patch the bubble's text without re-rendering.
+          bubble.textContent = partial;
+        } else {
+          // First delta: swap the thinking dots for the streaming bubble.
+          renderChatLog();
         }
+        log.scrollTop = log.scrollHeight;
       },
     });
 
@@ -2747,7 +2661,7 @@ async function requestCoachChat(event, moment = null) {
       removeStreamingBubble();
       state.openAI.configured = false;
       state.coachError = data.message || "The coach is offline.";
-      saveJson(STORAGE_KEYS.coachChat, state.coachChat);
+      persistCoachChat();
       if (state.currentTab === "coach") renderCoachPanel();
       return null;
     }
@@ -2770,17 +2684,27 @@ async function requestCoachChat(event, moment = null) {
       };
       pushChatMessage("assistant", data.question, { isQuestion: true });
     } else {
-      saveJson(STORAGE_KEYS.coachChat, state.coachChat);
+      persistCoachChat();
     }
-    if (state.currentTab === "coach") renderCoachPanel();
+    renderChatLog();
     return data;
   } catch (error) {
     state.coachThinking = false;
     removeStreamingBubble();
-    state.coachError = error.message || "Coach request failed.";
-    saveJson(STORAGE_KEYS.coachChat, state.coachChat);
-    if (state.currentTab === "coach") renderCoachPanel();
+    const message = error.message || "Coach request failed.";
+    state.coachError = message;
+    // A hard failure means the "Online" badge is stale — reflect reality so
+    // the Services card stops claiming the coach works. Rate limiting and
+    // deliberate aborts are not outages.
+    if (error.name !== "AbortError" && !/too many coach requests/i.test(message)) {
+      state.openAI.online = false;
+      state.openAI.status = message;
+    }
+    persistCoachChat();
+    renderChatLog();
     return null;
+  } finally {
+    if (activeCoachAbort === controller) activeCoachAbort = null;
   }
 }
 
@@ -2814,7 +2738,7 @@ async function handleUserChatMessage(text) {
     return;
   }
 
-  renderCoachPanel();
+  renderChatLog();
   await requestCoachChat("user_message");
 }
 
@@ -2827,8 +2751,15 @@ function resetProactiveState() {
   state.proactive = { count: 0, lastCommentPly: 0, turningPointUsed: false, praiseCount: 0 };
 }
 
+// The Settings "Coach mode" contract lives in lib/coach-mode.mjs (pure +
+// unit-tested). Kinds: "live" (proactive comments, rethink interception),
+// "postgame" (game-end nudges), "drill" (missed-puzzle feedback).
+function coachModeAllows(kind) {
+  return coachModeAllowsForMode(state.settings.coachMode, kind);
+}
+
 function canCoachSpeak() {
-  return isCoachAvailable() && isCalibrationComplete() && !state.activeDrill && !state.rethink.active;
+  return isCoachAvailable() && isCalibrationComplete() && !state.activeDrill && !state.rethink.active && coachModeAllows("live");
 }
 
 function shouldCommentOnMove(record) {
@@ -2857,6 +2788,9 @@ function shouldCommentOnMove(record) {
 }
 
 async function maybeTriggerProactiveCoach(record) {
+  // The grade can resolve after the player has already moved on to another
+  // game or the game ended — never comment cross-game or post-game.
+  if (record.gameId !== state.currentGameId || state.game.isGameOver()) return;
   const trigger = shouldCommentOnMove(record);
   if (!trigger) return;
 
@@ -2874,16 +2808,33 @@ const RETHINK_GRADE_TIMEOUT_MS = 3000;
 const RETHINKS_PER_GAME = 2;
 
 function resetRethinkState() {
+  // Never strand the attemptPlayerMove continuation that awaits a rethink
+  // decision — resolving false ("play on") lets it complete; the ownership
+  // guards downstream keep it from acting on whatever game owns the board now.
+  const pendingResolve = state.rethink?.resolve || null;
   state.rethink = { active: false, record: null, remaining: RETHINKS_PER_GAME, resolve: null, stage: "ask" };
+  pendingResolve?.(false);
+}
+
+// Cancels every pending board-level interaction owned by the game being torn
+// down. MUST run before state.game / state.currentGameId change so no async
+// continuation (promotion pick, rethink decision, clock tick) can act on the
+// wrong game.
+function teardownBoardInteractions() {
+  cancelActivePromotionPicker();
+  resetRethinkState();
+  stopClockTicker();
 }
 
 function shouldOfferRethink(record) {
   return (
     record?.role === "player" &&
+    record.gameId === state.currentGameId &&
     ["blunder", "missed_win"].includes(record.qualityKey) &&
     !record.rethinkOffered &&
     state.rethink.remaining > 0 &&
     isCalibrationComplete() &&
+    coachModeAllows("live") &&
     !state.activeDrill &&
     !state.game.isGameOver()
   );
@@ -3133,12 +3084,117 @@ function renderDeepAnalysisStatus() {
   `;
 }
 
+function describeGameRecord(record) {
+  const when = record.updatedAt || record.startedAt;
+  const date = when
+    ? new Date(when).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+    : "";
+  const opening = record.openingName && record.openingName !== "Unbooked line" ? record.openingName : "";
+  return [date, opening].filter(Boolean).join(" · ") || "Earlier game";
+}
+
+// Recent games (current one included, disabled) so finishing a game never
+// orphans the review of the ones before it.
+function renderGamePickerCard() {
+  const games = state.localGames.filter((game) => Array.isArray(game.moves) && game.moves.length);
+  const others = games.filter((game) => game.id !== state.currentGameId);
+  if (!others.length) return "";
+  const rows = games.slice(0, 12).map((game) => {
+    const current = game.id === state.currentGameId;
+    const result = game.result && game.result !== "in_progress" ? game.result : "In progress";
+    const text = `${describeGameRecord(game)} — ${result}${current ? " (current)" : ""}`;
+    return `<button type="button" class="candidate game-pick${current ? " selected" : ""}" data-load-game="${escapeAttr(game.id)}"${current ? " disabled" : ""}>${escapeHtml(text)}</button>`;
+  }).join("");
+  return `
+    <article class="mini-card game-picker-card">
+      <span class="label">Your games</span>
+      <strong>Review an earlier game</strong>
+      <div class="candidate-list">${rows}</div>
+    </article>
+  `;
+}
+
+// Loads a stored game (with its per-move analysis) back onto the board and
+// into Review. The game being left is already saved incrementally, so it
+// remains in this same list and can be reopened the same way.
+function loadGameForReview(gameId) {
+  if (state.activeDrill) return;
+  // While the bot is thinking the board is about to change — the epoch guard
+  // in maybeEngineMove would discard the result, but blocking here avoids a
+  // confusing half-loaded flash. The think window is a few seconds at most.
+  if (state.thinking) return;
+  const record = state.localGames.find((game) => game.id === gameId);
+  if (!record || record.id === state.currentGameId) return;
+
+  let restored;
+  try {
+    restored = new Chess();
+    if (record.pgn) restored.loadPgn(record.pgn);
+    else if (record.fen) restored.load(record.fen);
+  } catch (error) {
+    console.warn("Could not load game for review", error);
+    return;
+  }
+
+  cancelDeepAnalysis();
+  teardownBoardInteractions();
+  // Mark the transcript boundary with a descriptive divider before the game
+  // id changes (otherwise getCurrentChatMessages inserts a generic one).
+  appendChatDivider(`Reviewing ${describeGameRecord(record)}`);
+  state.coachChat.gameId = record.id;
+  persistCoachChat();
+
+  state.game = restored;
+  state.currentGameId = record.id;
+  state.startedAt = record.startedAt || new Date().toISOString();
+  state.moves = Array.isArray(record.moves) ? record.moves : [];
+  if (record.playerColor) state.settings.playerColor = record.playerColor;
+  state.lastMove = state.moves.length
+    ? { from: state.moves[state.moves.length - 1].from, to: state.moves[state.moves.length - 1].to }
+    : null;
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+  state.reviewPly = null;
+  state.guidedReview = null;
+  state.pendingCoachQuestion = null;
+  state.coachError = "";
+  resetProactiveState();
+  resetRethinkState();
+  // Unfinished timed games come back with their clock (paused-at-save);
+  // finished games and untimed games show none. Ticker restarts below only
+  // when there is genuinely time to run.
+  state.clocks = record.clocks && !state.game.isGameOver()
+    && Number.isFinite(record.clocks.white) && Number.isFinite(record.clocks.black)
+    ? {
+        white: Math.max(0, record.clocks.white),
+        black: Math.max(0, record.clocks.black),
+        incrementMs: record.clocks.incrementMs || 0,
+        side: restored.turn(),
+        lastTick: Date.now(),
+        intervalId: null,
+        flagged: record.clocks.flagged || null,
+      }
+    : null;
+  if (state.clocks && !state.clocks.flagged) startClockTicker();
+  saveJson(STORAGE_KEYS.activeGame, record);
+  renderAll();
+
+  // Reopening an unfinished game with the bot to move: let it move.
+  if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
+    maybeEngineMove();
+  }
+}
+
 function renderReviewPanel() {
   if (!state.moves.length) {
     els.reviewPanel.innerHTML = `
       <h2>Review</h2>
-      <p class="empty-state">No moves yet. Play a game to review it here.</p>
+      <div class="stack">
+        <p class="empty-state">No moves yet. Play a game to review it here.</p>
+        ${renderGamePickerCard()}
+      </div>
     `;
+    bindGamePickerCard(els.reviewPanel);
     return;
   }
   const selectedMove = state.reviewPly != null
@@ -3205,12 +3261,14 @@ function renderReviewPanel() {
       ${skillCard}
       ${turningPointHtml}
       <div class="move-list">${rows}</div>
+      ${renderGamePickerCard()}
     </div>
   `;
   bindVariationReplayCard();
   bindGuidedReviewCard();
   bindReplayPvButtons(els.reviewPanel);
   bindEvalGraphCard();
+  bindGamePickerCard(els.reviewPanel);
 
   els.reviewPanel.querySelectorAll(".move-row[data-ply]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -3235,6 +3293,12 @@ function renderReviewPanel() {
       state.selectedSkillId = button.dataset.reviewSkill;
       switchTab("practice");
     });
+  });
+}
+
+function bindGamePickerCard(root) {
+  root.querySelectorAll("[data-load-game]").forEach((button) => {
+    button.addEventListener("click", () => loadGameForReview(button.dataset.loadGame));
   });
 }
 
@@ -3962,10 +4026,14 @@ function startPracticePuzzle(puzzle, options = {}) {
   const normalized = normalizePracticePuzzle(puzzle);
   if (!normalized) return false;
   cancelDeepAnalysis();
+  teardownBoardInteractions();
 
   if (!state.activeDrill && options.saveCurrent !== false) {
     saveCurrentGame();
   }
+  // The saved game keeps its remaining time; the drill itself is untimed.
+  state.clocks = null;
+  renderClocks();
 
   state.activeDrill = structuredClone(normalized);
   state.activeDrill.step = 0;
@@ -3999,8 +4067,15 @@ function startPracticePuzzle(puzzle, options = {}) {
   return true;
 }
 
-function ensurePracticeTrainer() {
+function hasLiveGameInProgress() {
+  return !state.activeDrill && state.moves.length > 0 && !state.game.isGameOver() && !state.clocks?.flagged;
+}
+
+function ensurePracticeTrainer(options = {}) {
   if (!isCalibrationComplete() || state.activeDrill) return false;
+  // Never silently replace a game in progress. The Practice panel offers an
+  // explicit "Start practice" button instead (the game is saved + resumable).
+  if (hasLiveGameInProgress() && !options.force) return false;
   const next = selectNextPracticePuzzle();
   return startPracticePuzzle(next, { render: false, switchTab: false });
 }
@@ -4121,6 +4196,7 @@ function bindOpeningDrillCard() {
     state.activeDrill = null;
     state.drillMessage = "";
     restoreActiveGame();
+    restartClocksForRestoredGame();
     renderAll();
   });
 }
@@ -4251,6 +4327,18 @@ function renderPracticePanel() {
 
   ensurePracticeTrainer();
 
+  const pausedGameCard = !state.activeDrill && hasLiveGameInProgress() ? `
+    <article class="mini-card practice-start-card">
+      <span class="label">Practice trainer</span>
+      <strong>You have a game in progress</strong>
+      <p>Starting practice pauses your game. It's saved automatically — "Resume game" brings it right back.</p>
+      <div class="button-row">
+        <button id="startPracticeSessionButton" class="primary-action" type="button">Start practice</button>
+        <button id="backToGameButton" type="button">Back to my game</button>
+      </div>
+    </article>
+  ` : "";
+
   const dueItems = selectDue(state.practiceQueue.map((item) => ensureSrs(item)), new Date(), 4)
     .sort((a, b) => getCategoryPriority(b.category) - getCategoryPriority(a.category));
   const nextFocus = getNextTrainingFocus();
@@ -4269,13 +4357,14 @@ function renderPracticePanel() {
     <button class="practice-card practice-select" type="button" data-start-puzzle="${escapeAttr(puzzle.id)}">
       <span class="label">${escapeHtml(getSkillForPractice(puzzle)?.label || "Foundation")} - difficulty ${puzzle.difficulty}</span>
       <strong>${escapeHtml(puzzle.plainTitle)}</strong>
-      <p>${escapeHtml(puzzle.plainGoal || getPracticeMotifGuide(puzzle.category).plainGoal)}</p>
+      <span class="card-text">${escapeHtml(puzzle.plainGoal || getPracticeMotifGuide(puzzle.category).plainGoal)}</span>
     </button>
   `).join("");
 
   els.practicePanel.innerHTML = `
     <h2>Practice</h2>
     <div class="stack">
+      ${pausedGameCard}
       ${renderDailyPlanCard()}
       ${renderOpeningDrillCard()}
       ${trainer}
@@ -4303,6 +4392,11 @@ function renderPracticePanel() {
 
   document.querySelector("#practiceHintButton")?.addEventListener("click", advancePracticeHint);
   document.querySelector("#practiceRetryButton")?.addEventListener("click", retryPracticePuzzle);
+  document.querySelector("#startPracticeSessionButton")?.addEventListener("click", () => {
+    ensurePracticeTrainer({ force: true });
+    renderAll();
+  });
+  document.querySelector("#backToGameButton")?.addEventListener("click", () => switchTab("coach"));
   bindOpeningDrillCard();
   bindOpeningTrainerSection();
   bindMateLadderSection();
@@ -4693,6 +4787,16 @@ function getActivePlayerColor() {
 
 // Modal-ish overlay anchored above the promotion square. Returns "q"/"r"/"b"/"n"
 // or null if the user dismisses.
+// The promotion picker is the only board interaction that outlives its event
+// handler via a Promise. Track a cancel hook so game teardown can dismiss it
+// (resolving null = "no move") instead of leaving a stale overlay + document
+// keydown listener over a different game.
+let activePromotionCancel = null;
+
+function cancelActivePromotionPicker() {
+  activePromotionCancel?.();
+}
+
 function askForPromotionPiece(color, square) {
   return new Promise((resolve) => {
     const host = els.board.parentElement;
@@ -4733,12 +4837,18 @@ function askForPromotionPiece(color, square) {
     function cleanup() {
       overlay.remove();
       document.removeEventListener("keydown", onKey);
+      if (activePromotionCancel === cancel) activePromotionCancel = null;
+    }
+    function cancel() {
+      cleanup();
+      resolve(null);
     }
     function onKey(event) {
       if (event.key === "Escape") { cleanup(); resolve(null); }
     }
     overlay.addEventListener("click", () => { cleanup(); resolve(null); });
     document.addEventListener("keydown", onKey);
+    activePromotionCancel = cancel;
 
     overlay.append(menu);
     host.append(overlay);
@@ -4747,6 +4857,7 @@ function askForPromotionPiece(color, square) {
 
 function canInteractWithBoard() {
   if (isInReplay()) return false;
+  if (state.clocks?.flagged) return false;
   const playerColor = getActivePlayerColor();
   return !state.thinking && !state.game.isGameOver() && state.game.turn() === playerColor;
 }
@@ -4817,6 +4928,9 @@ async function attemptPlayerMove(from, to, options = {}) {
     // Serious mistake? Pause for a coach conversation before the bot replies.
     const tookBack = await maybeOfferRethink(record);
     if (tookBack) return;
+    // The rethink pause (or its teardown) may have outlived this game — if
+    // the board was replaced meanwhile, this continuation owns nothing.
+    if (record.gameId !== state.currentGameId || state.activeDrill) return;
     record?.gradePromise?.then(() => maybeTriggerProactiveCoach(record));
     await maybeEngineMove();
   });
@@ -4836,6 +4950,9 @@ function clearSelection(options = {}) {
 }
 
 async function maybeEngineMove() {
+  // Drills own the board (scripted replies only) and a second concurrent
+  // engine think would double-move — both are hard no-gos.
+  if (state.activeDrill || state.thinking) return;
   if (state.game.isGameOver() || state.game.turn() === state.settings.playerColor) {
     await finalizeIfGameOver();
     return;
@@ -4844,6 +4961,9 @@ async function maybeEngineMove() {
   state.thinking = true;
   renderGameMeta();
   let engineAnimation = Promise.resolve(false);
+  // Epoch: if the board is replaced while the engine thinks (game loaded for
+  // review, drill started, new game), the result must be discarded.
+  const gameId = state.currentGameId;
 
   try {
     await wait(180);
@@ -4857,6 +4977,11 @@ async function maybeEngineMove() {
     } catch {
       uci = null;
       state.engine = null;
+      state.engineFallback = true;
+    }
+
+    if (state.currentGameId !== gameId || state.activeDrill || state.game.fen() !== fen) {
+      return;
     }
 
     const preferredMove = uci ? moveFromUci(uci) : null;
@@ -4865,7 +4990,12 @@ async function maybeEngineMove() {
 
     for (const move of movesToTry) {
       const beforeFen = state.game.fen();
-      const played = state.game.move(move);
+      let played = null;
+      try {
+        played = state.game.move(move);
+      } catch {
+        played = null;
+      }
       if (played) {
         engineAnimation = animateBoardMove(played);
         recordMove(played, beforeFen, "engine");
@@ -4877,7 +5007,9 @@ async function maybeEngineMove() {
     console.warn("Engine move failed", error);
   } finally {
     state.thinking = false;
-    await finalizeIfGameOver();
+    if (state.currentGameId === gameId && !state.activeDrill) {
+      await finalizeIfGameOver();
+    }
     await engineAnimation;
     renderAll();
   }
@@ -5069,6 +5201,27 @@ function retractWeaknessEvidence(tag, record) {
   }
 }
 
+// Persist async grading results to the record's OWN game without clobbering
+// whatever game or drill currently owns the board. When the record's game is
+// still current a normal incremental save keeps everything fresh — but the
+// stored result is preserved (a checkmate must never revert to "in_progress"
+// because a straggling eval resolved after finalize).
+function persistRecordOwnedGame(record) {
+  const stored = state.localGames.find((game) => game.id === record.gameId);
+  if (record.gameId === state.currentGameId && !state.activeDrill) {
+    const keepResult = stored?.result && stored.result !== "in_progress" ? stored.result : "in_progress";
+    saveCurrentGame(keepResult);
+    return;
+  }
+  // The board moved on (new game, drill, or review of another game): the
+  // record object already lives inside the stored game's moves array, so a
+  // re-serialize of the games list is all that's needed.
+  if (stored) {
+    stored.updatedAt = new Date().toISOString();
+    saveJson(STORAGE_KEYS.games, state.localGames);
+  }
+}
+
 async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveSyncPromise) {
   if (!state.engine?.ready) return;
   try {
@@ -5085,9 +5238,10 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
     applyEngineAnalysisToRecord(record, analysis);
     updateSkillFromMove(record);
 
-    saveCurrentGame();
+    persistRecordOwnedGame(record);
     await moveSyncPromise;
     await syncMoveAnalysis(record);
+    if (record.gameId !== state.currentGameId) return;
     renderBoard();
     if (state.currentTab === "coach" || state.currentTab === "review") {
       renderCurrentPanel();
@@ -5095,12 +5249,14 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
   } catch (error) {
     record.analysisStatus = "unavailable";
     updateMoveQuality(record);
-    saveCurrentGame();
+    persistRecordOwnedGame(record);
     await moveSyncPromise;
     await syncMoveAnalysis(record);
-    renderBoard();
-    if (state.currentTab === "coach" || state.currentTab === "review") {
-      renderCurrentPanel();
+    if (record.gameId === state.currentGameId) {
+      renderBoard();
+      if (state.currentTab === "coach" || state.currentTab === "review") {
+        renderCurrentPanel();
+      }
     }
     console.warn("Move enrichment failed", error);
   }
@@ -5800,67 +5956,19 @@ function maybeCreatePractice(record, candidates) {
   syncPosition(record, item);
 }
 
-// Spaced repetition: items persist and reschedule instead of vanishing when
-// solved, so patterns resurface until they stick.
-async function markPractice(id, result) {
-  const item = state.practiceQueue.find((entry) => entry.id === id);
-  if (!item) return;
-
-  item.lastResult = result;
-  item.attemptedAt = new Date().toISOString();
-  state.practiceHistory = [
-    {
-      ...item,
-      result,
-      attemptedAt: item.attemptedAt,
-    },
-    ...state.practiceHistory,
-  ].slice(0, 100);
-
-  const grade = result === "solved" ? GRADE_SOLVED : GRADE_MISSED;
-  item.srs = applyGrade(ensureSrs(item).srs, grade);
-
-  saveJson(STORAGE_KEYS.practice, state.practiceQueue);
-  saveJson(STORAGE_KEYS.practiceHistory, state.practiceHistory);
-  await syncPracticeAttempt(item, result);
-  renderPracticePanel();
-  renderProfilePanel();
-}
-
-function startDrill(id) {
-  const drill = TRAINING_MODULES.find((item) => item.id === id);
-  if (!drill) return;
-  startTrainingSession(drill, "practice");
-}
-
-function startLesson(lessonId) {
-  const lesson = INTERACTIVE_LESSONS[lessonId];
-  if (!lesson) return;
-  startTrainingSession(lesson, "lesson");
-}
-
 function startQueuedPractice(id) {
   const item = state.practiceQueue.find((entry) => entry.id === id);
   if (!item) return;
   startPracticePuzzle(practiceItemToPuzzle(item), { render: true });
 }
 
-function startTrainingSession(drill, source) {
-  cancelDeepAnalysis();
-  if (!state.activeDrill) {
-    saveCurrentGame();
+// After a drill hands the board back, resume the restored game's clock (if
+// the game is still live). restoreActiveGame() itself never starts a ticker.
+function restartClocksForRestoredGame() {
+  if (state.clocks && !state.clocks.flagged && !state.game.isGameOver()) {
+    startClockTicker();
   }
-  state.activeDrill = structuredClone(drill);
-  state.activeDrill.step = 0;
-  state.activeDrill.source = source;
-  state.drillMessage = drill.objective;
-  state.game = drill.fen === "start" ? new Chess() : new Chess(drill.fen);
-  state.moves = [];
-  state.selectedSquare = null;
-  state.legalTargets = new Set();
-  state.lastMove = null;
-  switchTab("coach");
-  renderAll();
+  renderClocks();
 }
 
 function resumeSavedGame() {
@@ -5869,6 +5977,7 @@ function resumeSavedGame() {
   resetPracticeTrainerState();
   state.practiceTrainer.status = "idle";
   restoreActiveGame();
+  restartClocksForRestoredGame();
   switchTab("coach");
   renderAll();
 }
@@ -5896,7 +6005,10 @@ function startOpeningDrill(lineId) {
   cancelDeepAnalysis();
   const { opening, line } = found;
 
+  teardownBoardInteractions();
   if (!state.activeDrill) saveCurrentGame();
+  state.clocks = null;
+  renderClocks();
   state.activeDrill = {
     id: `opening:${line.id}`,
     openingLineId: line.id,
@@ -6006,6 +6118,7 @@ function finishOpeningDrill() {
   const finishedMessage = state.drillMessage;
   state.activeDrill = null;
   restoreActiveGame();
+  restartClocksForRestoredGame();
   renderAll();
   state.drillMessage = finishedMessage;
   if (state.currentTab === "practice") renderPracticePanel();
@@ -6030,7 +6143,10 @@ function startMateDrill(positionId) {
   const position = getMatePositionById(positionId);
   if (!position) return;
   cancelDeepAnalysis();
+  teardownBoardInteractions();
   if (!state.activeDrill) saveCurrentGame();
+  state.clocks = null;
+  renderClocks();
   state.activeDrill = {
     id: `mate:${position.id}`,
     matePositionId: position.id,
@@ -6218,6 +6334,10 @@ function stopClockTicker() {
 function tickClock() {
   const clocks = state.clocks;
   if (!clocks || clocks.flagged || state.rethink.active) return;
+  // Drills borrow the board and a finished game has no time pressure — an
+  // orphaned or leftover interval must never drain (and eventually flag) a
+  // clock the player can't see running.
+  if (state.activeDrill || state.game.isGameOver()) return;
   const now = Date.now();
   const elapsed = now - clocks.lastTick;
   clocks.lastTick = now;
@@ -6249,16 +6369,12 @@ function onMoveClockUpdate(record) {
 }
 
 async function onClockFlagged(side) {
-  // Convert to a game-over result and finalize.
+  // A flag is a real game result: run the same end-of-game pipeline as a
+  // checkmate so calibration, skill, sync, and deep analysis all count it.
   const winner = side === "w" ? "b" : "w";
   const label = `${colorName(winner)} wins on time`;
   state.game.header?.("Result", "*");
-  state.moves.forEach((m) => m); // no-op to keep the record intact
-  // We fake game-over by setting result via saveCurrentGame path.
-  saveCurrentGame(label);
-  playGameSound(state.settings.playerColor === winner ? "gameWin" : "gameLoss");
-  pushChatMessage("assistant", `Flag fell — ${label}.`);
-  if (state.currentTab === "coach") renderCoachPanel();
+  await completeGameWithResult(label);
   renderAll();
 }
 
@@ -6461,6 +6577,7 @@ function normalizeUciLoose(uci) {
 function maybeSendDrillFeedback(puzzle, beforeFen, playedUci) {
   if (puzzle.coachFeedbackSent) return;
   if (!isCoachAvailable() || !isCalibrationComplete()) return;
+  if (!coachModeAllows("drill")) return;
   puzzle.coachFeedbackSent = true;
 
   const expectedUci = Array.isArray(puzzle.solutionLine) && puzzle.solutionLine.length
@@ -6603,6 +6720,7 @@ function detectOpening() {
 }
 
 function getResultLabel() {
+  if (state.clocks?.flagged) return `${colorName(opposite(state.clocks.flagged))} wins on time`;
   if (!state.game.isGameOver()) return "In progress";
   if (state.game.isCheckmate()) return `${colorName(opposite(state.game.turn()))} wins by checkmate`;
   if (state.game.isStalemate()) return "Draw by stalemate";
@@ -6616,13 +6734,20 @@ async function finalizeIfGameOver() {
   if (!state.game.isGameOver()) return;
   const existing = state.localGames.find((game) => game.id === state.currentGameId);
   if (existing?.result && existing.result !== "in_progress") return;
+  await completeGameWithResult(getResultLabel());
+}
+
+// The full end-of-game pipeline, shared by chess endings (finalizeIfGameOver)
+// and clock flags (onClockFlagged) so a timed-out game counts for
+// calibration, skill, sync, the daily plan, and deep analysis like any other.
+async function completeGameWithResult(result) {
+  if (state.activeDrill) return;
   stopClockTicker();
   markDailyItemComplete("play");
-  const result = getResultLabel();
   const wasCalibrating = !isCalibrationComplete();
   saveCurrentGame(result);
   recordCompletedGameForCalibration(result);
-  if (!state.activeDrill) updateSkillFromGameResult(result);
+  updateSkillFromGameResult(result);
   const playerColor = state.settings.playerColor;
   if (result.includes(`${colorName(playerColor)} wins`)) playGameSound("gameWin");
   else if (result.startsWith("Draw")) playGameSound("move");
@@ -6632,7 +6757,7 @@ async function finalizeIfGameOver() {
   if (wasCalibrating && isCalibrationComplete()) {
     pushChatMessage("assistant", `Good — that's all I needed. I've set your starting level around ${state.calibration.estimatedScore || "your play"}. From here I'll talk with you during games and everything adapts to how you actually play. Ready when you are.`);
     if (state.currentTab === "coach") renderCoachPanel();
-  } else if (isCalibrationComplete() && !state.activeDrill) {
+  } else if (isCalibrationComplete() && coachModeAllows("postgame")) {
     const moments = selectKeyMoments(state.moves);
     pushChatMessage("assistant", moments.length
       ? `That's ${result}. Want to walk through the ${moments.length === 1 ? "key moment" : `${moments.length} key moments`} together? Open Review and hit "Start guided review".`
@@ -6658,6 +6783,14 @@ function saveCurrentGame(result = "in_progress") {
     fen: state.game.fen(),
     pgn: state.game.pgn(),
     moves: state.moves,
+    clocks: state.clocks
+      ? {
+          white: state.clocks.white,
+          black: state.clocks.black,
+          incrementMs: state.clocks.incrementMs,
+          flagged: state.clocks.flagged,
+        }
+      : null,
   };
 
   const others = state.localGames.filter((item) => item.id !== state.currentGameId);
@@ -6691,6 +6824,24 @@ function restoreActiveGame() {
 
     if (active.playerColor) {
       state.settings.playerColor = active.playerColor;
+    }
+
+    // Restore live clocks (they resume from the last saved move). Any ticker
+    // still running belongs to the outgoing clocks object — clear it first or
+    // its interval id is lost and the orphan can never be stopped.
+    stopClockTicker();
+    if (active.clocks && Number.isFinite(active.clocks.white) && Number.isFinite(active.clocks.black)) {
+      state.clocks = {
+        white: Math.max(0, active.clocks.white),
+        black: Math.max(0, active.clocks.black),
+        incrementMs: active.clocks.incrementMs || 0,
+        side: restored.turn(),
+        lastTick: Date.now(),
+        intervalId: null,
+        flagged: active.clocks.flagged || null,
+      };
+    } else {
+      state.clocks = null;
     }
 
     return true;
@@ -7524,6 +7675,8 @@ function clearHistoryStorage() {
 }
 
 function resetHistoryState() {
+  teardownBoardInteractions();
+  state.clocks = null;
   state.profile = {};
   state.practiceQueue = [];
   state.practiceHistory = [];
@@ -7627,7 +7780,14 @@ async function deleteSupabaseHistory() {
 }
 
 function newGame() {
+  // A live game is wiped by this — ask first. (It stays in history as
+  // unfinished thanks to the per-move incremental saves.)
+  const inProgress = state.moves.length > 0 && !state.game.isGameOver() && !state.activeDrill && !state.clocks?.flagged;
+  if (inProgress && !window.confirm("Start a new game? Your current game is saved to history as unfinished.")) {
+    return;
+  }
   cancelDeepAnalysis();
+  teardownBoardInteractions();
   state.game = new Chess();
   state.selectedSquare = null;
   state.legalTargets = new Set();
@@ -7640,7 +7800,8 @@ function newGame() {
   state.thinking = false;
   state.activeDrill = null;
   state.drillMessage = "";
-  state.coachChat = { gameId: state.currentGameId, messages: [] };
+  // The chat transcript is intentionally NOT reset — getCurrentChatMessages()
+  // inserts a "New game" divider when it sees the new game id.
   state.pendingCoachQuestion = null;
   state.coachError = "";
   resetProactiveState();
@@ -7677,7 +7838,11 @@ function switchTab(tab, options = {}) {
   // Arrows depend on the current tab (played+best in Review, only-on-mistake
   // in play) so tab switches must repaint them.
   paintBoardArrows();
-  document.querySelector(".ctx-body")?.scrollTo({ top: 0 });
+  // Back/forward navigation restores a previously-visited tab — don't yank
+  // its reading position back to the top.
+  if (!options.fromHistory) {
+    document.querySelector(".ctx-body")?.scrollTo({ top: 0 });
+  }
 }
 
 function escapeHtml(value) {
@@ -7704,6 +7869,7 @@ async function initEngine() {
     try {
       await engine.init();
       state.engine = engine;
+      state.engineFallback = false;
       renderGameMeta();
       // A finished game restored from a previous session may still be graded
       // at shallow depth — deepen it now that the engine is idle.
@@ -7717,7 +7883,11 @@ async function initEngine() {
     }
   }
 
+  // Both engine sources failed: the app plays on with a much weaker heuristic
+  // bot. Make that visible (seat label + Services card) instead of letting the
+  // opponent silently get worse.
   state.engine = null;
+  state.engineFallback = true;
   renderGameMeta();
 }
 
@@ -7734,6 +7904,10 @@ function bindEvents() {
       switchTab(tab, { fromHistory: true });
     }
   });
+
+  // Leaving the page mid-stream: abort the coach request so the server can
+  // cancel its upstream OpenAI call instead of generating into the void.
+  window.addEventListener("pagehide", () => activeCoachAbort?.abort());
 
   boardDrag = attachDragHandlers(els.board, {
     canDragFrom: (square) => {
@@ -7796,7 +7970,18 @@ async function boot() {
   }
 
   hydrateStateFromStorage();
+  const railFoot = document.querySelector(".rail-foot");
+  if (railFoot) {
+    railFoot.innerHTML = `v ${APP_VERSION}<br>plays locally &middot; syncs with your account`;
+  }
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+  // coachMode was a dead setting before v0.7 — stored values were never a
+  // deliberate choice. Reset once to the live default ("hints").
+  if (!state.settings.coachModeV2) {
+    state.settings.coachMode = "hints";
+    state.settings.coachModeV2 = true;
+    saveJson(STORAGE_KEYS.settings, state.settings);
+  }
   applyBoardTheme(state.settings.boardTheme);
   seedDisplayNameFromAccount();
   normalizeCalibrationState();
@@ -7811,11 +7996,14 @@ async function boot() {
   dismissBootVeil();
   verifyRequiredServices();
   initEngine();
-  // Only start a clock on boot for a game we haven't recorded time on yet.
-  // (Persisting live clocks across reloads is out of scope; users can just
-  // start a new game to reset.)
-  if (!state.game.isGameOver() && !state.moves.length) {
+  // Clocks: resume a restored live clock, or start fresh ones for a new game.
+  if (state.clocks && !state.clocks.flagged && !state.game.isGameOver()) {
+    startClockTicker();
+    renderClocks();
+  } else if (!state.game.isGameOver() && !state.moves.length) {
     initClocksForNewGame();
+  } else {
+    renderClocks();
   }
 
   if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {

@@ -22,12 +22,20 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.1";
 const MAX_BODY_BYTES = 1_000_000;
 const COACH_TIMEOUT_MS = 30_000;
 const OPENAI_HEALTH_TIMEOUT_MS = 8_000;
+// Per-user daily coach message cap (durable via Supabase when configured,
+// per-instance in-memory otherwise). 0 disables the cap.
+const COACH_DAILY_MESSAGE_LIMIT = Math.max(0, Number(process.env.COACH_DAILY_MESSAGE_LIMIT ?? 300) || 0);
 // Sliding-window limits per bucket. Keys are the signed-in user id when auth
 // is configured, otherwise the caller IP (legacy local mode).
 const RATE_LIMITS = {
   coach: { windowMs: 60_000, max: 30 },
   sync: { windowMs: 60_000, max: 240 },
   account: { windowMs: 60_000, max: 10 },
+  // Deep health checks trigger outbound OpenAI/Supabase probes — cheap for
+  // the caller, costly for us. Keep them rare per client.
+  health: { windowMs: 60_000, max: 6 },
+  // In-memory fallback for the daily coach cap (legacy local mode / no auth).
+  coachDaily: { windowMs: 86_400_000, max: COACH_DAILY_MESSAGE_LIMIT || 1 },
 };
 const rateLimitLog = new Map();
 const PUBLIC_FILES = new Set([
@@ -44,6 +52,7 @@ const PUBLIC_FILES = new Set([
   "lib/board-arrows.mjs",
   "lib/board-drag.mjs",
   "lib/coach-client.mjs",
+  "lib/coach-mode.mjs",
   "lib/classify.mjs",
   "lib/mates.mjs",
   "lib/password-strength.mjs",
@@ -130,8 +139,14 @@ async function handleRequest(req, res) {
       };
 
       if (url.searchParams.get("check") === "1") {
-        Object.assign(payload, await checkOpenAIStatus());
-        Object.assign(payload, await checkSupabaseStatus());
+        // The deep check makes outbound OpenAI + Supabase probes on the
+        // caller's behalf: rate-limit it and cache the result briefly so an
+        // unauthenticated hammer can't turn us into a probe amplifier.
+        if (isRateLimited("health", clientLimitKey(req))) {
+          sendJson(res, 429, { ...payload, error: "Too many health checks. Try again in a minute." });
+          return;
+        }
+        Object.assign(payload, await getCachedDeepHealth());
       }
 
       sendJson(res, 200, payload);
@@ -436,6 +451,29 @@ function loadEnvFile() {
   }
 }
 
+// Cache policy by asset class:
+// - vendor/** and assets/** change only with a deploy and include the
+//   multi-MB Stockfish wasm → long browser cache + CDN s-maxage, ETag backed.
+// - The app shell (index.html, app.js, styles.css, manifest) must pick up new
+//   deploys immediately → no-cache (always revalidate) with cheap 304s.
+// API responses stay no-store (sendJson / the SSE handler set their own).
+const etagCache = new Map(); // filePath -> { mtimeMs, size, etag }
+
+function etagFor(filePath, stat) {
+  const cached = etagCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.etag;
+  const etag = `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`;
+  etagCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, etag });
+  return etag;
+}
+
+function cacheControlFor(relativePath) {
+  if (relativePath.startsWith("vendor/") || relativePath.startsWith("assets/")) {
+    return "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400";
+  }
+  return "no-cache";
+}
+
 function serveStatic(pathname, req, res) {
   const filePath = resolvePublicFile(pathname);
 
@@ -444,11 +482,25 @@ function serveStatic(pathname, req, res) {
     return;
   }
 
+  const stat = fs.statSync(filePath);
+  const relativePath = path.relative(ROOT, filePath).replaceAll("\\", "/");
+  const etag = etagFor(filePath, stat);
   const ext = path.extname(filePath);
-  res.writeHead(200, {
+  const headers = {
     "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
-    "Cache-Control": "no-store",
-  });
+    "Cache-Control": cacheControlFor(relativePath),
+    "ETag": etag,
+    "Last-Modified": new Date(stat.mtimeMs).toUTCString(),
+  };
+
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+
+  headers["Content-Length"] = stat.size;
+  res.writeHead(200, headers);
 
   if (req.method === "HEAD") {
     res.end();
@@ -483,12 +535,42 @@ function resolvePublicFile(pathname) {
   return path.resolve(ROOT, relativePath);
 }
 
+// In-memory limiter hygiene: entries must not accumulate forever (every
+// unique user/IP that ever hit an endpoint would stay in the map), and the
+// map itself gets a hard cap as a backstop against key-rotation abuse.
+const RATE_LIMIT_MAX_KEYS = 10_000;
+let rateLimitSweepAt = 0;
+
+function sweepRateLimitLog(now) {
+  // Lazy sweep at most every 60s: drop keys whose newest hit is stale.
+  if (now - rateLimitSweepAt < 60_000 && rateLimitLog.size < RATE_LIMIT_MAX_KEYS) return;
+  rateLimitSweepAt = now;
+  const maxWindow = Math.max(...Object.values(RATE_LIMITS).map((config) => config.windowMs));
+  for (const [key, times] of rateLimitLog) {
+    if (!times.length || times[times.length - 1] < now - maxWindow) {
+      rateLimitLog.delete(key);
+    }
+  }
+  // Still over cap after sweeping (key-rotation flood): drop oldest wholesale.
+  if (rateLimitLog.size >= RATE_LIMIT_MAX_KEYS) {
+    const excess = rateLimitLog.size - Math.floor(RATE_LIMIT_MAX_KEYS / 2);
+    let dropped = 0;
+    for (const key of rateLimitLog.keys()) {
+      if (dropped >= excess) break;
+      rateLimitLog.delete(key);
+      dropped += 1;
+    }
+  }
+}
+
 function isRateLimited(bucket, key) {
   const config = RATE_LIMITS[bucket];
   const logKey = `${bucket}:${key}`;
   const now = Date.now();
+  sweepRateLimitLog(now);
   const cutoff = now - config.windowMs;
-  const recent = (rateLimitLog.get(logKey) || []).filter((time) => time > cutoff);
+  const existing = rateLimitLog.get(logKey) || [];
+  const recent = existing.filter((time) => time > cutoff);
   if (recent.length >= config.max) {
     rateLimitLog.set(logKey, recent);
     return true;
@@ -496,6 +578,38 @@ function isRateLimited(bucket, key) {
   recent.push(now);
   rateLimitLog.set(logKey, recent);
   return false;
+}
+
+// Rate-limit key for a request: verified user id when available, otherwise
+// the client IP. Behind a reverse proxy the socket address is the proxy —
+// set TRUST_PROXY=1 to use the first X-Forwarded-For hop instead (only do
+// this when the proxy strips/overwrites the inbound header).
+function clientLimitKey(req, user = null) {
+  if (user?.userId) return user.userId;
+  if (isFeatureEnabled("TRUST_PROXY")) {
+    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return req.socket.remoteAddress || "unknown";
+}
+
+// Deep health results are cached briefly: repeated ?check=1 hits within the
+// window reuse the last probe instead of re-contacting OpenAI/Supabase.
+const DEEP_HEALTH_CACHE_MS = 30_000;
+let deepHealthCache = { at: 0, promise: null };
+
+function getCachedDeepHealth() {
+  const now = Date.now();
+  if (!deepHealthCache.promise || now - deepHealthCache.at > DEEP_HEALTH_CACHE_MS) {
+    deepHealthCache = {
+      at: now,
+      promise: (async () => ({
+        ...(await checkOpenAIStatus()),
+        ...(await checkSupabaseStatus()),
+      }))().catch(() => ({ openaiOnline: false, openaiError: "Health check failed." })),
+    };
+  }
+  return deepHealthCache.promise;
 }
 
 async function checkOpenAIStatus() {
@@ -541,6 +655,31 @@ async function checkOpenAIStatus() {
   }
 }
 
+// Daily coach quota: durable per-user counter in Supabase when configured
+// (atomic RPC, one round trip), per-instance in-memory bucket otherwise.
+// Fails OPEN on infrastructure errors — a database hiccup must never take
+// the product's core feature down with it.
+async function enforceCoachQuota(req, user) {
+  if (!COACH_DAILY_MESSAGE_LIMIT) return null;
+  const limitMessage = `Daily coach limit reached (${COACH_DAILY_MESSAGE_LIMIT} messages). It resets at midnight UTC.`;
+  const admin = getSupabaseAdmin();
+  if (user?.userId && admin) {
+    try {
+      const used = await admin.rpc("increment_coach_usage", {
+        p_user_id: user.userId,
+        p_day: new Date().toISOString().slice(0, 10),
+      });
+      const count = Number(Array.isArray(used) ? used[0] : used);
+      if (Number.isFinite(count) && count > COACH_DAILY_MESSAGE_LIMIT) return limitMessage;
+      return null;
+    } catch (error) {
+      console.warn("Coach quota check failed (allowing request):", error.message);
+      return null;
+    }
+  }
+  return isRateLimited("coachDaily", clientLimitKey(req, user)) ? limitMessage : null;
+}
+
 async function handleCoachChatRequest(req, res) {
   // When Supabase auth is configured, the coach costs money — only signed-in
   // users may spend OpenAI tokens. Legacy local mode stays open on loopback.
@@ -558,12 +697,18 @@ async function handleCoachChatRequest(req, res) {
     return;
   }
 
-  const limitKey = user.userId || req.socket.remoteAddress || "unknown";
+  const limitKey = clientLimitKey(req, user);
   if (isRateLimited("coach", limitKey)) {
     sendJson(res, 429, {
       configured: true,
       error: "Too many coach requests in a short window. Wait a moment and try again.",
     });
+    return;
+  }
+
+  const quotaError = await enforceCoachQuota(req, user);
+  if (quotaError) {
+    sendJson(res, 429, { configured: true, error: quotaError });
     return;
   }
 
@@ -647,9 +792,15 @@ async function handleCoachChatStreamRequest(req, res) {
     return;
   }
 
-  const limitKey = user.userId || req.socket.remoteAddress || "unknown";
+  const limitKey = clientLimitKey(req, user);
   if (isRateLimited("coach", limitKey)) {
     sendJson(res, 429, { configured: true, error: "Too many coach requests in a short window. Wait a moment and try again." });
+    return;
+  }
+
+  const quotaError = await enforceCoachQuota(req, user);
+  if (quotaError) {
+    sendJson(res, 429, { configured: true, error: quotaError });
     return;
   }
 
@@ -680,11 +831,22 @@ async function handleCoachChatStreamRequest(req, res) {
   });
 
   const sendEvent = (event, data) => {
+    if (res.writableEnded || res.destroyed) return;
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), COACH_TIMEOUT_MS);
+  // The client disconnecting (tab closed, navigation) must abort the upstream
+  // OpenAI request immediately — otherwise the server keeps generating (and
+  // paying for) up to max_output_tokens nobody will read.
+  let clientGone = false;
+  res.on("close", () => {
+    if (res.writableEnded) return;
+    clientGone = true;
+    clearTimeout(timeout);
+    controller.abort();
+  });
   let upstream;
   try {
     upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -723,9 +885,11 @@ async function handleCoachChatStreamRequest(req, res) {
   const decoder = new TextDecoder();
   let sseBuffer = "";
   let fullText = "";
+  let upstreamErrored = false;
 
   try {
     for await (const chunk of upstream.body) {
+      if (clientGone) break;
       sseBuffer += decoder.decode(chunk, { stream: true });
       let separator;
       while ((separator = sseBuffer.indexOf("\n\n")) !== -1) {
@@ -741,9 +905,13 @@ async function handleCoachChatStreamRequest(req, res) {
           fullText += event.delta;
           sendEvent("delta", { text: event.delta });
         } else if (event.type === "response.error" || event.type === "error") {
+          // Terminal: a partial reply must never masquerade as a complete one.
+          upstreamErrored = true;
           sendEvent("error", { message: event.error?.message || "OpenAI stream error." });
+          break;
         }
       }
+      if (upstreamErrored) break;
     }
   } catch (error) {
     clearTimeout(timeout);
@@ -753,6 +921,11 @@ async function handleCoachChatStreamRequest(req, res) {
   }
   clearTimeout(timeout);
 
+  if (upstreamErrored || clientGone) {
+    res.end();
+    return;
+  }
+
   const finalReply = normalizeChatResponse(fullText);
   sendEvent("done", finalReply);
   res.end();
@@ -761,14 +934,27 @@ async function handleCoachChatStreamRequest(req, res) {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let received = 0;
+    let overflowed = false;
     req.on("data", (chunk) => {
+      received += chunk.length;
+      if (overflowed) {
+        // Drain politely so the 4xx can flush — but a client still pumping
+        // far past the cap is hostile; cut the socket at 3x.
+        if (received > MAX_BODY_BYTES * 3) req.destroy();
+        return;
+      }
       body += chunk;
       if (body.length > MAX_BODY_BYTES) {
+        overflowed = true;
+        body = "";
+        // Don't destroy the socket immediately — that resets the connection
+        // before the caller's friendly 400 can reach the client.
         reject(new Error("Request body too large"));
-        req.destroy();
       }
     });
     req.on("end", () => {
+      if (overflowed) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (error) {

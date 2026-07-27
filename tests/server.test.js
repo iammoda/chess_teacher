@@ -10,7 +10,7 @@ delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 delete process.env.SUPABASE_PUBLISHABLE_KEY;
 
-function requestPath(path) {
+function requestPath(path, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = new Readable({
       read() {
@@ -19,7 +19,8 @@ function requestPath(path) {
     });
     req.method = "GET";
     req.url = path;
-    req.headers = { host: "localhost" };
+    req.headers = { host: "localhost", ...extraHeaders };
+    req.socket = { remoteAddress: `test-get-${Math.random()}` };
 
     const chunks = [];
     const res = new Writable({
@@ -480,4 +481,66 @@ test("account export returns the user's rows grouped by table", async () => {
     assert.deepEqual(response.body.tables.games, [{ id: TEST_GAME_ID, user_id: TEST_USER_ID }]);
     assert.deepEqual(response.body.tables.moves, []);
   });
+});
+
+// ─────────── Static caching (deploy hardening) ───────────
+
+test("app shell assets revalidate: no-cache + ETag + conditional 304", async () => {
+  const first = await requestPath("/app.js");
+  assert.equal(first.status, 200);
+  assert.equal(first.headers["Cache-Control"], "no-cache");
+  const etag = first.headers["ETag"];
+  assert.ok(etag, "app.js response carries an ETag");
+  assert.ok(first.body.length > 0);
+
+  const second = await requestPath("/app.js", { "if-none-match": etag });
+  assert.equal(second.status, 304);
+  assert.equal(second.body.length, 0, "304 must not carry a body");
+});
+
+test("vendor assets get long-lived CDN-friendly cache headers", async () => {
+  const response = await requestPath("/vendor/chess/chess.js");
+  assert.equal(response.status, 200);
+  assert.match(response.headers["Cache-Control"] || "", /max-age=86400/);
+  assert.match(response.headers["Cache-Control"] || "", /s-maxage=604800/);
+  assert.ok(response.headers["ETag"]);
+});
+
+test("API responses stay no-store", async () => {
+  const response = await requestPath("/api/health");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["Cache-Control"], "no-store");
+});
+
+test("deep health checks are rate limited per client", async () => {
+  // Same client hammering ?check=1: allowed 6/min, then 429.
+  const socket = { remoteAddress: "health-hammer" };
+  const results = [];
+  for (let i = 0; i < 8; i += 1) {
+    const response = await new Promise((resolve, reject) => {
+      const req = new Readable({ read() { this.push(null); } });
+      req.method = "GET";
+      req.url = "/api/health?check=1";
+      req.headers = { host: "localhost" };
+      req.socket = socket;
+      const chunks = [];
+      const res = new Writable({
+        write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback(); },
+      });
+      res.writeHead = (status, headers) => { res.statusCode = status; res.headers = headers || {}; return res; };
+      res.on("finish", () => resolve({ status: res.statusCode }));
+      res.on("error", reject);
+      Promise.resolve(handleRequest(req, res)).catch(reject);
+    });
+    results.push(response.status);
+  }
+  assert.ok(results.slice(0, 6).every((status) => status === 200), `first six pass: ${results}`);
+  assert.ok(results.slice(6).every((status) => status === 429), `later hits limited: ${results}`);
+});
+
+test("oversized request bodies receive a JSON 400 instead of a connection reset", async () => {
+  const huge = { event: "user_message", messages: [], game: { fen: "x" }, junk: "A".repeat(1_100_000) };
+  const response = await postJson("/api/coach/chat", huge);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error, /too large/i);
 });

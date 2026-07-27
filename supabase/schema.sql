@@ -192,6 +192,33 @@ create index if not exists coach_memory_user_id_idx        on coach_memory(user_
 create index if not exists skill_ratings_user_id_idx       on skill_ratings(user_id);
 create index if not exists repertoire_progress_user_id_idx on repertoire_progress(user_id);
 
+-- Per-user daily usage counters (coach messages today; billing-ready).
+-- Server-mediated only, like everything else: the browser never touches it.
+create table if not exists usage_daily (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  day date not null,
+  coach_messages integer not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, day)
+);
+
+-- Atomic increment-and-read so the coach quota check is one round trip and
+-- two concurrent requests can never lose an update.
+create or replace function increment_coach_usage(p_user_id uuid, p_day date)
+returns integer
+language sql
+security definer
+set search_path = public
+as $$
+  insert into usage_daily (user_id, day, coach_messages)
+  values (p_user_id, p_day, 1)
+  on conflict (user_id, day)
+  do update set coach_messages = usage_daily.coach_messages + 1, updated_at = now()
+  returning coach_messages;
+$$;
+
+revoke all on function increment_coach_usage(uuid, date) from public, anon, authenticated;
+
 -- Lock everything down: service-role-only access.
 alter table games               enable row level security;
 alter table moves               enable row level security;
@@ -205,6 +232,7 @@ alter table reasoning_traces    enable row level security;
 alter table coach_memory        enable row level security;
 alter table skill_ratings       enable row level security;
 alter table repertoire_progress enable row level security;
+alter table usage_daily         enable row level security;
 
 revoke all on all tables    in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;

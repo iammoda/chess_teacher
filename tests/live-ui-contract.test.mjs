@@ -20,7 +20,10 @@ test("live game seats expose turn and capture UI", async () => {
 test("calibration hides personalized skill focus and avoids unexplained coach phrasing", async () => {
   const app = await source("app.js");
 
-  assert.match(app, /function renderSkillFocusCard\(\) \{\n\s+if \(!isCalibrationComplete\(\)\) return "";/);
+  // The old "Today's skill focus" card regressed into unreachable code and
+  // was removed; nothing should reference it until it returns via the coach
+  // action buttons.
+  assert.doesNotMatch(app, /renderSkillFocusCard/);
   assert.doesNotMatch(app, /Candidate to compare/);
   assert.doesNotMatch(app, /Consider forcing moves like/);
   assert.match(app, /A candidate move is a move worth checking before deciding/);
@@ -382,8 +385,7 @@ test("small pill and chip labels share title-case formatting", async () => {
   assert.match(app, /"Your Turn"/);
   assert.doesNotMatch(html, /Your move/);
 
-  assert.match(app, /formatCountLabel\(counts\.focus, "focus board", "focus boards"\)/);
-  assert.match(app, /formatCountLabel\(counts\.game_transfer, "from your game", "from your games"\)/);
+  // (The skill-focus card's "focus board(s)" labels left with the dead card.)
   assert.match(app, /formatCountLabel\(counts\.game_transfer, "position from your game", "positions from your games"\)/);
 
   assert.match(app, /toTitleCaseLabel\(detail\)/);

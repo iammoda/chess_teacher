@@ -217,3 +217,68 @@ test("normalizePersonaKey falls back to classic", () => {
   assert.equal(normalizePersonaKey("unknown"), "classic");
   assert.equal(normalizePersonaKey(undefined), "classic");
 });
+
+// ─────────── META robustness + context budget (bug-fix pass) ───────────
+
+test("multiple META trailers never leak raw JSON into the visible message", () => {
+  const raw = `Nice find.${META_MARKER}{"question":"What was the threat?"}${META_END} Extra thought.${META_MARKER}{"memory_note":"dup"}${META_END}`;
+  const reply = parseCoachReply(raw);
+  assert.ok(!reply.message.includes("<<<META"), `no marker in: ${reply.message}`);
+  assert.ok(!reply.message.includes(">>>"));
+  assert.match(reply.message, /Nice find\./);
+  assert.match(reply.message, /Extra thought\./);
+  // The FIRST trailer is authoritative — it matches what streaming displayed.
+  assert.equal(reply.question, "What was the threat?");
+  assert.equal(reply.memory_note, null);
+});
+
+test("streaming cut and final parse agree on the first trailer", () => {
+  const raw = `Visible part.${META_MARKER}{"question":"Q1"}${META_END} trailing`;
+  const streamed = extractStreamingMessage(raw);
+  const reply = parseCoachReply(raw);
+  assert.equal(streamed.trim(), "Visible part.");
+  assert.ok(reply.message.startsWith("Visible part."));
+  assert.equal(reply.question, "Q1");
+});
+
+test("an unterminated META trailer is cut, not shown", () => {
+  const reply = parseCoachReply(`Watch the fork.${META_MARKER}{"question":"unfinished`);
+  assert.equal(reply.message, "Watch the fork.");
+  assert.equal(reply.question, null);
+});
+
+test("hostile skillSnapshot cannot inflate the model input", () => {
+  const payload = {
+    event: "user_message",
+    persona: "classic",
+    messages: [],
+    game: { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", recentSan: [] },
+    skillSnapshot: {
+      blob: "A".repeat(900_000),
+      nested: { deep: "B".repeat(500_000), rating: 1200 },
+      overall: 1180,
+    },
+  };
+  const input = buildChatInput(payload);
+  const contextMessage = input[input.length - 1].content;
+  assert.ok(
+    contextMessage.length < 10_000,
+    `context stays bounded, got ${contextMessage.length} chars`,
+  );
+  // Legitimate numeric entries survive the compaction.
+  assert.match(contextMessage, /"overall":1180/);
+});
+
+test("oversized moment/candidate strings are truncated in the context", () => {
+  const payload = {
+    event: "proactive_comment",
+    persona: "classic",
+    messages: [],
+    game: { fen: "x", recentSan: ["e4".repeat(4000)] },
+    moment: { ply: 4, san: "Q".repeat(5000), quality: "blunder", principalVariation: ["a".repeat(9000)], tags: ["t".repeat(7000)] },
+    candidates: [{ san: "N".repeat(400), reason: "r".repeat(9000) }],
+  };
+  const input = buildChatInput(payload);
+  const contextMessage = input[input.length - 1].content;
+  assert.ok(contextMessage.length < 10_000, `bounded, got ${contextMessage.length}`);
+});

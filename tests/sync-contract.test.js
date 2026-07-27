@@ -106,3 +106,51 @@ test("isValidUuid accepts uuids and rejects noise", () => {
   assert.ok(!isValidUuid("not-a-uuid"));
   assert.ok(!isValidUuid(123));
 });
+
+// ─────────── jsonb size caps (bug-fix pass) ───────────
+
+test("oversized jsonb values are rejected, not passed through to Postgres", () => {
+  const result = validateSyncPayload({
+    table: "weaknesses",
+    op: "upsert",
+    rows: [{
+      category: "hanging_piece",
+      label: "Hanging pieces",
+      count: 3,
+      severity: 2,
+      examples: [{ note: "A".repeat(60_000) }],
+    }],
+  });
+  assert.match(result.error, /too large/);
+});
+
+test("strings hidden inside arrays cannot dodge the size cap", () => {
+  const result = validateSyncPayload({
+    table: "moves",
+    op: "insert",
+    rows: [{
+      id: "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+      game_id: "6f9619ff-8b86-d011-b42d-00c04fc964aa",
+      ply: 1,
+      san: "e4",
+      principal_variation: Array.from({ length: 60 }, () => "x".repeat(1000)),
+    }],
+  });
+  assert.match(result.error, /too large/);
+});
+
+test("normal-sized structured values still pass", () => {
+  const result = validateSyncPayload({
+    table: "weaknesses",
+    op: "upsert",
+    rows: [{
+      category: "hanging_piece",
+      label: "Hanging pieces",
+      count: 3,
+      severity: 2,
+      examples: [{ fen: "8/8/8/8/8/8/8/8 w - - 0 1", san: "Qxb2" }],
+    }],
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.rows.length, 1);
+});
