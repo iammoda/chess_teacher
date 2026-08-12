@@ -96,3 +96,17 @@ test("selectRatedPuzzle prefers unsolved, near-band, weakness-first", () => {
   assert.equal(selectRatedPuzzle(puzzles, { excludeKey: "k:b", score: 1000 }).id, "c");
   assert.equal(selectRatedPuzzle([], {}), null);
 });
+
+test("even-length solution lines are rejected (unsolvable by construction)", () => {
+  assert.equal(normalizePackPuzzle({
+    id: "x",
+    fen: "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+    solutionLine: ["d1d8", "g8h7"],
+  }), null);
+  // Odd-length lines still normalize.
+  assert.ok(normalizePackPuzzle({
+    id: "y",
+    fen: "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+    solutionLine: ["d1d8"],
+  }));
+});

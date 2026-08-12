@@ -83,3 +83,34 @@ test("nextDueLabel is human readable", () => {
   const nextWeek = { srs: { ...createSrs(NOW), dueAt: new Date(NOW.getTime() + 6.5 * 24 * 60 * 60 * 1000).toISOString() } };
   assert.equal(nextDueLabel(nextWeek, NOW), "due in 7 days");
 });
+
+test("ease recovers on success instead of only ever decreasing", () => {
+  let srs = createSrs();
+  // Grind the ease down with misses...
+  srs = applyGrade(srs, GRADE_MISSED);
+  srs = applyGrade(srs, GRADE_MISSED);
+  const worn = srs.ease;
+  // ...then a solve earns some back (capped at the 2.5 start).
+  srs = applyGrade(srs, GRADE_SOLVED);
+  assert.ok(srs.ease > worn, "solve raises ease");
+  for (let i = 0; i < 40; i += 1) srs = applyGrade(srs, GRADE_SOLVED);
+  assert.ok(srs.ease <= 2.5, "ease never exceeds the starting value");
+});
+
+test("hard reschedules sooner than solved", () => {
+  let srs = createSrs();
+  for (const grade of [GRADE_SOLVED, GRADE_SOLVED, GRADE_SOLVED, GRADE_SOLVED]) {
+    srs = applyGrade(srs, grade);
+  }
+  const matured = srs.intervalDays;
+  assert.ok(matured >= 3);
+  const afterHard = applyGrade(srs, GRADE_HARD);
+  assert.ok(afterHard.intervalDays < matured, `hard (${afterHard.intervalDays}d) must come back sooner than the current interval (${matured}d)`);
+  assert.ok(afterHard.intervalDays >= 1);
+});
+
+test("nextDueLabel rounds to the nearest day", () => {
+  const now = new Date("2026-01-01T12:00:00Z");
+  const dueIn25h = { srs: { ...createSrs(now), dueAt: new Date(now.getTime() + 25 * 3600_000).toISOString() } };
+  assert.equal(nextDueLabel(dueIn25h, now), "due tomorrow");
+});

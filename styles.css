@@ -6,7 +6,9 @@
   --paper-3: #e2e7ec;
   --ink: #1b2126;
   --ink-2: #45505a;
-  --ink-3: #8a959f;
+  /* Tertiary text is used at very small sizes (10-12px labels, empty
+     states); it must clear WCAG AA contrast (~4.5:1 on white). */
+  --ink-3: #66717c;
   --rule: #dbe1e7;
   --rule-2: #b9c3cc;
   --card: #ffffff;
@@ -27,6 +29,28 @@
   --danger-soft: #f8e3df;
   --good: #2e7d43;
   --good-soft: #e0efe3;
+
+  /* App-look tokens. Every UI theme (see [data-app-theme] blocks near the
+     board themes) restyles the app by overriding these — components must
+     always read the token, never a hardcoded font/radius/shadow. */
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-display: "Source Serif 4", Georgia, serif;
+  --font-mono: "IBM Plex Mono", monospace;
+  --display-weight: 600;
+  --display-style: italic;
+  --label-transform: uppercase;
+  --label-spacing: 0.16em;
+  --radius-card: 10px;
+  --radius-btn: 8px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 2px rgba(20, 30, 40, 0.08);
+  --shadow-pop: 0 10px 24px rgba(20, 30, 40, 0.14);
+  --body-bg:
+    radial-gradient(1400px 700px at 50% -10%, #ffffff 0%, transparent 60%),
+    var(--paper);
+  --btn-primary-bg: var(--ink);
+  --btn-primary-ink: #ffffff;
+  --accent-ink: #ffffff;
 }
 
 * {
@@ -41,11 +65,9 @@ body {
 }
 
 body {
-  background:
-    radial-gradient(1400px 700px at 50% -10%, #ffffff 0%, transparent 60%),
-    var(--paper);
+  background: var(--body-bg);
   color: var(--ink);
-  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -98,8 +120,8 @@ textarea {
   color: var(--ink);
   display: grid;
   place-items: center;
-  font-family: "Source Serif 4", Georgia, serif;
-  font-style: italic;
+  font-family: var(--font-display);
+  font-style: var(--display-style);
   font-weight: 600;
   font-size: 18px;
   border: 1px solid var(--rule);
@@ -116,10 +138,10 @@ textarea {
 }
 
 .rail-section {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
   padding: 14px 8px 6px;
 }
@@ -130,7 +152,7 @@ textarea {
   gap: 11px;
   height: 36px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   color: var(--ink-2);
   font-size: 13.5px;
   font-weight: 500;
@@ -165,12 +187,20 @@ textarea {
 }
 
 .nav-mono {
-  font-family: "Source Serif 4", serif;
-  font-style: italic;
+  font-family: var(--font-display);
+  font-style: var(--display-style);
   font-weight: 600;
-  width: 18px;
+  min-width: 18px;
   color: var(--ink-3);
   text-align: center;
+  display: inline-grid;
+  place-items: center;
+}
+
+.nav-mono svg {
+  width: 17px;
+  height: 17px;
+  display: block;
 }
 
 .nav-item.active .nav-mono {
@@ -179,7 +209,7 @@ textarea {
 
 .nav-badge {
   margin-left: auto;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--ink-3);
   background: var(--paper-2);
@@ -191,7 +221,7 @@ textarea {
   margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid var(--rule);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--ink-3);
   letter-spacing: 0.04em;
@@ -203,6 +233,7 @@ textarea {
 .stage {
   --board-size: min(780px, calc(100vh - 190px), calc(100vw - 188px - 380px - 72px));
   --board-size: min(780px, calc(100dvh - 190px), calc(100vw - 188px - 380px - 72px));
+  position: relative; /* anchors the ambient coach bubble */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -222,7 +253,7 @@ textarea {
   gap: 14px;
   padding: 10px 4px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   transition: border-color 0.16s ease, background 0.16s ease, opacity 0.16s ease;
 }
 
@@ -238,14 +269,14 @@ textarea {
 .seat .avatar {
   width: 38px;
   height: 38px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: linear-gradient(180deg, #e8edf2, #cfd8e0);
   border: 1px solid var(--rule-2);
   display: grid;
   place-items: center;
   color: var(--ink-2);
-  font-family: "Source Serif 4", Georgia, serif;
-  font-style: italic;
+  font-family: var(--font-display);
+  font-style: var(--display-style);
   font-weight: 600;
   font-size: 18px;
   flex: none;
@@ -256,10 +287,10 @@ textarea {
   background: linear-gradient(180deg, #2a343d, #171e24);
   border-color: #171e24;
   color: var(--paper-3);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-style: normal;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--label-spacing-sm, 0.08em);
   box-shadow: inset 0 1px 0 rgba(190, 215, 235, 0.2);
 }
 
@@ -271,7 +302,7 @@ textarea {
 }
 
 .seat .who .name {
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 500;
   font-size: 16px;
   color: var(--ink);
@@ -280,11 +311,11 @@ textarea {
 }
 
 .seat .who .sub {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--ink-3);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
 }
 
 /* click-to-edit opponent name */
@@ -302,7 +333,7 @@ button.seat-rename {
 button.seat-rename:not(:disabled):hover::after,
 button.seat-rename:not(:disabled):focus-visible::after {
   content: " ✎";
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--font-ui);
   font-size: 12px;
   color: var(--ink-3);
 }
@@ -310,6 +341,32 @@ button.seat-rename:not(:disabled):focus-visible::after {
 button.seat-rename:not(:disabled):hover {
   text-decoration: underline dotted var(--ink-3);
   text-underline-offset: 3px;
+}
+
+/* Touch devices have no hover: the rename affordance must be visible. */
+@media (pointer: coarse) {
+  button.seat-rename:not(:disabled)::after {
+    content: " ✎";
+    font-family: var(--font-ui);
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+}
+
+/* Keyboard focus must be visible everywhere — this was the only file-wide
+   gap (a single :focus-visible rule existed). The board squares use an
+   inset outline because .board-host clips overflow on edge squares. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.square:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 
 button.seat-rename:disabled {
@@ -326,7 +383,7 @@ button.seat-rename:disabled {
   border: 1px solid var(--rule-2);
   border-radius: 4px;
   background: var(--paper);
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 500;
   font-size: 16px;
   color: var(--ink);
@@ -376,7 +433,7 @@ button.seat-rename:disabled {
   border: 1px solid var(--rule);
   border-radius: 999px;
   background: var(--card);
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--font-ui);
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1;
@@ -390,9 +447,9 @@ button.seat-rename:disabled {
 }
 
 .seat .pill.active {
-  border-color: rgba(47, 111, 237, 0.38);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-ink);
   font-weight: 600;
 }
 
@@ -404,7 +461,7 @@ button.seat-rename:disabled {
 }
 
 .seat .pill.active .dot {
-  background: #ffffff;
+  background: currentColor;
 }
 
 .seat.player .pill {
@@ -414,13 +471,13 @@ button.seat-rename:disabled {
 }
 
 .seat.player .pill.active {
-  border-color: rgba(47, 111, 237, 0.38);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-ink);
 }
 
 .seat.player .pill.active .dot {
-  background: #ffffff;
+  background: currentColor;
 }
 
 .seat .pill.waiting .dot {
@@ -445,10 +502,10 @@ button.seat-rename:disabled {
 }
 
 .capture-label {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
   white-space: nowrap;
 }
@@ -481,7 +538,7 @@ button.seat-rename:disabled {
 }
 
 .material-balance {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
@@ -521,13 +578,20 @@ button.seat-rename:disabled {
   transition: height 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
+/* Board flipped (playing Black): White's fill anchors to the top, matching
+   the side White plays from, so "my side growing = good for me" stays true. */
+.eval-bar.flipped .eval-bar-fill {
+  bottom: auto;
+  top: 0;
+}
+
 .eval-bar-label {
   position: absolute;
   bottom: 4px;
   left: 0;
   right: 0;
   text-align: center;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 700;
   color: var(--ink);
@@ -684,6 +748,34 @@ button.seat-rename:disabled {
   box-shadow: inset 0 0 0 4px rgba(46, 110, 63, 0.42);
 }
 
+/* Learn-to-play lesson cues */
+.square.lesson-info-square::before,
+.square.lesson-target-square::before,
+.square.lesson-hint-square::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.square.lesson-info-square::before {
+  inset: 0;
+  background: rgba(47, 111, 237, 0.22);
+  box-shadow: inset 0 0 0 4px rgba(47, 111, 237, 0.3);
+}
+
+.square.lesson-target-square::before {
+  inset: 0;
+  background: rgba(46, 125, 67, 0.2);
+  box-shadow: inset 0 0 0 4px rgba(46, 125, 67, 0.4);
+}
+
+.square.lesson-hint-square::before {
+  inset: 14%;
+  border: 3px solid rgba(47, 111, 237, 0.8);
+  border-radius: 50%;
+}
+
 .move-quality-badge {
   position: absolute;
   top: 6px;
@@ -698,7 +790,7 @@ button.seat-rename:disabled {
   border-radius: 999px;
   background: var(--good);
   color: #ffffff;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: clamp(9px, 1.25vmin, 13px);
   font-weight: 700;
   line-height: 1;
@@ -748,13 +840,12 @@ button.seat-rename:disabled {
 /* in-square coordinate labels */
 .coord {
   position: absolute;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
   pointer-events: none;
   z-index: 2;
-  opacity: 0.85;
 }
 
 .coord.rank {
@@ -767,12 +858,16 @@ button.seat-rename:disabled {
   right: 5px;
 }
 
+/* A faint counter-shadow lifts the tiny labels off every theme's squares —
+   several palettes were below readable contrast at 10px. */
 .square.light .coord {
   color: var(--coord-dark);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
 .square.dark .coord {
   color: var(--coord-light);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
 }
 
 /* pieces */
@@ -827,9 +922,13 @@ button.seat-rename:disabled {
   overflow: visible;
 }
 
-.board-arrow line,
-.board-arrow polygon {
-  vector-effect: non-scaling-stroke;
+/* Arrow geometry is in 8x8 viewBox units. vector-effect: non-scaling-stroke
+   would reinterpret the 0.16-unit shaft as 0.16 SCREEN PIXELS — an invisible
+   hairline with a floating head. Let strokes scale with the board, and give
+   every arrow a soft light halo so it stays visible on same-hue themes
+   (blue arrows on Ocean/Nebula, green on Green, gold on Walnut). */
+.board-arrow {
+  filter: drop-shadow(0 0 0.06px rgba(255, 255, 255, 0.85));
 }
 
 .arrow-best line,
@@ -908,7 +1007,7 @@ button.seat-rename:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   margin-top: 6px;
 }
@@ -939,7 +1038,7 @@ button.seat-rename:disabled {
   grid-template-columns: 1fr;
   gap: 2px;
   padding: 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--card);
   border: 1px solid var(--rule);
   box-shadow: 0 8px 24px rgba(20, 30, 40, 0.28);
@@ -998,7 +1097,7 @@ button.seat-rename:disabled {
 /* mate ladder */
 .mate-rung {
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   padding: 12px;
   background: var(--card);
 }
@@ -1015,16 +1114,16 @@ button.seat-rename:disabled {
 }
 
 .mate-rung-head strong {
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 14px;
   font-weight: 600;
 }
 
 .mate-rung-head span {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
 }
 
@@ -1065,7 +1164,7 @@ button.seat-rename:disabled {
   border: 1px solid var(--rule);
   background: var(--card);
   color: var(--ink);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -1109,7 +1208,7 @@ button.seat-rename:disabled {
 .checkbox-field span {
   text-transform: none;
   letter-spacing: normal;
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--font-ui);
   font-size: 13.5px;
   font-weight: 500;
   color: var(--ink);
@@ -1168,17 +1267,17 @@ button.seat-rename:disabled {
 
 .ctx-head h2 {
   margin: 0;
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 500;
   font-size: 20px;
   letter-spacing: -0.01em;
 }
 
 .ctx-head .meta {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-spacing);
   color: var(--ink-3);
 }
 
@@ -1209,7 +1308,7 @@ button.seat-rename:disabled {
 
 .panel h3 {
   margin: 12px 0 4px;
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 500;
   font-size: 15px;
 }
@@ -1255,10 +1354,10 @@ button.seat-rename:disabled {
 
 .chip .k {
   color: var(--ink-3);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
 }
 
 /* mini cards (used by coach panel, etc.) */
@@ -1268,7 +1367,7 @@ button.seat-rename:disabled {
 .lab-mode-card,
 .practice-card {
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   padding: 14px;
 }
@@ -1276,10 +1375,10 @@ button.seat-rename:disabled {
 .mini-card .label,
 .panel .label {
   margin: 0 0 6px;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
 }
 
@@ -1290,7 +1389,7 @@ button.seat-rename:disabled {
 .practice-card strong {
   display: block;
   margin-bottom: 6px;
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 15px;
   font-weight: 500;
   color: var(--ink);
@@ -1316,7 +1415,7 @@ button.seat-rename:disabled {
 
 .empty-state {
   color: var(--ink-3);
-  font-style: italic;
+  font-style: var(--display-style);
 }
 
 .mini-card button,
@@ -1328,7 +1427,7 @@ button.seat-rename:disabled {
   margin-top: 10px;
   height: 30px;
   padding: 0 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   border: 1px solid var(--rule);
   background: var(--card);
   color: var(--ink);
@@ -1467,12 +1566,68 @@ button.seat-rename:disabled {
   color: var(--ink);
 }
 
+/* Only one tab may be active — the deactivated tab sits behind this. */
+.tab-lock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background: rgba(27, 33, 38, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.tab-lock-card {
+  max-width: 340px;
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  box-shadow: 0 16px 48px rgba(20, 30, 40, 0.3);
+  display: grid;
+  gap: 10px;
+  text-align: center;
+}
+
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  max-width: min(92vw, 560px);
+  margin-top: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: #2b3238;
+  color: #f4f5f7;
+  font-size: 12.5px;
+  text-align: center;
+  box-shadow: 0 6px 18px rgba(20, 30, 40, 0.3);
+}
+
 .chat-message.chat-error {
   align-self: stretch;
   max-width: 100%;
   background: var(--danger-soft);
   color: var(--danger);
   font-size: 12.5px;
+}
+
+.chat-retry {
+  margin-left: 8px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat-retry:hover {
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .chat-message.chat-thinking {
@@ -1506,8 +1661,8 @@ button.seat-rename:disabled {
   margin: 4px 0;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing-sm, 0.08em);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
   max-width: 100%;
 }
@@ -1534,13 +1689,13 @@ button.seat-rename:disabled {
 .coach-chat-form input {
   flex: 1;
   min-height: 38px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
 }
 
 .coach-chat-form button {
   min-height: 38px;
   padding: 0 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   border: none;
   background: var(--accent);
   color: #ffffff;
@@ -1583,12 +1738,12 @@ button.seat-rename:disabled {
 .skill-dim-head strong {
   margin: 0;
   font-size: 13.5px;
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--font-ui);
   font-weight: 600;
 }
 
 .skill-dim-rating {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
@@ -1627,7 +1782,7 @@ button.seat-rename:disabled {
 
 .guided-coach-message {
   padding: 9px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   border: 1px solid var(--rule);
   color: var(--ink);
@@ -1636,7 +1791,7 @@ button.seat-rename:disabled {
 
 .guided-loading {
   color: var(--ink-3);
-  font-style: italic;
+  font-style: var(--display-style);
 }
 
 .guided-review-form {
@@ -1648,13 +1803,13 @@ button.seat-rename:disabled {
 .guided-review-form input {
   flex: 1;
   min-height: 34px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
 }
 
 .guided-review-form button {
   min-height: 34px;
   padding: 0 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   border: none;
   background: var(--accent);
   color: #ffffff;
@@ -1707,7 +1862,7 @@ button.seat-rename:disabled {
 .service-row strong {
   display: block;
   margin: 0 0 2px;
-  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1756,19 +1911,159 @@ button.seat-rename:disabled {
   min-width: 0;
   padding: 9px 10px;
   border: 1px solid rgba(27, 33, 38, 0.1);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: rgba(255, 255, 255, 0.38);
 }
 
 .practice-trainer-stats strong {
   margin: 0;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 15px;
   font-weight: 600;
 }
 
 .practice-explain-card {
   background: var(--paper);
+}
+
+/* Learn tab: lesson cards, list, and progress */
+.lesson-active-card,
+.learn-path-card {
+  border-color: #c6d6f5;
+  background: var(--accent-soft);
+}
+
+.lesson-active-card.solved {
+  border-color: #b8d1b6;
+  background: var(--good-soft);
+}
+
+.lesson-flash {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+}
+
+.lesson-flash.success {
+  border: 1px solid #b8d1b6;
+  background: var(--good-soft);
+}
+
+.lesson-flash.success::before {
+  content: "✓ ";
+  color: var(--good);
+  font-weight: 700;
+}
+
+.lesson-flash.miss {
+  border: 1px solid #e8d4ad;
+  background: var(--warn-soft);
+}
+
+.lesson-flash.miss::before {
+  content: "✗ ";
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* Kept in the layout at zero size so aria-live announces new feedback. */
+.lesson-flash.empty {
+  margin: 0;
+  padding: 0;
+  min-height: 0;
+  border: none;
+  background: transparent;
+}
+
+.lesson-cheat-card .cheat-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.lesson-task-note,
+.lesson-tip {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.learn-progress-bar {
+  height: 8px;
+  margin: 10px 0 8px;
+  border-radius: 999px;
+  background: var(--rule);
+  overflow: hidden;
+}
+
+.learn-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.lesson-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lesson-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-card);
+  background: var(--card);
+}
+
+.lesson-row.done {
+  background: var(--good-soft);
+  border-color: #b8d1b6;
+}
+
+.lesson-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.lesson-index {
+  flex: none;
+  width: 22px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.lesson-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.lesson-row-body p {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.lesson-status {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--good);
+  white-space: nowrap;
+}
+
+.lesson-row button {
+  flex: none;
+  margin: 0;
 }
 
 .dismissible-card {
@@ -1855,7 +2150,7 @@ button.seat-rename:disabled {
 
 .candidate-row strong {
   margin: 0;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--ink);
   font-size: 13px;
@@ -1882,10 +2177,10 @@ button.seat-rename:disabled {
 }
 
 .field span {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
 }
 
@@ -1896,7 +2191,7 @@ textarea {
   min-height: 36px;
   padding: 8px 10px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--paper);
   color: var(--ink);
 }
@@ -1914,7 +2209,7 @@ textarea {
   text-align: left;
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   cursor: pointer;
 }
@@ -1935,7 +2230,7 @@ textarea {
 .skill-detail {
   padding: 12px 14px;
   border: 1px solid #c6d6f5;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--accent-soft);
 }
 
@@ -1943,7 +2238,7 @@ textarea {
 .skill-detail strong {
   display: block;
   margin-bottom: 8px;
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.05rem;
   font-weight: 500;
 }
@@ -1965,7 +2260,7 @@ textarea {
 .advanced-settings {
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--paper);
 }
 
@@ -1987,11 +2282,12 @@ textarea {
 .button-row .primary-action {
   border-color: var(--accent);
   background: var(--accent);
-  color: var(--paper);
+  color: var(--accent-ink);
 }
 
 .button-row .primary-action:hover {
-  background: #2558c4;
+  background: var(--accent);
+  filter: brightness(0.92);
 }
 
 .button-row button:disabled,
@@ -2042,7 +2338,7 @@ textarea {
   align-items: center;
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--card);
 }
 
@@ -2078,13 +2374,13 @@ textarea {
 .profile-summary > div {
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--card);
 }
 
 .profile-summary strong {
   display: block;
-  font-family: "Source Serif 4", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.4rem;
   font-weight: 500;
 }
@@ -2100,7 +2396,7 @@ textarea {
   gap: 6px;
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--card);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -2123,24 +2419,24 @@ textarea {
 }
 
 .move-row .move-ply {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-3);
-  letter-spacing: 0.08em;
+  letter-spacing: var(--label-spacing-sm, 0.08em);
   min-width: 30px;
 }
 
 .move-row .move-san {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--ink);
 }
 
 .move-row .move-class {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--rule);
@@ -2176,10 +2472,10 @@ textarea {
   align-items: center;
   gap: 6px;
   width: fit-content;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid var(--rule);
@@ -2203,7 +2499,7 @@ textarea {
   min-height: 24px;
   padding: 0 9px;
   border-radius: 999px;
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--font-ui);
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1;
@@ -2262,7 +2558,7 @@ textarea {
 }
 
 .move-row .move-eval {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--danger);
 }
@@ -2424,7 +2720,7 @@ textarea {
   border-radius: 50%;
   background: var(--ink);
   color: var(--paper);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 8px;
   font-weight: 600;
   line-height: 1;
@@ -2470,7 +2766,7 @@ textarea {
 .ico-btn {
   width: 38px;
   height: 38px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   border: 1px solid var(--rule);
   background: var(--card);
   color: var(--ink-2);
@@ -2478,8 +2774,8 @@ textarea {
   place-items: center;
   cursor: pointer;
   font-size: 16px;
-  font-family: "Source Serif 4", Georgia, serif;
-  font-style: italic;
+  font-family: var(--font-display);
+  font-style: var(--display-style);
   font-weight: 600;
   transition: background 0.15s ease, color 0.15s ease;
   position: relative;
@@ -2500,10 +2796,10 @@ textarea {
   bottom: -22px;
   left: 50%;
   transform: translateX(-50%);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
   color: var(--ink-3);
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -2522,9 +2818,9 @@ textarea {
 .new-btn {
   height: 38px;
   padding: 0 16px;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--paper);
+  border-radius: var(--radius-btn);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-ink);
   border: none;
   font-size: 13px;
   font-weight: 500;
@@ -2532,7 +2828,18 @@ textarea {
 }
 
 .new-btn:hover {
-  background: #000;
+  opacity: 0.86;
+}
+
+.new-btn.resign-btn {
+  background: transparent;
+  color: var(--danger, #b3403a);
+  border: 1px solid currentColor;
+  margin-right: 8px;
+}
+
+.new-btn.resign-btn:hover {
+  background: var(--danger-soft, #fbeceb);
 }
 
 .new-btn:disabled {
@@ -2618,15 +2925,17 @@ textarea {
 [data-board-theme="candy"] {
   --sq-light: #fdf1f7;
   --sq-dark: #eda3c9;
-  --coord-dark: #c26d9c;
-  --coord-light: #fef7fb;
+  /* Candy is the Family-mode default — kids get the tiny labels too, so
+     both coord colors are deep plum (the old pale pink was ~1.9:1). */
+  --coord-dark: #9c4a77;
+  --coord-light: #6e2f50;
 }
 
 [data-board-theme="nebula"] {
   --sq-light: #6b7a99;
   --sq-dark: #3d4a66;
-  --coord-dark: #2c374d;
-  --coord-light: #93a1bd;
+  --coord-dark: #141b2b;
+  --coord-light: #dfe6f2;
 }
 
 [data-board-theme="middle-realm"] {
@@ -2634,6 +2943,559 @@ textarea {
   --sq-dark: #7d8a5c;
   --coord-dark: #626e46;
   --coord-light: #f0ead1;
+}
+
+/* Sorbet pairs with the Arcade app look: mint scoops on cream. */
+[data-board-theme="sorbet"] {
+  --sq-light: #fbf1d7;
+  --sq-dark: #66c2ae;
+  --coord-dark: #2e7f6e;
+  --coord-light: #fdf8e9;
+}
+
+/* Nebula is the one dark-on-dark palette: the default dark move dots and
+   multiply-blended yellow last-move tint disappear on it entirely. */
+[data-board-theme="nebula"] .square.target::before {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+[data-board-theme="nebula"] .square.target-capture::before {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+[data-board-theme="nebula"] .square.last-from::before,
+[data-board-theme="nebula"] .square.last-to::before {
+  background: rgba(246, 232, 94, 0.35);
+  mix-blend-mode: screen;
+}
+
+/* ─────────── App looks ───────────
+   Whole-app skins selected in Settings ("App look"). Each block only
+   overrides the tokens declared in :root plus a few component accents, so
+   the three looks and future ones stay cheap to maintain.
+   - woodland: warm, cozy, mascot-forward (default)
+   - arcade:   loud comic-shop energy — saturated red, fat pills, stickers
+   - classic:  the original quiet editorial look (no override block needed) */
+[data-app-theme="woodland"] {
+  --paper: #f6efdf;
+  --paper-2: #eee4cc;
+  --paper-3: #e4d6b8;
+  --ink: #33291c;
+  --ink-2: #59492f;
+  --ink-3: #6f5e40;
+  --rule: #e2d5b9;
+  --rule-2: #c4b28a;
+  --card: #fffdf6;
+  --highlight: #edb95e;
+
+  --accent: #9c5617;
+  --accent-soft: #f6e8d2;
+  --warn: #a05f14;
+  --warn-soft: #f6ead0;
+  --danger: #b23a2b;
+  --danger-soft: #f8e4dd;
+  --good: #3e6f34;
+  --good-soft: #e4eed7;
+
+  --font-ui: "Nunito", "IBM Plex Sans", system-ui, sans-serif;
+  --font-display: "Nunito", "Source Serif 4", Georgia, serif;
+  --display-weight: 800;
+  --display-style: normal;
+  --label-transform: none;
+  --label-spacing: 0.03em;
+  --radius-card: 14px;
+  --radius-btn: 10px;
+  --shadow-card: 0 1px 3px rgba(87, 63, 28, 0.1);
+  --shadow-pop: 0 12px 26px rgba(87, 63, 28, 0.18);
+  --body-bg:
+    radial-gradient(1400px 700px at 50% -10%, #fffdf4 0%, transparent 60%),
+    var(--paper);
+  --btn-primary-bg: #4a3820;
+  --btn-primary-ink: #fff6e2;
+  --accent-ink: #ffffff;
+}
+
+/* Woodland headings drop the serif italics for chunky rounded warmth. */
+[data-app-theme="woodland"] .ctx-head h2,
+[data-app-theme="woodland"] .panel h3,
+[data-app-theme="woodland"] .mini-card strong,
+[data-app-theme="woodland"] .lesson-card strong,
+[data-app-theme="woodland"] .skill-card strong,
+[data-app-theme="woodland"] .lab-mode-card strong,
+[data-app-theme="woodland"] .practice-card strong {
+  font-weight: var(--display-weight);
+}
+
+[data-app-theme="woodland"] .seat.turn {
+  border-color: rgba(156, 86, 23, 0.4);
+  background: rgba(246, 232, 210, 0.6);
+}
+
+[data-app-theme="arcade"] {
+  --paper: #f7e8a9;
+  --paper-2: #f1de8e;
+  --paper-3: #e8cf6f;
+  --ink: #221533;
+  --ink-2: #453556;
+  --ink-3: #635372;
+  --rule: #e8d47f;
+  --rule-2: #d5bc5c;
+  --card: #fffdf6;
+  --highlight: #ffc93c;
+
+  --accent: #d02c7d;
+  --accent-soft: #ffd2e9;
+  --warn: #a05a10;
+  --warn-soft: #fde9c8;
+  --danger: #d2352b;
+  --danger-soft: #fbe0d8;
+  --good: #2c8c46;
+  --good-soft: #c9f0d2;
+
+  --font-ui: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+  --font-display: "Baloo 2", "Source Serif 4", sans-serif;
+  --display-weight: 800;
+  --display-style: normal;
+  --label-transform: uppercase;
+  --label-spacing: 0.14em;
+  --radius-card: 18px;
+  --radius-btn: 999px;
+  --shadow-card: 0 2px 0 rgba(34, 21, 51, 0.06);
+  --shadow-pop: 0 16px 34px rgba(34, 21, 51, 0.16);
+  --body-bg: #f7e8a9;
+  --btn-primary-bg: #2f45e6;
+  --btn-primary-ink: #ffffff;
+  --accent-ink: #ffffff;
+}
+
+/* ── Arcade: candy pop ──
+   Cream paper base, flat saturated colour blocks, blobby chunky display
+   type, tilted sticker cards, a marquee ticker, and doodle accents. */
+
+/* Blobby display type everywhere a heading lives. The page title gets the
+   full "ORDERS & SHIPPING" treatment: a tilted cobalt band. */
+[data-app-theme="arcade"] .ctx-head h2 {
+  font-weight: 800;
+  font-size: 22px;
+  letter-spacing: 0.01em;
+  width: fit-content;
+  padding: 1px 14px 3px;
+  border-radius: 10px;
+  background: #2f45e6;
+  color: #fffdf6;
+  transform: rotate(-0.8deg);
+}
+
+/* Section headings get a pink highlighter swipe. */
+[data-app-theme="arcade"] .panel h3,
+[data-app-theme="arcade"] .panel[data-panel="you"].active > h2:first-child {
+  width: fit-content;
+  padding: 0 10px 1px;
+  border-radius: 7px;
+  font-size: 15.5px;
+  background: linear-gradient(100deg, #ff9fce, #ffbfe1);
+  color: var(--ink);
+  transform: rotate(-0.5deg);
+}
+
+[data-app-theme="arcade"] .panel[data-panel="you"].active > h2:first-child {
+  font-size: 17px;
+  font-weight: 800;
+  border-top: none;
+  padding-top: 0;
+  margin-top: 14px;
+}
+
+[data-app-theme="arcade"] .panel h3,
+[data-app-theme="arcade"] .mini-card strong,
+[data-app-theme="arcade"] .lesson-card strong,
+[data-app-theme="arcade"] .skill-card strong,
+[data-app-theme="arcade"] .lab-mode-card strong,
+[data-app-theme="arcade"] .practice-card strong,
+[data-app-theme="arcade"] .seat .who .name {
+  font-weight: 800;
+}
+
+/* Sunshine rail — one big colour block, white sticker pill when active. */
+[data-app-theme="arcade"] .rail {
+  background: #ffc93c;
+  border-right: none;
+}
+
+[data-app-theme="arcade"] .rail-mark {
+  background: #fffdf6;
+  border-color: transparent;
+  box-shadow: none;
+  transform: rotate(-3deg);
+}
+
+[data-app-theme="arcade"] .rail-section,
+[data-app-theme="arcade"] .rail-foot {
+  color: #6b4d0a;
+  border-color: rgba(34, 21, 51, 0.18);
+}
+
+[data-app-theme="arcade"] .nav-item {
+  color: #4a3608;
+  font-weight: 700;
+}
+
+[data-app-theme="arcade"] .nav-item .nav-mono {
+  color: inherit;
+}
+
+[data-app-theme="arcade"] .nav-item:hover {
+  background: rgba(255, 253, 246, 0.5);
+}
+
+[data-app-theme="arcade"] .nav-item.active {
+  background: #fffdf6;
+  color: #221533;
+  box-shadow: var(--shadow-card);
+  transform: rotate(-1.4deg);
+}
+
+[data-app-theme="arcade"] .nav-item.active .nav-mono {
+  color: #d02c7d;
+}
+
+[data-app-theme="arcade"] .nav-item.active::before {
+  background: transparent;
+}
+
+/* Right panel: cream sheet, candy-cycled sticker cards with a slight
+   alternating tilt that straightens under the pointer. */
+[data-app-theme="arcade"] .context {
+  border-left: none;
+  background: var(--paper);
+}
+
+[data-app-theme="arcade"] .ctx-head {
+  background: var(--paper);
+  border-bottom: none;
+}
+
+[data-app-theme="arcade"] .ctx-foot {
+  background: var(--paper);
+  border-top-color: rgba(34, 21, 51, 0.14);
+}
+
+[data-app-theme="arcade"] .mini-card,
+[data-app-theme="arcade"] .lesson-card,
+[data-app-theme="arcade"] .skill-card,
+[data-app-theme="arcade"] .lab-mode-card,
+[data-app-theme="arcade"] .practice-card {
+  border: 3px solid #fffdf6;
+  box-shadow: 4px 4px 0 rgba(34, 21, 51, 0.14);
+  background: #ffd2e9;
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(4n + 1),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(4n + 1),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(4n + 1) {
+  background: #ffd2e9; /* strawberry */
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(4n + 2),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(4n + 2),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(4n + 2) {
+  background: #cdd6ff; /* blueberry */
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(4n + 3),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(4n + 3),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(4n + 3) {
+  background: #b9edca; /* mint */
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(4n),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(4n),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(4n) {
+  background: #ffd9b0; /* tangerine — lemon vanishes on the butter page */
+}
+
+/* Eyebrow labels: white sticker pills with cobalt ink instead of gray caps. */
+[data-app-theme="arcade"] .mini-card .label,
+[data-app-theme="arcade"] .panel .label {
+  display: inline-block;
+  width: fit-content;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #fffdf6;
+  color: #2f45e6;
+  font-weight: 600;
+  box-shadow: 0 1px 0 rgba(34, 21, 51, 0.12);
+}
+
+/* Service status rows: bigger candy dots. */
+[data-app-theme="arcade"] .service-row {
+  grid-template-columns: 14px 1fr;
+}
+
+[data-app-theme="arcade"] .service-row .service-dot {
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 0 3px #fffdf6;
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(odd),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(odd),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(odd) {
+  transform: rotate(-0.7deg);
+}
+
+[data-app-theme="arcade"] .panel .mini-card:nth-child(even),
+[data-app-theme="arcade"] .panel .lesson-card:nth-child(even),
+[data-app-theme="arcade"] .panel .practice-card:nth-child(even) {
+  transform: rotate(0.7deg);
+}
+
+[data-app-theme="arcade"] .panel .mini-card:hover,
+[data-app-theme="arcade"] .panel .lesson-card:hover,
+[data-app-theme="arcade"] .panel .practice-card:hover,
+[data-app-theme="arcade"] .panel .mini-card:focus-within,
+[data-app-theme="arcade"] .panel .lesson-card:focus-within,
+[data-app-theme="arcade"] .panel .practice-card:focus-within {
+  transform: rotate(0deg);
+}
+
+[data-app-theme="arcade"] .mini-card,
+[data-app-theme="arcade"] .lesson-card,
+[data-app-theme="arcade"] .skill-card,
+[data-app-theme="arcade"] .lab-mode-card,
+[data-app-theme="arcade"] .practice-card {
+  transition: transform 0.18s ease;
+}
+
+/* Buttons: fat pills. Primary = cobalt, in-card = outlined ink. */
+[data-app-theme="arcade"] .mini-card button,
+[data-app-theme="arcade"] .lesson-card button,
+[data-app-theme="arcade"] .skill-card button,
+[data-app-theme="arcade"] .lab-mode-card button,
+[data-app-theme="arcade"] .practice-card button,
+[data-app-theme="arcade"] .button-row button {
+  border: 2px solid var(--ink);
+  background: transparent;
+  font-weight: 700;
+}
+
+[data-app-theme="arcade"] .button-row .primary-action {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+[data-app-theme="arcade"] .new-btn {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+
+[data-app-theme="arcade"] .new-btn.resign-btn {
+  background: transparent;
+}
+
+/* Seats: flat candy pills — lilac vs mint, pink flip on the active turn. */
+[data-app-theme="arcade"] .seat {
+  border-color: transparent;
+  border-radius: 999px;
+  padding: 10px 16px;
+  box-shadow: var(--shadow-card);
+}
+
+[data-app-theme="arcade"] .seat.opponent {
+  background: #ddc9fb;
+}
+
+[data-app-theme="arcade"] .seat.player {
+  background: #bfeecd;
+}
+
+[data-app-theme="arcade"] .seat.turn {
+  background: #ffc4e2;
+  border-color: transparent;
+}
+
+[data-app-theme="arcade"] .seat.inactive-turn {
+  opacity: 1;
+}
+
+[data-app-theme="arcade"] .seat.inactive-turn .avatar,
+[data-app-theme="arcade"] .seat.inactive-turn .who {
+  opacity: 0.75;
+}
+
+[data-app-theme="arcade"] .seat .pill.active {
+  border-color: transparent;
+  background: var(--ink);
+  color: #ffd84d;
+}
+
+[data-app-theme="arcade"] .board-host {
+  border-radius: 14px;
+  box-shadow: var(--shadow-pop);
+}
+
+/* Marquee ticker: a thin scrolling strip across the top of the stage.
+   Decorative DOM lives in index.html and only shows in this look. */
+.stage-marquee {
+  display: none;
+}
+
+[data-app-theme="arcade"] .stage-marquee {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  background: #2f45e6;
+  color: #fffdf6;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  line-height: 26px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+[data-app-theme="arcade"] .stage-marquee span {
+  display: inline-block;
+  padding-right: 0;
+  animation: marquee-scroll 26s linear infinite;
+}
+
+@keyframes marquee-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+
+/* Doodle accents: hand-drawn scribbles in the stage corners. */
+[data-app-theme="arcade"] .stage::before,
+[data-app-theme="arcade"] .stage::after {
+  content: "";
+  position: absolute;
+  width: 54px;
+  height: 54px;
+  pointer-events: none;
+  opacity: 0.55;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+
+[data-app-theme="arcade"] .stage::before {
+  top: 40px;
+  left: 20px;
+  transform: rotate(-12deg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 54 54' fill='none' stroke='%23d02c7d' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M27 6l4.8 13.4L46 20l-11 8.6L39.4 43 27 34.6 14.6 43 19 28.6 8 20l14.2-.6z'/%3E%3C/svg%3E");
+}
+
+[data-app-theme="arcade"] .stage::after {
+  right: 22px;
+  bottom: 18px;
+  transform: rotate(8deg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 54 54' fill='none' stroke='%232f45e6' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6 34c6-12 10-12 14-4s8 8 12-2 8-10 14-2'/%3E%3C/svg%3E");
+}
+
+/* Floating emoji decorations: askew stickers scattered at random around the
+   viewport (app.js positions them, keeps them off the board, and reshuffles
+   every minute or so). Clicking one zaps it away. Arcade-only. */
+.arcade-float {
+  display: none;
+}
+
+[data-app-theme="arcade"] .arcade-float {
+  display: block;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 90;
+}
+
+[data-app-theme="arcade"] .arcade-float span {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  transform: rotate(var(--rot, 0deg));
+  animation: float-bob var(--dur, 8s) ease-in-out var(--delay, 0s) infinite;
+  filter: drop-shadow(0 3px 0 rgba(34, 21, 51, 0.12));
+}
+
+[data-app-theme="arcade"] .arcade-float span.ufo {
+  animation-name: ufo-drift;
+}
+
+/* The pop (new spot) and zap (clicked) effects animate scale/opacity only,
+   so they compose with the transform-based bob instead of fighting it. */
+[data-app-theme="arcade"] .arcade-float span.popping {
+  animation:
+    float-bob var(--dur, 8s) ease-in-out var(--delay, 0s) infinite,
+    emoji-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+[data-app-theme="arcade"] .arcade-float span.popping.ufo {
+  animation:
+    ufo-drift var(--dur, 8s) ease-in-out var(--delay, 0s) infinite,
+    emoji-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+[data-app-theme="arcade"] .arcade-float span.zapped {
+  pointer-events: none;
+  animation:
+    float-bob var(--dur, 8s) ease-in-out var(--delay, 0s) infinite,
+    emoji-zap 0.35s ease forwards;
+}
+
+@keyframes float-bob {
+  0%, 100% { transform: translateY(0) rotate(var(--rot, 0deg)); }
+  50% { transform: translateY(-12px) rotate(calc(var(--rot, 0deg) + 7deg)); }
+}
+
+@keyframes ufo-drift {
+  0%, 100% { transform: translate(0, 0) rotate(var(--rot, 0deg)); }
+  50% { transform: translate(-34px, -10px) rotate(calc(var(--rot, 0deg) + 8deg)); }
+}
+
+@keyframes emoji-pop {
+  0% { scale: 0; opacity: 0; }
+  70% { scale: 1.25; opacity: 1; }
+  100% { scale: 1; }
+}
+
+@keyframes emoji-zap {
+  0% { scale: 1; opacity: 1; }
+  35% { scale: 1.35; }
+  100% { scale: 0; opacity: 0; }
+}
+
+@media (max-width: 900px) {
+  [data-app-theme="arcade"] .stage::before,
+  [data-app-theme="arcade"] .stage::after,
+  [data-app-theme="arcade"] .stage-marquee {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-app-theme="arcade"] .stage-marquee span {
+    animation: none;
+  }
+
+  [data-app-theme="arcade"] .arcade-float {
+    display: none;
+  }
+
+  [data-app-theme="arcade"] .panel .mini-card,
+  [data-app-theme="arcade"] .panel .lesson-card,
+  [data-app-theme="arcade"] .panel .practice-card,
+  [data-app-theme="arcade"] .nav-item.active,
+  [data-app-theme="arcade"] .rail-mark {
+    transform: none;
+    transition: none;
+  }
 }
 
 /* Theme swatches + piece set previews in Settings.
@@ -2655,7 +3517,7 @@ textarea {
   height: auto;
   padding: 8px 6px;
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   cursor: pointer;
   font-size: 12px;
@@ -2680,6 +3542,31 @@ textarea {
   overflow: hidden;
 }
 
+/* App look picker: one row of four color chips + a name and mood line. */
+.app-look-grid {
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+}
+
+.app-look-preview {
+  grid-template-columns: repeat(4, 13px);
+  grid-template-rows: 13px;
+}
+
+.mini-card .app-look-option strong,
+.app-look-option strong {
+  display: block;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.app-look-blurb {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  line-height: 1.2;
+}
+
 .mini-card .piece-set-option,
 .piece-set-option {
   display: grid;
@@ -2689,7 +3576,7 @@ textarea {
   height: auto;
   padding: 8px 6px;
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   cursor: pointer;
   font-size: 12px;
@@ -2732,7 +3619,7 @@ textarea {
   height: auto;
   padding: 10px 12px;
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--card);
   cursor: pointer;
 }
@@ -2803,7 +3690,7 @@ textarea {
 }
 
 .boot-veil-inner strong {
-  font-family: "Source Serif 4", serif;
+  font-family: var(--font-display);
   font-size: 18px;
   color: var(--ink);
 }
@@ -2859,7 +3746,7 @@ textarea {
 
 .auth-card h2 {
   margin: 4px 0 0;
-  font-family: "Source Serif 4", serif;
+  font-family: var(--font-display);
   font-size: 24px;
 }
 
@@ -2877,7 +3764,7 @@ textarea {
 .auth-submit {
   min-height: 40px;
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--accent);
   color: #ffffff;
   font-weight: 600;
@@ -2896,7 +3783,7 @@ textarea {
 .auth-error {
   margin: 0;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--danger-soft);
   color: var(--danger);
 }
@@ -2909,7 +3796,7 @@ textarea {
 .auth-notice {
   margin: 0;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--good-soft);
   color: var(--good);
 }
@@ -2948,10 +3835,10 @@ textarea {
   border: none;
   background: none;
   color: var(--ink-3);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing-sm, 0.08em);
+  text-transform: var(--label-transform);
   cursor: pointer;
   padding: 6px 6px;
 }
@@ -2991,10 +3878,10 @@ textarea {
 }
 
 .pw-meter-label {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: var(--label-spacing);
+  text-transform: var(--label-transform);
 }
 
 .pw-meter.weak .pw-meter-label { color: var(--danger); }
@@ -3015,11 +3902,11 @@ textarea {
 }
 
 .auth-sent-email {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   padding: 6px 10px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--paper);
 }
 
@@ -3027,7 +3914,7 @@ textarea {
   min-height: 36px;
   padding: 0 14px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--radius-btn);
   background: var(--card);
   cursor: pointer;
 }
@@ -3076,6 +3963,16 @@ textarea {
     overscroll-behavior-y: contain;
   }
 
+  /* Narrow phones: lesson title/summary get the full first line; status and
+     the action button wrap below instead of crushing the text. */
+  .lesson-row {
+    flex-wrap: wrap;
+  }
+
+  .lesson-row-body {
+    flex-basis: calc(100% - 32px);
+  }
+
   .shell {
     display: flex;
     flex-direction: column;
@@ -3114,7 +4011,7 @@ textarea {
     height: auto;
     min-width: 44px;
     padding: 6px 2px;
-    border-radius: 10px;
+    border-radius: var(--radius-card);
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -3144,11 +4041,14 @@ textarea {
     background: var(--accent-soft);
   }
 
-  /* Stage: board capped so the panel below keeps real estate on tablets */
+  /* Stage: board capped so the panel below keeps real estate on tablets.
+     The 100dvh term is floored at 240px so a landscape phone (short
+     viewport) gets a small-but-usable board instead of a 40px (or negative)
+     one. */
   .stage {
     order: 0;
     flex: none;
-    --board-size: min(640px, calc(100vw - 54px), calc(100dvh - 350px));
+    --board-size: min(640px, calc(100vw - 54px), max(calc(100dvh - 350px), 240px));
     padding: 8px 12px 4px;
     gap: 4px;
   }
@@ -3230,9 +4130,450 @@ textarea {
     max-height: 45dvh;
   }
 
-  /* Profile and Settings don't need the board — give them the full screen. */
-  body[data-active-tab="profile"] .stage,
-  body[data-active-tab="settings"] .stage {
+  /* Today and You don't need the board — give them the full screen. */
+  body[data-active-tab="today"] .stage,
+  body[data-active-tab="you"] .stage {
     display: none;
+  }
+}
+
+/* Landscape phones: the portrait math (viewport height minus ~350px of
+   chrome) collapses to nothing. Size the board off the height instead and
+   let the teacher panel take the remaining width. */
+@media (max-width: 950px) and (orientation: landscape) and (max-height: 520px) {
+  .stage {
+    --board-size: min(calc(100dvh - 130px), calc(100vw - 380px));
+  }
+}
+
+.boot-veil .boot-error {
+  max-width: 280px;
+  font-size: 13px;
+  color: var(--ink-2);
+  text-align: center;
+}
+
+.boot-veil .primary-action {
+  padding: 8px 20px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: var(--ink);
+  color: var(--paper);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ─────────── Dialogs + toasts ─────────── */
+
+.app-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 380;
+  display: grid;
+  place-items: center;
+  background: rgba(27, 33, 38, 0.45);
+  backdrop-filter: blur(1.5px);
+}
+
+.app-dialog {
+  max-width: 360px;
+  margin: 16px;
+  padding: 20px 22px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  box-shadow: 0 16px 48px rgba(20, 30, 40, 0.3);
+  display: grid;
+  gap: 10px;
+}
+
+.app-dialog strong {
+  font-family: var(--font-display);
+  font-size: 17px;
+}
+
+.app-dialog p {
+  font-size: 13.5px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.app-dialog .button-row {
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.app-dialog button {
+  padding: 8px 16px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--rule-2);
+  background: var(--paper-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.app-dialog button.primary-action {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.app-dialog button.danger-button {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+.toast-host {
+  position: fixed;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 390;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  pointer-events: none;
+}
+
+.toast {
+  max-width: min(92vw, 420px);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: #2b3238;
+  color: #f4f5f7;
+  font-size: 13px;
+  box-shadow: 0 6px 18px rgba(20, 30, 40, 0.3);
+  animation: toast-in 200ms ease-out;
+}
+
+.toast.toast-success { background: var(--good, #2e7d43); color: #fff; }
+.toast.toast-warn { background: var(--warn, #a86a1e); color: #fff; }
+
+.toast.leaving {
+  opacity: 0;
+  transition: opacity 280ms ease;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+
+/* Mobile bottom bar overlaps the toast anchor — lift it clear. */
+@media (max-width: 900px) {
+  .toast-host {
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ─────────── Today panel + You panel ─────────── */
+
+.today-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.today-hero .today-mascot {
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+
+.today-hero strong {
+  font-family: var(--font-display);
+  font-size: 17px;
+}
+
+.today-hero p {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.weekly-recap-card p {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+/* The You tab stacks the Profile and Settings sections — their <h2>s
+   (hidden everywhere else because the ctx-head repeats them) become the
+   visible section dividers here. */
+.panel[data-panel="you"].active > h2:first-child {
+  display: block;
+  margin: 6px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+}
+
+#profilePanel.active > h2:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* Unread coach dot on the Play nav item. */
+.nav-badge.nav-dot {
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ─────────── Review timeline scrub bar ─────────── */
+
+.timeline-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-card);
+  background: var(--card);
+}
+
+.timeline-bar button {
+  min-width: 34px;
+  height: 30px;
+  border: 1px solid var(--rule-2);
+  border-radius: 7px;
+  background: var(--paper-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.timeline-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.timeline-label {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-hint {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+@media (pointer: coarse) {
+  .timeline-hint { display: none; }
+  .timeline-bar button { min-width: 42px; height: 38px; }
+}
+
+.skill-sparkline {
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.skill-sparkline path {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+
+/* ─────────── Ambient coach bubble ─────────── */
+
+.coach-bubble {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(88%, 420px);
+  padding: 10px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  box-shadow: 0 10px 28px rgba(20, 30, 40, 0.22);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  color: var(--ink);
+  animation: toast-in 200ms ease-out;
+}
+
+.coach-bubble img {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.coach-bubble span {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+.coach-bubble:hover {
+  border-color: var(--rule-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-bubble { animation: none; }
+}
+
+/* ─────────── First-run tour ─────────── */
+
+/* Non-modal: the overlay is just a positioning host — clicks pass through
+   everywhere except the popover itself. */
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 370;
+  pointer-events: none;
+}
+
+.tour-pop {
+  position: fixed;
+  pointer-events: auto;
+  width: 280px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  box-shadow: 0 14px 40px rgba(20, 30, 40, 0.3);
+  display: grid;
+  gap: 8px;
+}
+
+.tour-pop strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+}
+
+.tour-pop p {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.tour-pop .button-row {
+  justify-content: flex-end;
+}
+
+.tour-pop button {
+  padding: 6px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--rule-2);
+  background: var(--paper-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tour-pop button.primary-action {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.tour-count {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.empty-state-mascot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-style: normal;
+}
+
+.empty-state-mascot img {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  opacity: 0.8;
+}
+
+/* ─────────── Fun-factor micro-interactions ───────────
+   Small, motion-safe touches shared by every app look. */
+.today-hero .today-mascot,
+.empty-state-mascot img {
+  transition: transform 0.25s ease;
+}
+
+.today-hero:hover .today-mascot,
+.empty-state-mascot:hover img {
+  transform: rotate(-8deg) scale(1.08);
+}
+
+/* The active player's turn dot breathes gently. */
+.seat .pill.active .dot {
+  animation: turn-dot-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes turn-dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.7; }
+}
+
+/* Move-quality verdicts pop in instead of blinking into place. */
+.quality-pill {
+  animation: quality-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes quality-pop {
+  from { transform: scale(0.7); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Tappable cards lift a touch on hover. */
+button.practice-card:not(:disabled):hover,
+.mini-card .theme-swatch:hover,
+.mini-card .piece-set-option:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card);
+}
+
+button.practice-card,
+.mini-card .theme-swatch,
+.mini-card .piece-set-option {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seat .pill.active .dot,
+  .quality-pill {
+    animation: none;
+  }
+
+  .today-hero .today-mascot,
+  .empty-state-mascot img,
+  button.practice-card,
+  .mini-card .theme-swatch,
+  .mini-card .piece-set-option {
+    transition: none;
+  }
+
+  button.practice-card:not(:disabled):hover,
+  .mini-card .theme-swatch:hover,
+  .mini-card .piece-set-option:hover {
+    transform: none;
   }
 }

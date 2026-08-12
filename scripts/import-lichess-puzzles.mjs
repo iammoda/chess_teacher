@@ -75,7 +75,9 @@ function buildPuzzle(row) {
   const moves = movesField.split(" ").filter(Boolean);
   const themes = themesField.split(" ").filter(Boolean);
 
-  if (!Number.isFinite(rating) || deviation > MAX_RATING_DEVIATION) return null;
+  // NaN comparisons are always false — a malformed deviation field must be
+  // rejected, not silently accepted.
+  if (!Number.isFinite(rating) || !Number.isFinite(deviation) || deviation > MAX_RATING_DEVIATION) return null;
   if (popularity < MIN_POPULARITY || plays < MIN_PLAYS) return null;
   if (moves.length < 2 || moves.length > MAX_SOLUTION_PLIES || moves.length % 2 !== 0) return null;
 
@@ -94,7 +96,14 @@ function buildPuzzle(row) {
 
   const [setupUci, ...solutionLine] = moves;
   for (const [index, uci] of moves.entries()) {
-    const move = game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    // Vendored chess.js THROWS on invalid moves (it never returns null) —
+    // one bad row must skip that row, not abort the whole import.
+    let move;
+    try {
+      move = game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    } catch {
+      return null;
+    }
     if (!move) return null;
     if (index === 0) {
       row.startFen = game.fen();

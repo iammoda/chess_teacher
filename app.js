@@ -6,12 +6,14 @@ import { StockfishEngine } from "./lib/stockfish-engine.mjs";
 import { attachDragHandlers } from "./lib/board-drag.mjs";
 import { arrowsOverlaySvg, uciToArrow } from "./lib/board-arrows.mjs";
 import { playSound, classifyMoveForSound } from "./lib/sounds.mjs";
+import { burstConfetti } from "./lib/confetti.mjs";
 import { compactTranscript, appendMemoryNote, appendTrace, memoryForPayload, streamCoachChat } from "./lib/coach-client.mjs";
 import { createApiClient, ApiError } from "./lib/api-client.mjs";
 import { scorePassword, MIN_PASSWORD_LENGTH } from "./lib/password-strength.mjs";
 import {
   SKILL_DIMENSIONS,
   DIMENSION_LABELS,
+  SEED_SAMPLES,
   createEmptySkillState,
   seedSkillStateFromScore,
   applyMoveToSkillState,
@@ -26,6 +28,7 @@ import { GRADE_MISSED, GRADE_HARD, GRADE_SOLVED, createSrs, ensureSrs, applyGrad
 import { normalizePackPuzzle, ratingBandForScore, selectRatedPuzzle } from "./lib/puzzle-packs.mjs";
 import { COACH_PERSONAS, normalizePersonaKey } from "./lib/personas.mjs";
 import { coachModeAllows as coachModeAllowsForMode } from "./lib/coach-mode.mjs";
+import { LESSONS, getLessonById, getNextLesson, allLessonsComplete, beginnerTips } from "./lib/learn-lessons.mjs";
 
 const PIECE_SPRITE_ROOT = "/vendor/pieces/";
 const DEFAULT_PIECE_SET = "merida";
@@ -41,6 +44,7 @@ const BOARD_THEMES = [
   { key: "ocean", label: "Ocean", light: "#e6eef5", dark: "#88a8c3" },
   { key: "rosewood", label: "Rosewood", light: "#f0e0dd", dark: "#ab7168" },
   { key: "candy", label: "Candy", light: "#fdf1f7", dark: "#eda3c9" },
+  { key: "sorbet", label: "Sorbet", light: "#fbf1d7", dark: "#66c2ae" },
   { key: "nebula", label: "Nebula", light: "#6b7a99", dark: "#3d4a66" },
   { key: "middle-realm", label: "Middle Realm", light: "#e8e0c0", dark: "#7d8a5c" },
 ];
@@ -56,6 +60,173 @@ function applyBoardTheme(key) {
   } else {
     document.documentElement.dataset.boardTheme = theme;
   }
+}
+
+// App looks: whole-app skins. Keys map to [data-app-theme] token blocks in
+// styles.css; "classic" is the bare :root and needs no attribute. The
+// preview colors here only draw the Settings swatches.
+const APP_THEMES = [
+  { key: "woodland", label: "Cozy", blurb: "Warm and friendly", colors: ["#f6efdf", "#fffdf6", "#9c5617", "#33291c"] },
+  { key: "arcade", label: "Arcade", blurb: "Candy-bright and loud", colors: ["#f7e8a9", "#ffc93c", "#d02c7d", "#2f45e6"] },
+  { key: "classic", label: "Classic", blurb: "Quiet and focused", colors: ["#f6f8fa", "#ffffff", "#2f6fed", "#1b2126"] },
+];
+
+// Each look suggests a matching board palette. Applied only while the player
+// has never hand-picked a board theme (see boardThemeAuto).
+const APP_THEME_BOARD_SUGGESTIONS = {
+  woodland: "walnut",
+  arcade: "sorbet",
+  classic: "slate",
+};
+
+function normalizeAppThemeKey(key) {
+  return APP_THEMES.some((theme) => theme.key === key) ? key : "woodland";
+}
+
+function applyAppTheme(key) {
+  const theme = normalizeAppThemeKey(key);
+  if (theme === "classic") {
+    delete document.documentElement.dataset.appTheme;
+  } else {
+    document.documentElement.dataset.appTheme = theme;
+  }
+  syncArcadeEmojis();
+}
+
+// ── Arcade floating emojis ──
+// Decorative stickers scattered at random spots around the viewport — never
+// on the board — and reshuffled with a little pop every minute or so. The
+// layer is aria-hidden and pointer-events: none (see styles.css), so this is
+// pure set dressing: reduced-motion users never see it, and it only runs
+// while the arcade look is active.
+const ARCADE_EMOJIS = ["👾", "👽", "🤖", "🎮", "🕹️", "🎱", "⭐", "🌟", "✨", "🛸", "🌙", "🪐"];
+const ARCADE_EMOJI_SHUFFLE_MS = 60000;
+let arcadeEmojiTimer = null;
+
+function arcadeEmojiCount() {
+  return window.innerWidth <= 900 ? 10 : ARCADE_EMOJIS.length * 2;
+}
+
+// Picks a random spot for one emoji, rejecting anything that would touch the
+// board (inflated a bit so nothing kisses the edge) or the mobile nav strip.
+function pickArcadeEmojiSpot(size, boardRect) {
+  const pad = 20;
+  const mobile = window.innerWidth <= 900;
+  const maxX = Math.max(1, window.innerWidth - size - 8);
+  const maxY = Math.max(1, window.innerHeight - size - (mobile ? 84 : 8));
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const x = 4 + Math.random() * maxX;
+    const y = 4 + Math.random() * maxY;
+    if (!boardRect
+      || x + size < boardRect.left - pad
+      || x > boardRect.right + pad
+      || y + size < boardRect.top - pad
+      || y > boardRect.bottom + pad) {
+      return { x, y };
+    }
+  }
+  // Every try landed on the board (tiny viewport): park it at the top edge.
+  return { x: 4 + Math.random() * maxX, y: 4 };
+}
+
+function placeArcadeEmoji(span, boardRect) {
+  const mobile = window.innerWidth <= 900;
+  const size = mobile ? 16 + Math.random() * 10 : 16 + Math.random() * 20;
+  const spot = pickArcadeEmojiSpot(size, boardRect);
+  span.style.left = `${Math.round(spot.x)}px`;
+  span.style.top = `${Math.round(spot.y)}px`;
+  span.style.fontSize = `${Math.round(size)}px`;
+  span.style.setProperty("--rot", `${Math.round(-25 + Math.random() * 47)}deg`);
+  span.style.setProperty("--dur", `${(6 + Math.random() * 5).toFixed(1)}s`);
+  span.style.setProperty("--delay", `${(-Math.random() * 6).toFixed(1)}s`);
+}
+
+function getArcadeBoardRect() {
+  const board = document.querySelector("#board");
+  if (!board || !board.offsetParent) return null;
+  const rect = board.getBoundingClientRect();
+  return rect.width > 0 ? rect : null;
+}
+
+// (Re)builds and scatters the emoji layer. With { pop: true } each emoji
+// hops to its new spot with a staggered scale-bounce so the room ripples.
+function placeArcadeEmojis({ pop = false } = {}) {
+  const layer = document.querySelector(".arcade-float");
+  if (!layer) return;
+  const count = arcadeEmojiCount();
+  while (layer.children.length < count) {
+    const span = document.createElement("span");
+    span.textContent = ARCADE_EMOJIS[layer.children.length % ARCADE_EMOJIS.length];
+    layer.append(span);
+  }
+  while (layer.children.length > count) layer.lastElementChild.remove();
+  const boardRect = getArcadeBoardRect();
+  [...layer.children].forEach((span, i) => {
+    span.classList.toggle("ufo", span.textContent === "🛸");
+    if (!pop) {
+      placeArcadeEmoji(span, boardRect);
+      return;
+    }
+    setTimeout(() => {
+      // Re-check the board on each hop — a panel switch or resize may have
+      // moved it while the ripple was still playing out.
+      placeArcadeEmoji(span, getArcadeBoardRect());
+      span.classList.remove("popping");
+      void span.offsetWidth; // restart the pop animation
+      span.classList.add("popping");
+    }, i * 220);
+  });
+}
+
+function syncArcadeEmojis() {
+  const arcadeActive = document.documentElement.dataset.appTheme === "arcade"
+    && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (!arcadeActive) {
+    clearTimeout(arcadeEmojiTimer);
+    arcadeEmojiTimer = null;
+    document.querySelector(".arcade-float")?.replaceChildren();
+    return;
+  }
+  if (arcadeEmojiTimer) return;
+  placeArcadeEmojis();
+  // ±10s jitter so the shuffle never feels metronomic.
+  const tick = () => {
+    if (!document.hidden) placeArcadeEmojis({ pop: true });
+    arcadeEmojiTimer = setTimeout(tick, ARCADE_EMOJI_SHUFFLE_MS + (Math.random() * 20000 - 10000));
+  };
+  arcadeEmojiTimer = setTimeout(tick, ARCADE_EMOJI_SHUFFLE_MS + (Math.random() * 20000 - 10000));
+}
+
+let arcadeEmojiResizeTimer = null;
+window.addEventListener("resize", () => {
+  if (document.documentElement.dataset.appTheme !== "arcade") return;
+  clearTimeout(arcadeEmojiResizeTimer);
+  arcadeEmojiResizeTimer = setTimeout(() => placeArcadeEmojis(), 250);
+});
+
+// Clicking an emoji zaps it — it shrinks away and stays gone until the next
+// shuffle tops the layer back up. Delegated so re-created spans keep working.
+document.addEventListener("click", (event) => {
+  const span = event.target instanceof Element ? event.target.closest(".arcade-float span") : null;
+  if (!span || span.classList.contains("zapped")) return;
+  span.classList.add("zapped");
+  setTimeout(() => span.remove(), 400);
+});
+
+// One entry point for every "you did it!" moment (game won, puzzle solved,
+// lesson finished, calibration done). Confetti volume follows the app look:
+// classic stays quiet, arcade goes full carnival. burstConfetti() itself
+// no-ops for prefers-reduced-motion users.
+function celebrate(kind = "win") {
+  const theme = normalizeAppThemeKey(state.settings.appTheme);
+  const intensity = theme === "arcade" ? "big" : theme === "woodland" ? "medium" : "small";
+  const colors = theme === "arcade"
+    ? ["#d02c7d", "#2f45e6", "#ffc93c", "#66c2ae", "#ff7a30", "#fffdf6"]
+    : theme === "woodland"
+      ? ["#edb95e", "#9c5617", "#3e6f34", "#e8563f", "#fffdf6", "#c4b28a"]
+      : undefined;
+  // Milestones (first calibration, ladder rungs) always get the full burst.
+  burstConfetti({ intensity: kind === "milestone" ? "big" : intensity, colors });
 }
 
 function getActivePieceSet() {
@@ -115,9 +286,21 @@ const STORAGE_KEY_BASES = {
   daily: "chess_teacher_daily_v1",
   coachChat: "chess_teacher_coach_chat_v1",
   coachMemory: "chess_teacher_coach_memory_v1",
+  learn: "chess_teacher_learn_v1",
+  tour: "chess_teacher_tour_v1",
+  syncOutbox: "chess_teacher_sync_outbox_v1",
 };
 
 let STORAGE_KEYS = buildStorageKeys("");
+
+// Skin the boot veil and auth gate before per-user settings hydrate. The
+// bare settings key is the best pre-auth guess; boot() re-applies the
+// signed-in user's real choice right after hydrateStateFromStorage.
+try {
+  applyAppTheme(JSON.parse(localStorage.getItem(STORAGE_KEY_BASES.settings) || "{}")?.appTheme);
+} catch {
+  applyAppTheme();
+}
 
 function buildStorageKeys(userId) {
   const keys = {};
@@ -162,6 +345,21 @@ const DEFAULT_CALIBRATION = {
   games: [], // [{ gameId, score, at }]
   estimatedScore: null,
   completedAt: null,
+};
+
+// Learn-to-play progress for beginner mode. `pathChosen` records that the
+// first-launch "new to chess?" question was answered so it never re-appears.
+// `stepByLesson` keeps one resume point per lesson so reviewing a finished
+// lesson never clobbers progress in another. `active` marks that a lesson was
+// on the board (drives auto-resume after a reload).
+const DEFAULT_LEARN = {
+  completed: [], // [lessonId]
+  lessonId: null, // last opened not-yet-completed lesson (Continue pointer)
+  stepIndex: 0, // legacy mirror of stepByLesson[lessonId]
+  stepByLesson: {}, // { [lessonId]: stepIndex }
+  active: false,
+  pathChosen: false,
+  cheatSheetDismissed: false,
 };
 
 // Pre-calibration storage keys, migrated then removed on boot.
@@ -315,17 +513,17 @@ const CURATED_PRACTICE_PUZZLES = [
     title: "Queen and king mate",
     difficulty: 1,
     playerColor: "w",
-    fen: "6k1/8/6K1/8/8/8/8/5Q2 w - - 0 1",
-    expectedMoves: ["f1f7"],
-    targetSquares: ["f7", "g8"],
-    hintSquares: ["f1", "f7", "g6"],
+    fen: "7k/8/6K1/8/8/8/8/5Q2 w - - 0 1",
+    expectedMoves: ["f1f8"],
+    targetSquares: ["f8", "h8"],
+    hintSquares: ["f1", "f8", "g6"],
     hintSteps: [
-      "The queen needs protection when it checks.",
-      "Your king already protects f7.",
-      "Move the queen next to the king where it cannot be captured.",
+      "The cornered king has almost no squares.",
+      "Your king already covers g7 and h7.",
+      "Slide the queen to the back rank.",
     ],
-    successText: "Correct. The queen is protected, and the black king has no safe square.",
-    missText: "Not yet. Look for a queen check protected by your king.",
+    successText: "Correct. Qf8 is checkmate — your king covers every escape square.",
+    missText: "Not yet. Look for a queen check along the back rank.",
   },
   {
     id: "fork-knight-1",
@@ -395,16 +593,16 @@ const CURATED_PRACTICE_PUZZLES = [
     title: "Loose queen",
     difficulty: 1,
     playerColor: "w",
-    fen: "4k3/4q3/8/8/8/8/8/4R1K1 w - - 0 1",
-    expectedMoves: ["e1e7"],
-    targetSquares: ["e7", "e8"],
-    hintSquares: ["e1", "e7"],
+    fen: "4k3/8/4q3/8/8/8/8/4R1K1 w - - 0 1",
+    expectedMoves: ["e1e6"],
+    targetSquares: ["e6", "e8"],
+    hintSquares: ["e1", "e6"],
     hintSteps: [
       "Check captures before quiet moves.",
-      "The queen is on the same file as your rook.",
+      "The queen is on the same file as your rook — and nothing defends it.",
       "Your rook can take the queen.",
     ],
-    successText: "Correct. The rook wins the loose queen with check.",
+    successText: "Correct. The rook wins the undefended queen with check.",
     missText: "Not yet. Look for a safe capture of a valuable piece.",
   },
   {
@@ -415,16 +613,16 @@ const CURATED_PRACTICE_PUZZLES = [
     title: "Discovered attack",
     difficulty: 2,
     playerColor: "w",
-    fen: "4q1k1/8/2N5/1B6/8/8/8/4K3 w - - 0 1",
+    fen: "4q1k1/8/2NP4/1B6/8/8/8/4K3 w - - 0 1",
     expectedMoves: ["c6e7"],
     targetSquares: ["g8", "e8"],
     hintSquares: ["c6", "e7", "b5", "e8"],
     hintSteps: [
       "One of your own pieces is blocking a bishop.",
-      "Move the blocker with check.",
+      "Move the blocker with check — your pawn on d6 keeps it safe.",
       "The bishop will then attack the queen.",
     ],
-    successText: "Correct. The knight checks the king and opens the bishop's attack on the queen.",
+    successText: "Correct. The knight checks the king (protected by the d6 pawn) and opens the bishop's attack on the queen.",
     missText: "Not yet. Move the blocking knight with tempo.",
   },
   {
@@ -436,16 +634,16 @@ const CURATED_PRACTICE_PUZZLES = [
     difficulty: 1,
     playerColor: "b",
     fen: "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 1 2",
-    expectedMoves: ["g7g6", "b8c6"],
+    expectedMoves: ["b8c6"],
     targetSquares: ["h5", "f7", "e5"],
-    hintSquares: ["h5", "f7", "g6", "c6"],
+    hintSquares: ["h5", "f7", "c6"],
     hintSteps: [
-      "White is aiming at f7.",
-      "You can attack the queen or defend the key square.",
-      "g6 or Nc6 both solve the immediate problem.",
+      "White is aiming at f7 — and the queen also eyes your e5 pawn.",
+      "Find a move that defends e5 while developing a piece.",
+      "Nc6 guards the pawn and gets a piece out. (g6 would lose the e5 pawn to Qxe5+, forking the rook!)",
     ],
-    successText: "Correct. You stopped the early queen attack before it became mate.",
-    missText: "Not yet. First identify what White is threatening on f7.",
+    successText: "Correct. Nc6 defends e5, develops a piece, and the early queen attack fizzles.",
+    missText: "Not yet. First check what the queen attacks — both f7 AND the e5 pawn.",
   },
 ];
 
@@ -453,6 +651,10 @@ const DEFAULT_SETTINGS = {
   displayName: "You",
   botName: "Opponent",
   playerColor: "w",
+  // The user's chosen color for NEW games. playerColor tracks the game
+  // currently on the board (reviewing/resuming an old game as Black may flip
+  // it) and must never silently overwrite this preference.
+  preferredColor: "",
   engineDepth: 5,
   coachMode: "hints",
   // Older builds ignored coachMode entirely, so persisted values don't
@@ -463,10 +665,15 @@ const DEFAULT_SETTINGS = {
   showEvalBar: true,
   soundEnabled: true,
   timeControl: "unlimited", // "unlimited" | "5+0" | "10+0" | "15+10"
+  appTheme: "woodland", // "woodland" | "arcade" | "classic"
   boardTheme: "slate",
+  // True until the player hand-picks a board theme; while true, switching
+  // the app look may swap the board palette to a matching suggestion.
+  boardThemeAuto: true,
   pieceSet: "merida",
   coachPersona: "classic",
   familyMode: false,
+  beginnerMode: false,
 };
 
 const SKILL_LAB_MODES = [
@@ -496,6 +703,7 @@ const els = {
   evalBarFill: document.querySelector("#evalBarFill"),
   evalBarLabel: document.querySelector("#evalBarLabel"),
   newGameButton: document.querySelector("#newGameButton"),
+  resignButton: document.querySelector("#resignButton"),
   seatOpponent: document.querySelector("#seatOpponent"),
   seatPlayer: document.querySelector("#seatPlayer"),
   opponentSeatName: document.querySelector("#opponentSeatName"),
@@ -516,8 +724,10 @@ const els = {
   tabs: [...document.querySelectorAll(".tab")],
   panels: [...document.querySelectorAll(".panel")],
   coachPanel: document.querySelector("#coachPanel"),
+  todayPanel: document.querySelector("#todayPanel"),
   reviewPanel: document.querySelector("#reviewPanel"),
   practicePanel: document.querySelector("#practicePanel"),
+  learnPanel: document.querySelector("#learnPanel"),
   profilePanel: document.querySelector("#profilePanel"),
   settingsPanel: document.querySelector("#settingsPanel"),
 };
@@ -533,6 +743,12 @@ const state = {
   practiceHistory: [],
   localGames: [],
   calibration: structuredClone(DEFAULT_CALIBRATION),
+  learn: structuredClone(DEFAULT_LEARN),
+  // Transient lesson feedback: { text, tone: "success" | "miss" | "note" }.
+  lessonFlash: null,
+  // Id of the live game saved when a drill/lesson took over the board; exit
+  // paths only restore the saved game when the id still matches.
+  pausedGameId: null,
   skill: null,
   // { myOpenings: [openingId], lines: { [lineId]: { srs, reps, perfect } } }
   repertoire: { myOpenings: [], lines: {} },
@@ -544,6 +760,7 @@ const state = {
   coachMemory: { notes: [], traces: [] },
   coachThinking: false,
   coachError: "",
+  coachRetry: null,
   pendingCoachQuestion: null,
   proactive: { count: 0, lastCommentPly: 0, turningPointUsed: false, praiseCount: 0 },
   rethink: { active: false, record: null, remaining: 2, resolve: null, stage: "ask" },
@@ -553,8 +770,9 @@ const state = {
   lastMove: null,
   moves: [],
   currentGameId: crypto.randomUUID(),
-  currentTab: "coach",
+  currentTab: "play",
   reviewPly: null,
+  timeline: null,
   guidedReview: null,
   // { baseFen, moves: [{uci, san, fenAfter}], index }: temporary board view
   // driven by a PV replay in Review; when active, renderBoard reads from
@@ -653,6 +871,19 @@ function hydrateStateFromStorage() {
   state.daily = loadJson(STORAGE_KEYS.daily, { streak: 0, lastCompletedDate: null, todayCompleted: {} });
   state.coachChat = loadJson(STORAGE_KEYS.coachChat, { gameId: null, messages: [] });
   state.coachMemory = loadJson(STORAGE_KEYS.coachMemory, { notes: [], traces: [] });
+  state.learn = { ...structuredClone(DEFAULT_LEARN), ...loadJson(STORAGE_KEYS.learn, {}) };
+  if (!Array.isArray(state.learn.completed)) state.learn.completed = [];
+  if (!state.learn.stepByLesson || typeof state.learn.stepByLesson !== "object") {
+    state.learn.stepByLesson = {};
+  }
+  // Migrate the legacy single-slot resume point into the per-lesson map.
+  if (state.learn.lessonId && state.learn.stepIndex > 0 && state.learn.stepByLesson[state.learn.lessonId] == null) {
+    state.learn.stepByLesson[state.learn.lessonId] = state.learn.stepIndex;
+  }
+}
+
+function saveLearnState() {
+  saveJson(STORAGE_KEYS.learn, state.learn);
 }
 
 function loadJson(key, fallback) {
@@ -664,8 +895,187 @@ function loadJson(key, fallback) {
   }
 }
 
+let storageWriteFailed = false;
+
+// Returns true when the write landed. localStorage can throw synchronously
+// (quota exceeded, private-browsing restrictions); persistence is
+// best-effort — a failed save must never break the caller — but callers that
+// LOOP on stored state (the sync outbox) must know the write didn't stick.
 function saveJson(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  // A deactivated tab (the app is open in another tab) must never write:
+  // its stale in-memory state would clobber the active tab's storage.
+  if (tabDeactivated) return false;
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    storageWriteFailed = false;
+    return true;
+  } catch (error) {
+    if (!storageWriteFailed) {
+      console.warn("Could not save to this browser's storage (it may be full):", error?.message || error);
+    }
+    storageWriteFailed = true;
+    return false;
+  }
+}
+
+// ─────────── Dialogs + toasts ───────────
+//
+// Native window.confirm shows "localhost says…" chrome and can't be styled —
+// jarring inside an otherwise designed app. showConfirmDialog is a drop-in
+// async replacement; showToast covers transient feedback that previously had
+// no home at all (it only existed as panel re-render text).
+
+function showConfirmDialog(message, { title = "Are you sure?", confirmLabel = "Confirm", cancelLabel = "Cancel", danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "app-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="app-dialog" role="dialog" aria-modal="true" aria-label="${escapeAttr(title)}">
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(message)}</p>
+        <div class="button-row">
+          <button type="button" class="dialog-cancel">${escapeHtml(cancelLabel)}</button>
+          <button type="button" class="dialog-confirm ${danger ? "danger-button" : "primary-action"}">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+
+    const previousFocus = document.activeElement;
+    const finish = (answer) => {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      if (previousFocus instanceof HTMLElement) previousFocus.focus?.();
+      resolve(answer);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        finish(false);
+      } else if (event.key === "Tab") {
+        // Two-button focus trap.
+        const buttons = [...overlay.querySelectorAll("button")];
+        const index = buttons.indexOf(document.activeElement);
+        event.preventDefault();
+        const next = event.shiftKey
+          ? buttons[(index - 1 + buttons.length) % buttons.length]
+          : buttons[(index + 1) % buttons.length];
+        next?.focus();
+      }
+    };
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) finish(false);
+    });
+    overlay.querySelector(".dialog-cancel").addEventListener("click", () => finish(false));
+    overlay.querySelector(".dialog-confirm").addEventListener("click", () => finish(true));
+    document.addEventListener("keydown", onKey, true);
+
+    document.body.append(overlay);
+    overlay.querySelector(".dialog-confirm").focus();
+  });
+}
+
+const TOAST_DURATION_MS = 4000;
+
+function showToast(message, { tone = "info" } = {}) {
+  let host = document.querySelector("#toastHost");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "toastHost";
+    host.className = "toast-host";
+    document.body.append(host);
+  }
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${tone}`;
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  host.append(toast);
+  // Cap the stack so a burst of events can't wallpaper the screen.
+  while (host.children.length > 3) host.firstChild.remove();
+  window.setTimeout(() => {
+    toast.classList.add("leaving");
+    window.setTimeout(() => toast.remove(), 300);
+  }, TOAST_DURATION_MS);
+}
+
+// ─────────── Single-active-tab lock ───────────
+//
+// Two open tabs each hold full in-memory copies of every store and re-persist
+// them on render — last-writer-wins clobbering of games, calibration, chat,
+// clocks, and double-flushing of the sync outbox. Instead of trying to merge,
+// only ONE tab is active at a time: opening the app in a new tab deactivates
+// the old one behind a "use here" overlay (the WhatsApp Web pattern).
+const TAB_ID = (() => {
+  try { return crypto.randomUUID(); } catch { return String(Math.random()); }
+})();
+let tabDeactivated = false;
+let tabChannel = null;
+let tabClaimTs = 0;
+
+function initTabLock() {
+  if (typeof BroadcastChannel === "undefined") return;
+  try {
+    tabChannel = new BroadcastChannel("chess_teacher_tab_v1");
+  } catch {
+    return;
+  }
+  tabChannel.onmessage = (event) => {
+    const message = event.data;
+    if (!message || message.id === TAB_ID) return;
+    if (message.type === "claim") {
+      // Two tabs booting at the same instant would deactivate each other —
+      // the newer claim wins; ties break deterministically on tab id.
+      const theirTs = Number(message.ts) || 0;
+      if (theirTs > tabClaimTs || (theirTs === tabClaimTs && String(message.id) > TAB_ID)) {
+        deactivateThisTab();
+      } else if (!tabDeactivated) {
+        claimActiveTab();
+      }
+    }
+  };
+  claimActiveTab();
+}
+
+function claimActiveTab() {
+  tabClaimTs = Date.now();
+  tabChannel?.postMessage({ type: "claim", id: TAB_ID, ts: tabClaimTs });
+}
+
+function deactivateThisTab() {
+  if (tabDeactivated) return;
+  tabDeactivated = true;
+  // Stop everything that writes or ticks: this tab is now read-only scenery.
+  stopClockTicker();
+  cancelDeepAnalysis();
+  activeCoachAbort?.abort();
+  if (syncOutboxTimer) {
+    window.clearTimeout(syncOutboxTimer);
+    syncOutboxTimer = null;
+  }
+
+  let overlay = document.querySelector("#tabLockOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "tabLockOverlay";
+    overlay.className = "tab-lock-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "App opened in another tab");
+    overlay.innerHTML = `
+      <div class="tab-lock-card">
+        <strong>Chess Teacher is open in another tab</strong>
+        <p>To keep your games and progress safe, only one tab can be active at a time.</p>
+        <button id="tabLockUseHereButton" class="primary-action" type="button">Use here instead</button>
+      </div>
+    `;
+    document.body.append(overlay);
+    // Reload rather than resume in place: the other tab may have changed
+    // every store, and a fresh boot re-hydrates and re-claims cleanly.
+    overlay.querySelector("#tabLockUseHereButton")?.addEventListener("click", () => {
+      window.location.reload();
+    });
+  }
+  overlay.hidden = false;
 }
 
 // The server API client. Every cloud request carries the current session's
@@ -725,7 +1135,7 @@ function playGameSound(kind) {
 }
 
 function playSoundForMove(move, chessAfter) {
-  const kind = classifyMoveForSound(move, chessAfter);
+  const kind = classifyMoveForSound(move, chessAfter, getActivePlayerColor());
   playGameSound(kind);
 }
 
@@ -746,6 +1156,7 @@ function isPracticeTrainerDrill(drill = state.activeDrill) {
 }
 
 function getPracticeBoardCue(square) {
+  if (isLessonDrill()) return getLessonBoardCue(square);
   if (!isPracticeTrainerDrill()) return null;
 
   const trainer = state.practiceTrainer || {};
@@ -780,6 +1191,39 @@ function getPracticeBoardCue(square) {
     label,
     badge,
   };
+}
+
+// ─────────── Learn-to-play lessons (beginner mode) ───────────
+
+function isLessonDrill(drill = state.activeDrill) {
+  return Boolean(drill?.isLesson);
+}
+
+function getActiveLesson() {
+  return isLessonDrill() ? getLessonById(state.activeDrill.lessonId) : null;
+}
+
+function getActiveLessonStep() {
+  const lesson = getActiveLesson();
+  return lesson?.steps[state.activeDrill.stepIndex] || null;
+}
+
+function getLessonBoardCue(square) {
+  const step = getActiveLessonStep();
+  if (!step || state.activeDrill.completed) return null;
+  if (step.kind === "info") {
+    if (step.highlightSquares?.includes(square)) {
+      return { className: "lesson-info-square", label: "Highlighted square", badge: "" };
+    }
+    return null;
+  }
+  if (step.targetSquares?.includes(square)) {
+    return { className: "lesson-target-square", label: "Move here", badge: "★" };
+  }
+  if (step.hintSquares?.includes(square)) {
+    return { className: "lesson-hint-square", label: "This piece moves", badge: "" };
+  }
+  return null;
 }
 
 // Family mode swaps the display language of harsh labels; keys, symbols, and
@@ -934,11 +1378,82 @@ function renderAll() {
 function getDisplayGame() {
   const replay = state.variationReplay;
   if (replay?.chess) return replay.chess;
+  const timelineChess = getTimelineChess();
+  if (timelineChess) return timelineChess;
   return state.game;
 }
 
 function isInReplay() {
-  return Boolean(state.variationReplay);
+  return Boolean(state.variationReplay) || isTimelineActive();
+}
+
+// ─────────── Game timeline scrubbing ───────────
+//
+// Finished games can be stepped through on the MAIN board (arrow keys, move
+// rows, the scrub bar) — before this, review only ever showed the final
+// position. state.timeline = { ply } shows the position after that move
+// (ply 0 = the starting position); null = live/final position.
+
+let timelineCache = { ply: null, gameId: null, chess: null };
+
+function isTimelineActive() {
+  return Boolean(state.timeline);
+}
+
+function getTimelineChess() {
+  const timeline = state.timeline;
+  if (!timeline) return null;
+  if (timelineCache.ply === timeline.ply && timelineCache.gameId === state.currentGameId && timelineCache.chess) {
+    return timelineCache.chess;
+  }
+  let chess = null;
+  try {
+    if (timeline.ply <= 0) {
+      chess = new Chess();
+    } else {
+      const record = state.moves.find((move) => move.ply === timeline.ply);
+      if (record?.afterFen) chess = new Chess(record.afterFen);
+    }
+  } catch (error) {
+    console.warn("Timeline position could not load", error);
+  }
+  if (!chess) {
+    state.timeline = null;
+    return null;
+  }
+  timelineCache = { ply: timeline.ply, gameId: state.currentGameId, chess };
+  return chess;
+}
+
+// Steps the timeline. Reaching the final move returns to the live board.
+function setTimelinePly(ply) {
+  const total = state.moves.length;
+  if (!total || !isCurrentGameFinished() || state.activeDrill || state.variationReplay) return;
+  const clamped = Math.max(0, Math.min(total, ply));
+  if (clamped >= total) {
+    state.timeline = null;
+    state.reviewPly = null;
+  } else {
+    state.timeline = { ply: clamped };
+    state.reviewPly = clamped > 0 ? clamped : null;
+  }
+  clearSelection({ render: false });
+  renderBoard();
+  if (state.currentTab === "review") renderReviewPanel();
+}
+
+function stepTimeline(delta) {
+  const total = state.moves.length;
+  if (!total) return;
+  const current = state.timeline ? state.timeline.ply : total;
+  setTimelinePly(current + delta);
+}
+
+function clearTimeline(options = {}) {
+  if (!state.timeline) return;
+  state.timeline = null;
+  timelineCache = { ply: null, gameId: null, chess: null };
+  if (options.render !== false) renderBoard();
 }
 
 function renderBoard() {
@@ -947,6 +1462,11 @@ function renderBoard() {
     return;
   }
   state.pendingBoardRender = false;
+  // Rebuilding the grid destroys keyboard focus — remember which square had
+  // it so the rebuilt board puts focus straight back.
+  const focusedSquare = document.activeElement?.classList?.contains("square")
+    ? document.activeElement.dataset.square
+    : null;
   els.board.innerHTML = "";
 
   const displayGame = getDisplayGame();
@@ -956,6 +1476,10 @@ function renderBoard() {
   const replayLastMove = state.variationReplay?.moves?.[state.variationReplay.index - 1];
   const replayFrom = replayLastMove?.uci?.slice(0, 2);
   const replayTo = replayLastMove?.uci?.slice(2, 4);
+  // Timeline scrubbing highlights the move that produced the shown position.
+  const timelineRecord = state.timeline && state.timeline.ply > 0
+    ? state.moves.find((move) => move.ply === state.timeline.ply)
+    : null;
 
   for (const square of getBoardSquares()) {
     const fileIndex = FILES.indexOf(square[0]);
@@ -965,10 +1489,18 @@ function renderBoard() {
     const targetCapture = legalTarget && selectedPiece && piece && piece.color !== selectedPiece.color;
     const squareQuality = liveQualityCue?.move.to === square ? liveQualityCue.quality : null;
     const practiceCue = inReplay ? null : getPracticeBoardCue(square);
-    // In replay mode, highlight the most recently played PV move instead of
-    // the game's last move.
-    const lastFromSquare = inReplay ? replayFrom : state.lastMove?.from;
-    const lastToSquare = inReplay ? replayTo : state.lastMove?.to;
+    // In replay/timeline mode, highlight the relevant move instead of the
+    // game's last move.
+    const lastFromSquare = state.variationReplay
+      ? replayFrom
+      : state.timeline
+        ? timelineRecord?.from
+        : state.lastMove?.from;
+    const lastToSquare = state.variationReplay
+      ? replayTo
+      : state.timeline
+        ? timelineRecord?.to
+        : state.lastMove?.to;
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
@@ -984,15 +1516,19 @@ function renderBoard() {
       practiceCue?.className || "",
     ].filter(Boolean).join(" ");
     button.dataset.square = square;
+    // The occupying piece leads the label: without it a blind user hears
+    // "e4, button" with no way to know a white pawn sits there.
+    const occupant = piece ? `${piece.color === "w" ? "White" : "Black"} ${pieceName(piece.type)}` : "";
     const ariaDetails = [
+      occupant,
       state.selectedSquare === square ? "Selected piece" : "",
       legalTarget ? (targetCapture ? "Legal capture" : "Legal move") : "",
       state.lastMove?.from === square ? "Last move started here" : "",
       state.lastMove?.to === square ? "Last move ended here" : "",
       squareQuality ? `${squareQuality.label}: ${squareQuality.reason}` : "",
       practiceCue?.label || "",
-    ].filter(Boolean).join(" ");
-    button.setAttribute("aria-label", ariaDetails ? `${square}. ${ariaDetails}` : square);
+    ].filter(Boolean).join(". ");
+    button.setAttribute("aria-label", ariaDetails ? `${square}. ${ariaDetails}` : `${square}. Empty square`);
     if (squareQuality || practiceCue?.label) {
       button.title = [squareQuality ? `${squareQuality.label}: ${squareQuality.reason}` : "", practiceCue?.label || ""]
         .filter(Boolean)
@@ -1042,6 +1578,10 @@ function renderBoard() {
     els.board.append(button);
   }
 
+  if (focusedSquare) {
+    els.board.querySelector(`[data-square="${focusedSquare}"]`)?.focus();
+  }
+
   paintBoardArrows();
   paintEvalBar();
 }
@@ -1064,6 +1604,10 @@ function getActiveBoardArrows() {
     return arrows;
   }
   if (!state.settings.showBestArrow || !isCalibrationComplete()) return arrows;
+  // Timeline scrubbing shows the position AFTER the selected move — a
+  // best-move arrow (computed for the before-position) would point at the
+  // wrong board. The last-move highlight already marks the played move.
+  if (isTimelineActive()) return arrows;
   const latest = getLatestPlayerMove();
   if (!latest) return arrows;
   if (state.currentTab === "review") {
@@ -1107,6 +1651,10 @@ function paintEvalBar() {
   }
   els.evalBar.hidden = false;
   const { percent, label } = evalBarFromMove(latest);
+  // The bar tracks board orientation like chess sites: the white fill is
+  // anchored to whichever side White plays from, so "my side growing = good
+  // for me" holds when playing Black too (see .eval-bar.flipped in CSS).
+  els.evalBar.classList.toggle("flipped", isBoardFlipped());
   els.evalBarFill.style.height = `${percent}%`;
   els.evalBarLabel.textContent = label;
 }
@@ -1144,9 +1692,13 @@ function evalBarFromMove(move) {
 }
 
 function getPlayerSeatSubLabel() {
+  // Drill boards never populate state.moves — a frozen "White · move 1"
+  // through a whole mate ladder read as broken. Show the training context.
+  if (state.activeDrill) {
+    return `${colorName(state.activeDrill.playerColor || "w")} · training`;
+  }
   const moveNumber = Math.floor(state.moves.length / 2) + 1;
-  const playerColor = state.activeDrill?.playerColor || state.settings.playerColor;
-  return `${colorName(playerColor)} · move ${moveNumber}`;
+  return `${colorName(state.settings.playerColor)} · move ${moveNumber}`;
 }
 
 function normalizeDisplayName(name) {
@@ -1173,6 +1725,9 @@ function getBotName() {
 
 function getOpponentSeatLabels() {
   if (state.activeDrill) {
+    if (isLessonDrill()) {
+      return { name: "Chess Teacher", sub: getActiveLesson()?.title || "Learn to play" };
+    }
     if (isPracticeTrainerDrill()) {
       return { name: "Practice Trainer", sub: state.activeDrill.plainTitle || state.activeDrill.type || "Puzzle" };
     }
@@ -1181,6 +1736,9 @@ function getOpponentSeatLabels() {
   const fallbackSuffix = state.engineFallback && !state.engine ? " · simplified engine" : "";
   const name = getBotName();
   if (!isCalibrationComplete()) {
+    if (state.settings.beginnerMode === true) {
+      return { name, sub: `Gentle opponent · no clock${fallbackSuffix}` };
+    }
     return { name, sub: `First game · finding your level${fallbackSuffix}` };
   }
   const score = getEstimatedTrainingScore();
@@ -1308,7 +1866,10 @@ function isOpenAIReady() {
 }
 
 function isCoachAvailable() {
-  return isOpenAIReady();
+  // Configured is what matters for the input: a momentarily-failed health
+  // probe must not lock the chat box. If the service is truly down, sending
+  // fails with a friendly error and a retry button.
+  return state.openAI.configured === true;
 }
 
 function getRequiredServiceRows() {
@@ -1371,7 +1932,7 @@ function renderRequiredServicesCard() {
 
 function bindRequiredServicesCard() {
   document.querySelector("#checkRequiredServicesButton")?.addEventListener("click", verifyRequiredServices);
-  document.querySelector("#openSettingsButton")?.addEventListener("click", () => switchTab("settings"));
+  document.querySelector("#openSettingsButton")?.addEventListener("click", () => switchTab("you"));
 }
 
 function renderCoachOfflineBanner() {
@@ -1410,16 +1971,20 @@ function renderGameMeta() {
     els.playerAvatar.textContent = getAvatarLabel();
   }
   els.playerSeatSub.textContent = getPlayerSeatSubLabel();
-  const playerPillText = gameOver
-    ? "Game Over"
-    : playerToMove
-      ? "Your Turn"
-      : "Waiting";
-  const opponentPillText = gameOver
-    ? "Game Over"
-    : playerToMove
-      ? "Waiting"
-      : (state.thinking ? "Opponent Thinking" : "Opponent Turn");
+  const playerPillText = state.activeDrill
+    ? (state.activeDrill.solved || state.activeDrill.completed ? "Solved" : "Training")
+    : gameOver
+      ? "Game Over"
+      : playerToMove
+        ? "Your Turn"
+        : "Waiting";
+  const opponentPillText = state.activeDrill
+    ? "Training"
+    : gameOver
+      ? "Game Over"
+      : playerToMove
+        ? "Waiting"
+        : (state.thinking ? "Opponent Thinking" : "Opponent Turn");
   els.playerSeatPill.classList.toggle("active", !gameOver && playerToMove);
   els.playerSeatPill.classList.toggle("waiting", gameOver || !playerToMove);
   els.playerSeatPill.innerHTML = `<span class="dot"></span> ${escapeHtml(toTitleCaseLabel(playerPillText))}`;
@@ -1443,6 +2008,8 @@ function renderGameMeta() {
   els.seatOpponent.classList.toggle("inactive-turn", !gameOver && playerToMove);
   els.seatPlayer.classList.toggle("inactive-turn", !gameOver && !playerToMove);
 
+  announceGameStatus(gameOver, playerToMove);
+
   // Practice tab badge
   if (els.practiceBadge) {
     const count = state.practiceQueue.length;
@@ -1454,16 +2021,48 @@ function renderGameMeta() {
   updateCtxHead(state.currentTab);
 
   els.newGameButton.disabled = state.thinking || Boolean(state.activeDrill);
+  // Resign only makes sense for a live game with real moves — it gives an
+  // honest way out (counted like any loss) instead of stranding abandoned
+  // games as "In progress" forever.
+  if (els.resignButton) {
+    els.resignButton.hidden = Boolean(state.activeDrill)
+      || !state.moves.length
+      || state.game.isGameOver()
+      || Boolean(state.clocks?.flagged);
+  }
+}
+
+// Turn/check/game-over changes are announced once to screen readers (color
+// changes on the pills alone are invisible to them).
+let lastGameStatusAnnounced = "";
+
+function announceGameStatus(gameOver, playerToMove) {
+  const announcer = document.querySelector("#gameStatusAnnouncer");
+  if (!announcer) return;
+  let status = "";
+  if (state.activeDrill) {
+    status = "";
+  } else if (gameOver || state.clocks?.flagged) {
+    status = `Game over. ${getResultLabel()}`;
+  } else {
+    status = playerToMove ? "Your turn" : "Opponent's turn";
+    if (state.game.isCheck()) status += ". Check";
+  }
+  if (status && status !== lastGameStatusAnnounced) {
+    lastGameStatusAnnounced = status;
+    announcer.textContent = status;
+  }
 }
 
 function updateCtxHead(tab) {
   if (!els.ctxHeadTitle || !els.ctxHeadMeta) return;
   const titles = {
-    coach: "Coach",
+    today: "Today",
+    play: "Play",
     review: "Review",
     practice: "Practice",
-    profile: "Profile",
-    settings: "Settings",
+    learn: "Learn",
+    you: "You",
   };
   els.ctxHeadTitle.textContent = titles[tab] || "";
   els.ctxHeadMeta.textContent = ctxHeadMetaFor(tab);
@@ -1472,7 +2071,10 @@ function updateCtxHead(tab) {
 function ctxHeadMetaFor(tab) {
   const calibrated = isCalibrationComplete();
   switch (tab) {
-    case "coach":
+    case "today":
+      return calibrated ? todayLocalKey() : "Getting started";
+    case "play":
+      if (state.activeDrill) return "Training";
       return calibrated ? "Adaptive" : "Calibration game";
     case "review": {
       if (!isCurrentGameFinished()) return "";
@@ -1484,24 +2086,29 @@ function ctxHeadMetaFor(tab) {
         const stats = getPracticeStats();
         return `Trainer · streak ${stats.streak}`;
       }
-      const n = state.practiceQueue.length;
-      return n ? `${n} queued` : "Empty";
+      return "Locked until calibration";
     }
-    case "profile":
-      return "";
-    case "settings":
-      return "";
+    case "learn": {
+      const done = LESSONS.filter((lesson) => state.learn.completed.includes(lesson.id)).length;
+      return done >= LESSONS.length ? "Complete" : `${done}/${LESSONS.length} lessons`;
+    }
     default:
       return "";
   }
 }
 
 function renderCurrentPanel() {
-  if (state.currentTab === "coach") renderCoachPanel();
+  if (state.currentTab === "today") renderTodayPanel();
+  if (state.currentTab === "play") renderCoachPanel();
   if (state.currentTab === "review") renderReviewPanel();
   if (state.currentTab === "practice") renderPracticePanel();
-  if (state.currentTab === "profile") renderProfilePanel();
-  if (state.currentTab === "settings") renderSettingsPanel();
+  if (state.currentTab === "learn") renderLearnPanel();
+  if (state.currentTab === "you") {
+    // "You" stacks both sections in one scroll (their <h2>s become visible
+    // section headers via CSS).
+    renderProfilePanel();
+    renderSettingsPanel();
+  }
 }
 
 // The capture trays are aria-live regions: rewriting identical markup on
@@ -1515,6 +2122,21 @@ function setTrayContent(tray, html) {
 
 function renderCoachPanel() {
   if (state.activeDrill) {
+    if (isLessonDrill()) {
+      els.coachPanel.innerHTML = `
+        <h2>Coach</h2>
+        <div class="stack">
+          <article class="mini-card lesson-active-card">
+            <span class="label">Lesson active</span>
+            <strong>${escapeHtml(getActiveLesson()?.title || "Learn to play")}</strong>
+            <p>${escapeHtml(state.lessonFlash?.text || state.drillMessage || "")}</p>
+            <button id="openLearnTabButton" type="button">Open the lesson</button>
+          </article>
+        </div>
+      `;
+      document.querySelector("#openLearnTabButton")?.addEventListener("click", () => switchTab("learn"));
+      return;
+    }
     if (isPracticeTrainerDrill()) {
       els.coachPanel.innerHTML = `
         <h2>Coach</h2>
@@ -1531,7 +2153,9 @@ function renderCoachPanel() {
       return;
     }
 
-    const target = getCurrentDrillTarget();
+    // Mate/opening drills keep their answers in drill-specific fields and
+    // their live feedback in drillMessage — the old "candidate reveal" here
+    // read a field no reachable drill populates and rendered nothing.
     els.coachPanel.innerHTML = `
       <h2>Coach</h2>
       <div class="stack">
@@ -1539,21 +2163,72 @@ function renderCoachPanel() {
           <span class="label">${escapeHtml(state.activeDrill.type)}</span>
           <strong>${escapeHtml(state.activeDrill.title)}</strong>
           <p>${escapeHtml(state.drillMessage || state.activeDrill.objective)}</p>
-          <div class="candidate-list coach-candidates">
-            ${target.expectedMoves.map((uci) => `
-              <div class="candidate-row">
-                <strong>${escapeHtml(uciToSan(state.game.fen(), uci) || uci)}</strong>
-                <span>${escapeHtml(target.idea || explainCandidateByUci(state.game.fen(), { uci }))}</span>
-              </div>
-            `).join("")}
-          </div>
+          <button id="openDrillTabButton" type="button">Open the practice board</button>
         </article>
       </div>
     `;
+    document.querySelector("#openDrillTabButton")?.addEventListener("click", () => switchTab("practice"));
     return;
   }
 
   if (!isCalibrationComplete()) {
+    // Brand-new player on this account: ask about experience before pointing
+    // them at a silent calibration game. Empty "New game" presses don't count
+    // as playing — only games with moves dismiss the question.
+    const hasPlayedAnything = state.localGames.some((game) => Array.isArray(game.moves) && game.moves.length);
+    const freshStart = !state.learn.pathChosen
+      && !state.learn.completed.length
+      && !hasPlayedAnything
+      && !state.moves.length;
+    if (freshStart) {
+      els.coachPanel.innerHTML = `
+        <h2>Coach</h2>
+        <div class="stack">
+          <article class="mini-card learn-path-card">
+            <span class="label">Welcome</span>
+            <strong>Have you played chess before?</strong>
+            <p>If you're new (or rusty), a short set of interactive lessons teaches every rule right on the board. If you already know how to play, jump straight into your first game.</p>
+            <div class="button-row">
+              <button id="choosePathBeginnerButton" class="primary-action" type="button">I'm new — teach me</button>
+              <button id="choosePathExperiencedButton" type="button">I know how to play</button>
+            </div>
+          </article>
+          ${renderCoachOfflineBanner()}
+        </div>
+      `;
+      document.querySelector("#choosePathBeginnerButton")?.addEventListener("click", () => chooseLearnPath(true));
+      document.querySelector("#choosePathExperiencedButton")?.addEventListener("click", () => chooseLearnPath(false));
+      return;
+    }
+
+    // Beginner path: nudge toward the lessons until they're done (or the
+    // learner starts a game anyway — playing is always allowed).
+    if (state.settings.beginnerMode === true && !allLessonsComplete(state.learn.completed) && !state.moves.length) {
+      const next = getResumeLesson();
+      els.coachPanel.innerHTML = `
+        <h2>Coach</h2>
+        <div class="stack">
+          <article class="mini-card learn-path-card">
+            <span class="label">Learn to play</span>
+            <strong>${state.learn.completed.length ? "Keep going — you're learning fast" : "Start with the lessons"}</strong>
+            <p>${escapeHtml(next ? `Next up: ${next.title}. ${next.summary}` : "")}</p>
+            <p class="lesson-tip">Tip: ${escapeHtml(getCurrentBeginnerTip())}</p>
+            <div class="button-row">
+              <button id="resumeLessonsButton" class="primary-action" type="button">${state.learn.completed.length ? "Continue lessons" : "Start lessons"}</button>
+            </div>
+            <p class="lesson-task-note">Prefer to just play? Make a move on the board — your first finished game calibrates the coach.</p>
+          </article>
+          ${renderCoachOfflineBanner()}
+        </div>
+      `;
+      document.querySelector("#resumeLessonsButton")?.addEventListener("click", () => {
+        const target = getResumeLesson();
+        if (target) startLesson(target.id);
+        else switchTab("learn");
+      });
+      return;
+    }
+
     els.coachPanel.innerHTML = `
       <h2>Coach</h2>
       <div class="stack">
@@ -1561,10 +2236,13 @@ function renderCoachPanel() {
           <span class="label">Calibration game</span>
           <strong>Play your first game</strong>
           <p>No hints or commentary during this one — just play the moves you'd normally play. When it ends, coaching, move feedback, and an opponent matched to your level all unlock.</p>
+          ${state.settings.beginnerMode === true ? `<p>Beginner mode is on: the opponent stays gentle while you find your feet.</p>` : ""}
         </article>
+        ${state.settings.beginnerMode === true ? renderBeginnerCheatSheet() : ""}
         ${renderCoachOfflineBanner()}
       </div>
     `;
+    bindBeginnerCheatSheet();
     return;
   }
 
@@ -1583,10 +2261,11 @@ function renderCoachPanel() {
           id="coachChatInput"
           type="text"
           autocomplete="off"
+          aria-label="Ask your coach"
           placeholder="${state.pendingCoachQuestion ? "Answer the coach..." : "Ask your coach anything..."}"
           ${isCoachAvailable() ? "" : "disabled"}
         >
-        <button type="submit" ${isCoachAvailable() && !state.coachThinking ? "" : "disabled"}>Send</button>
+        <button type="submit" ${isCoachAvailable() ? "" : "disabled"}>Send</button>
       </form>
     </div>
   `;
@@ -1607,7 +2286,7 @@ function renderChatMessages() {
     ? '<div class="chat-message from-coach chat-thinking"><span></span><span></span><span></span></div>'
     : "";
   const error = state.coachError
-    ? `<div class="chat-message chat-error">${escapeHtml(state.coachError)}</div>`
+    ? `<div class="chat-message chat-error">${escapeHtml(state.coachError)}${state.coachRetry ? ` <button id="coachRetryButton" class="chat-retry" type="button">Try again</button>` : ""}</div>`
     : "";
   if (!rows && !thinking && !error) {
     return `<p class="empty-state coach-chat-empty">I'm here for the whole game — I'll speak up at important moments, and you can ask me anything: plans, threats, what to study.</p>`;
@@ -1619,9 +2298,10 @@ function chatBubbleHtml(message) {
   if (message.kind === "divider") {
     return `<div class="chat-divider"><span>${escapeHtml(message.content || "New game")}</span></div>`;
   }
-  // An empty in-flight bubble would render as a bare pill; the thinking dots
-  // cover that phase until the first streamed delta arrives.
-  if (message.streaming && !message.content) return "";
+  // An empty bubble would render as a bare pill — during streaming the
+  // thinking dots cover that phase; finalized empty messages (e.g. a
+  // question-only reply) simply don't render.
+  if (!message.content) return "";
   const classes = ["chat-message", message.role === "user" ? "from-user" : "from-coach"];
   if (message.isQuestion) classes.push("coach-question");
   return `<div class="${classes.join(" ")}"${message.streaming ? ` data-streaming="${escapeAttr(message.streaming)}"` : ""}>${escapeHtml(message.content)}</div>`;
@@ -1676,7 +2356,7 @@ function announceLatestCoachMessage() {
 // Targeted chat update: repaints the log and form state without rebuilding
 // the whole panel, so an in-progress draft (and its caret) is never touched.
 function renderChatLog() {
-  if (state.currentTab !== "coach") return;
+  if (state.currentTab !== "play") return;
   const log = document.querySelector("#coachChatLog");
   if (!log) {
     renderCoachPanel();
@@ -1684,11 +2364,14 @@ function renderChatLog() {
   }
   const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   log.innerHTML = renderChatMessages();
+  log.querySelector("#coachRetryButton")?.addEventListener("click", retryCoachChat);
   announceLatestCoachMessage();
   const form = document.querySelector("#coachChatForm");
   if (form) {
     const button = form.querySelector("button[type=submit]");
-    if (button) button.disabled = !(isCoachAvailable() && !state.coachThinking);
+    // Messages sent while the coach is thinking queue up behind the current
+    // reply (requestCoachChat serializes them), so the button stays usable.
+    if (button) button.disabled = !isCoachAvailable();
     const input = form.querySelector("input");
     if (input) input.placeholder = state.pendingCoachQuestion ? "Answer the coach..." : "Ask your coach anything...";
   }
@@ -1705,10 +2388,16 @@ function bindCoachChat() {
     event.preventDefault();
     const input = document.querySelector("#coachChatInput");
     const text = input?.value.trim();
-    if (!text || state.coachThinking) return;
+    if (!text) return;
     input.value = "";
+    // Sending while the coach is mid-reply is fine: requestCoachChat
+    // serializes requests, so this message queues behind the current one.
     handleUserChatMessage(text);
   });
+  // The retry button also renders in full-panel paints, not only in
+  // renderChatLog's targeted repaint — bind it here too or it plays dead
+  // after any tab switch.
+  document.querySelector("#coachRetryButton")?.addEventListener("click", retryCoachChat);
   bindRethinkCard();
 }
 
@@ -2201,14 +2890,18 @@ function migrateLegacyPlacement() {
     const legacyGames = Array.isArray(legacy.games) ? legacy.games.length : 0;
     if (!state.calibration.done && (legacy.completedAt || legacyGames >= 1)) {
       const score = Number(legacy.estimatedScore) || estimateTrainingScoreFromGames(legacy.games || []);
-      const completedAt = legacy.completedAt || new Date().toISOString();
-      state.calibration = {
-        done: true,
-        games: [{ gameId: legacy.games?.[0]?.gameId || null, score, at: completedAt }],
-        estimatedScore: score,
-        completedAt,
-      };
-      saveJson(STORAGE_KEYS.calibration, state.calibration);
+      // A record with no usable score would seed calibration with null and
+      // drag every later average toward the floor — skip instead.
+      if (Number.isFinite(score) && score > 0) {
+        const completedAt = legacy.completedAt || new Date().toISOString();
+        state.calibration = {
+          done: true,
+          games: [{ gameId: legacy.games?.[0]?.gameId || null, score, at: completedAt }],
+          estimatedScore: score,
+          completedAt,
+        };
+        saveJson(STORAGE_KEYS.calibration, state.calibration);
+      }
     }
   }
   localStorage.removeItem(LEGACY_STORAGE_KEYS.placement);
@@ -2283,6 +2976,7 @@ function updateSkillFromMove(record) {
     tags: record.tags,
     qualityKey: record.qualityKey,
     evalDelta: record.evalDelta,
+    evalBefore: record.evalBefore,
     mateBefore: record.mateBefore,
     mateAfter: record.mateAfter,
   });
@@ -2346,16 +3040,28 @@ function getAdaptiveBotDepth() {
 }
 
 function getCurrentBotDepth() {
+  if (isBeginnerBotActive()) {
+    return 1;
+  }
   if (!isCalibrationComplete()) {
     return CALIBRATION_DEPTH;
   }
   return getAdaptiveBotDepth();
 }
 
+// Beginner mode pins the opponent to the floor until the calibration games
+// hand control to the adaptive skill model.
+function isBeginnerBotActive() {
+  return state.settings.beginnerMode === true && !isCalibrationComplete();
+}
+
 // Human-like opponent strength: Stockfish is Elo-limited instead of only
 // depth-capped, so weaker settings blunder like people rather than playing
 // shallow-but-perfect chess.
 function getCurrentBotElo() {
+  if (isBeginnerBotActive()) {
+    return 500;
+  }
   if (!isCalibrationComplete()) {
     return 1100;
   }
@@ -2366,6 +3072,11 @@ function getCurrentBotElo() {
     const average = recent.reduce((sum, value) => sum + value, 0) / recent.length;
     if (average >= 0.67) elo += 100;
     if (average <= 0.25) elo -= 100;
+  }
+  // Beginner mode promises a gentle opponent — that must stay true after
+  // calibration too (it used to silently become a normal adaptive bot).
+  if (state.settings.beginnerMode === true) {
+    elo = Math.min(elo, 800);
   }
   return clamp(Math.round(elo), 500, 2400);
 }
@@ -2397,6 +3108,11 @@ function computeCalibrationGameScore(gameRecord, result) {
   return clamp(Math.round(600 + CALIBRATION_DEPTH * 70 + resultScore * 260 - acplPenalty), 400, 1800);
 }
 
+// A calibration game must contain enough of the player's own moves to say
+// anything about their level — a 1-move resignation must not complete
+// placement off a single junk data point.
+const CALIBRATION_MIN_PLAYER_MOVES = 8;
+
 function recordCompletedGameForCalibration(result) {
   if (state.activeDrill) return;
   normalizeCalibrationState();
@@ -2406,6 +3122,15 @@ function recordCompletedGameForCalibration(result) {
 
   const current = state.localGames.find((game) => game.id === state.currentGameId);
   if (!current) return;
+
+  const playerMoves = (current.moves || []).filter((move) => move.role === "player").length;
+  if (playerMoves < CALIBRATION_MIN_PLAYER_MOVES) {
+    if (!calibration.done) {
+      pushChatMessage("assistant", "That one was too short to measure your level — play a fuller game (at least a handful of your own moves) and I'll set your starting point from it.");
+      if (state.currentTab === "play") renderCoachPanel();
+    }
+    return;
+  }
 
   const score = computeCalibrationGameScore(current, result);
   calibration.games = [...calibration.games, {
@@ -2419,20 +3144,27 @@ function recordCompletedGameForCalibration(result) {
 // Recomputes the blended placement score and (re)seeds untouched skill dims.
 function applyCalibrationScores() {
   const calibration = state.calibration;
-  if (!calibration.games.length) return;
+  // A legacy migration can leave entries without a usable score — averaging
+  // them as 0 would drag the estimate toward the 400 floor.
+  const scoredGames = calibration.games.filter((game) => Number.isFinite(game.score));
+  if (!scoredGames.length) return;
 
-  const mean = calibration.games.reduce((sum, game) => sum + game.score, 0) / calibration.games.length;
+  const mean = scoredGames.reduce((sum, game) => sum + game.score, 0) / scoredGames.length;
   calibration.estimatedScore = Math.round(mean);
   calibration.done = true;
   calibration.completedAt = calibration.completedAt || new Date().toISOString();
   saveJson(STORAGE_KEYS.calibration, calibration);
 
   // Seed skill dimensions that real graded moves haven't touched yet; dims
-  // that already accumulated live data keep it.
+  // that already accumulated live data keep it. A seeded dim carries
+  // SEED_SAMPLES synthetic samples — only samples beyond those count as
+  // real data, otherwise games 2-3 could never refine the initial seed.
   const skill = ensureSkillState();
   const seeded = seedSkillStateFromScore(calibration.estimatedScore);
   for (const dim of SKILL_DIMENSIONS) {
-    if (!skill.dims[dim] || skill.dims[dim].perf === null || skill.dims[dim].samples < 8) {
+    const entry = skill.dims[dim];
+    const realSamples = entry ? (entry.seeded ? Math.max(0, entry.samples - SEED_SAMPLES) : entry.samples) : 0;
+    if (!entry || entry.perf === null || realSamples < 8) {
       skill.dims[dim] = seeded.dims[dim];
     }
   }
@@ -2455,7 +3187,7 @@ function recalibrateFromDeepAnalysis(gameId) {
   entry.score = score;
   entry.deepened = true;
   applyCalibrationScores();
-  if (state.currentTab === "profile" || state.currentTab === "settings") {
+  if (state.currentTab === "you") {
     renderCurrentPanel();
   }
 }
@@ -2524,11 +3256,15 @@ async function checkOpenAIHealth(options = {}) {
       state.sync.health = data.dataError;
     }
   } catch (error) {
-    state.openAI.configured = false;
+    // A failed *check* is not proof the coach is unconfigured. Flipping
+    // `configured` off here used to disable the chat input entirely — even
+    // for a 429 from clicking "Check services" a few times. Keep the last
+    // known configuration and only report the check problem.
     state.openAI.online = false;
-    state.openAI.model = "";
-    state.featureFlags.remoteHistoryEraseEnabled = false;
-    state.openAI.status = friendlyServiceMessage(error, "Could not reach the server. Check your connection and try again.");
+    const rateLimited = error instanceof ApiError && error.status === 429;
+    state.openAI.status = rateLimited
+      ? "Checked too often — give it a minute and try again."
+      : friendlyServiceMessage(error, "Could not reach the server. Check your connection and try again.");
   }
 
   if (options.render !== false) {
@@ -2557,7 +3293,7 @@ async function verifyRequiredServices() {
   renderAll();
 
   const openAIReady = await checkOpenAIHealth({ render: false });
-  const syncReady = await verifyCloudSync({ syncStart: true, render: false });
+  const syncReady = await verifyCloudSync({ render: false });
 
   renderAll();
   return syncReady && openAIReady;
@@ -2610,6 +3346,67 @@ function pushChatMessage(role, content, options = {}) {
   messages.push({ role, content, isQuestion: Boolean(options.isQuestion), at: new Date().toISOString() });
   if (messages.length > CHAT_HISTORY_LIMIT) messages.splice(0, messages.length - CHAT_HISTORY_LIMIT);
   persistCoachChat();
+  if (role === "assistant") notifyCoachMessage(content);
+}
+
+// ─────────── Ambient coach presence ───────────
+//
+// Coach messages arriving while the user is on another tab used to vanish
+// silently. Show a dismissible bubble near the board plus an unread dot on
+// the Play nav item.
+
+let coachBubbleTimer = null;
+
+function notifyCoachMessage(content) {
+  if (!content || state.currentTab === "play") return;
+  if (!isCalibrationComplete() || state.activeDrill) return;
+  state.coachUnread = true;
+  updateCoachUnreadBadge();
+  showCoachBubble(content);
+}
+
+function updateCoachUnreadBadge() {
+  const badge = document.querySelector("#coachUnreadBadge");
+  if (badge) badge.hidden = !state.coachUnread;
+}
+
+function clearCoachUnread() {
+  state.coachUnread = false;
+  updateCoachUnreadBadge();
+  hideCoachBubble();
+}
+
+function showCoachBubble(content) {
+  const stage = document.querySelector(".stage");
+  if (!stage) return;
+  let bubble = document.querySelector("#coachBubble");
+  if (!bubble) {
+    bubble = document.createElement("button");
+    bubble.id = "coachBubble";
+    bubble.className = "coach-bubble";
+    bubble.type = "button";
+    stage.append(bubble);
+    bubble.addEventListener("click", () => {
+      hideCoachBubble();
+      switchTab("play");
+    });
+  }
+  const text = String(content);
+  bubble.innerHTML = `
+    <img src="./assets/squirrel_chess.svg" alt="" aria-hidden="true">
+    <span>${escapeHtml(text.length > 120 ? `${text.slice(0, 119)}…` : text)}</span>
+  `;
+  bubble.setAttribute("aria-label", `Coach: ${text.slice(0, 160)}. Open the Play tab to reply.`);
+  bubble.hidden = false;
+  window.clearTimeout(coachBubbleTimer);
+  coachBubbleTimer = window.setTimeout(hideCoachBubble, 8000);
+}
+
+function hideCoachBubble() {
+  window.clearTimeout(coachBubbleTimer);
+  coachBubbleTimer = null;
+  const bubble = document.querySelector("#coachBubble");
+  if (bubble) bubble.hidden = true;
 }
 
 function saveCoachMemory() {
@@ -2637,11 +3434,28 @@ function momentFromMoveRecord(record) {
 }
 
 function buildChatPayload(event, moment = null) {
-  const candidates = rankCandidateMoves(state.game.fen()).slice(0, 4).map((move) => ({
+  // Moment-anchored events (review moments, rethink prompts, drill feedback)
+  // are about a SPECIFIC position — the model must see that position and its
+  // candidate moves, not the live board's final position. The prompt tells it
+  // to only reference moves from the context, so wrong-position candidates
+  // produce confidently wrong coaching.
+  const momentFen = moment?.fenBefore && event !== "user_message" ? moment.fenBefore : null;
+  let anchorFen = state.game.fen();
+  let anchorChess = null;
+  if (momentFen) {
+    try {
+      anchorChess = new Chess(momentFen);
+      anchorFen = momentFen;
+    } catch {
+      anchorChess = null;
+    }
+  }
+  const candidates = rankCandidateMoves(anchorFen).slice(0, 4).map((move) => ({
     san: move.san,
-    reason: explainCandidateMove(state.game.fen(), move),
+    reason: explainCandidateMove(anchorFen, move),
   }));
   const opening = detectOpening();
+  const anchor = anchorChess || state.game;
   return {
     event,
     persona: getActivePersonaKey(),
@@ -2653,10 +3467,10 @@ function buildChatPayload(event, moment = null) {
       .slice(0, 5)
       .map((item) => ({ category: item.category, label: item.label, count: item.count, severity: item.severity })),
     game: {
-      fen: state.game.fen(),
+      fen: anchorFen,
       recentSan: state.moves.slice(-20).map((move) => move.san),
-      phase: getPhase(state.game),
-      sideToMove: colorName(state.game.turn()),
+      phase: getPhase(anchor),
+      sideToMove: colorName(anchor.turn()),
       playerColor: colorName(state.settings.playerColor),
       opening: opening.name,
       result: state.game.isGameOver() ? getResultLabel() : "",
@@ -2685,16 +3499,47 @@ function persistCoachChat() {
   });
 }
 
+// Requests queue behind whatever the coach is answering right now. Depth is
+// tracked so a reply that arrives with a question knows whether the player
+// already sent another message (in which case the question must not capture
+// that unrelated message as its "answer").
+let coachQueueDepth = 0;
+
 async function requestCoachChat(event, moment = null) {
   if (state.coachThinking && DISPOSABLE_CHAT_EVENTS.has(event)) return null;
-  const run = coachChatChain.then(() => performCoachChat(event, moment));
-  coachChatChain = run.catch(() => {});
+  // Game-scoped coach events (proactive comments, review moments, rethink
+  // prompts) queued behind a slow reply must not fire into a DIFFERENT game.
+  const expectedGameId = state.currentGameId;
+  coachQueueDepth += 1;
+  const run = coachChatChain.then(() => {
+    if (event !== "user_message" && state.currentGameId !== expectedGameId) return null;
+    return performCoachChat(event, moment);
+  });
+  coachChatChain = run.catch(() => {}).then(() => {
+    coachQueueDepth -= 1;
+  });
   return run;
 }
+
+// Re-sends the request behind the most recent coach error (usually the
+// player's own question) so an undelivered message doesn't have to be retyped.
+function retryCoachChat() {
+  const retry = state.coachRetry;
+  if (!retry) return;
+  state.coachRetry = null;
+  state.coachError = "";
+  requestCoachChat(retry.event, retry.moment);
+}
+
+// No streamed byte for this long = the connection is dead (mobile network
+// switch, dead proxy). Without a client-side watchdog, reader.read() can hang
+// forever with the Send button disabled and the dots bouncing.
+const COACH_CLIENT_IDLE_TIMEOUT_MS = 60_000;
 
 async function performCoachChat(event, moment) {
   state.coachThinking = true;
   state.coachError = "";
+  state.coachRetry = null;
   // Push an empty streaming bubble that fills in as deltas arrive. The unique
   // id ties deltas to THIS bubble even if another request follows immediately.
   const streamId = String(++coachStreamSeq);
@@ -2710,14 +3555,25 @@ async function performCoachChat(event, moment) {
 
   const controller = new AbortController();
   activeCoachAbort = controller;
+  let watchdog = null;
+  let watchdogFired = false;
+  const armWatchdog = () => {
+    window.clearTimeout(watchdog);
+    watchdog = window.setTimeout(() => {
+      watchdogFired = true;
+      controller.abort();
+    }, COACH_CLIENT_IDLE_TIMEOUT_MS);
+  };
+  armWatchdog();
 
   try {
     const data = await streamCoachChat(buildChatPayload(event, moment), {
       fetchImpl: api.authedFetch,
       signal: controller.signal,
       onDelta: (partial) => {
+        armWatchdog();
         streamingMessage.content = partial;
-        if (state.currentTab !== "coach") return;
+        if (state.currentTab !== "play") return;
         const log = document.querySelector("#coachChatLog");
         if (!log) return;
         const bubble = log.querySelector(`[data-streaming="${streamId}"]`);
@@ -2739,7 +3595,7 @@ async function performCoachChat(event, moment) {
       state.openAI.configured = false;
       state.coachError = data.message || "The coach is offline.";
       persistCoachChat();
-      if (state.currentTab === "coach") renderCoachPanel();
+      if (state.currentTab === "play") renderCoachPanel();
       return null;
     }
 
@@ -2747,18 +3603,35 @@ async function performCoachChat(event, moment) {
     streamingMessage.content = data.message;
     streamingMessage.isQuestion = Boolean(data.question);
     delete streamingMessage.streaming;
+    // A question-only reply has no message body: drop the empty bubble
+    // instead of leaving an invisible entry in the transcript.
+    if (!data.message) removeStreamingBubble();
+    else notifyCoachMessage(data.message);
+
+    // The server closed without a done event: what we have is possibly cut
+    // off. Keep the partial text (it may still be useful) but say so.
+    if (data.incomplete) {
+      state.coachError = "The coach's reply may have been cut off.";
+      state.coachRetry = { event, moment };
+    }
 
     if (data.memory_note) {
       state.coachMemory = appendMemoryNote(state.coachMemory, data.memory_note);
       saveCoachMemory();
     }
     if (data.question) {
-      state.pendingCoachQuestion = {
-        question: data.question,
-        ply: moment?.ply ?? state.moves.length,
-        san: moment?.san || "",
-        fen: moment?.fenBefore || state.game.fen(),
-      };
+      // If the player already queued another message while this reply was
+      // streaming, that message is NOT the answer to this question — don't
+      // arm the capture, or an unrelated reply gets recorded as a reasoning
+      // trace anchored to the wrong move.
+      if (coachQueueDepth <= 1) {
+        state.pendingCoachQuestion = {
+          question: data.question,
+          ply: moment?.ply ?? state.moves.length,
+          san: moment?.san || "",
+          fen: moment?.fenBefore || state.game.fen(),
+        };
+      }
       pushChatMessage("assistant", data.question, { isQuestion: true });
     } else {
       persistCoachChat();
@@ -2768,8 +3641,24 @@ async function performCoachChat(event, moment) {
   } catch (error) {
     state.coachThinking = false;
     removeStreamingBubble();
-    const message = friendlyServiceMessage(error, "The coach couldn't respond. Try again in a moment.");
+    // A deliberate abort (game teardown, page hide) is not a failure the
+    // user should see — and arming a retry here would resend the OLD game's
+    // moment into the NEW game's context. The watchdog's own abort (a stall)
+    // IS worth reporting, with a retry.
+    if (error.name === "AbortError" && !watchdogFired) {
+      persistCoachChat();
+      renderChatLog();
+      return null;
+    }
+    const message = error.name === "AbortError"
+      ? "The coach stopped responding. Try again."
+      : friendlyServiceMessage(error, "The coach couldn't respond. Try again in a moment.");
     state.coachError = message;
+    // Offer a one-click resend for requests worth retrying (the player's own
+    // messages and coach flows — disposable commentary just disappears).
+    if (!DISPOSABLE_CHAT_EVENTS.has(event)) {
+      state.coachRetry = { event, moment };
+    }
     // A hard failure means the "Online" badge is stale — reflect reality so
     // the Services card stops claiming the coach works. Rate limiting and
     // deliberate aborts are not outages.
@@ -2781,6 +3670,7 @@ async function performCoachChat(event, moment) {
     renderChatLog();
     return null;
   } finally {
+    window.clearTimeout(watchdog);
     if (activeCoachAbort === controller) activeCoachAbort = null;
   }
 }
@@ -2849,9 +3739,12 @@ function shouldCommentOnMove(record) {
   if (quality === "mistake" && record.ply - state.proactive.lastCommentPly >= 6) return "mistake";
 
   // Eval sign flip = the game turned around; worth one comment per game.
+  // Scores are side-to-move: evalAfter is the OPPONENT's perspective and must
+  // be negated before comparing signs with evalBefore (the player's).
   if (!state.proactive.turningPointUsed && Number.isFinite(record.evalBefore) && Number.isFinite(record.evalAfter)) {
-    const swing = record.evalAfter - record.evalBefore;
-    if (Math.sign(record.evalBefore) !== Math.sign(record.evalAfter) && Math.abs(swing) >= 150) {
+    const playerBefore = record.evalBefore;
+    const playerAfter = -record.evalAfter;
+    if (Math.sign(playerBefore) !== Math.sign(playerAfter) && Math.abs(playerAfter - playerBefore) >= 150) {
       return "turning_point";
     }
   }
@@ -2901,6 +3794,14 @@ function teardownBoardInteractions() {
   cancelActivePromotionPicker();
   resetRethinkState();
   stopClockTicker();
+  // A leftover replay/timeline board from the outgoing game would keep
+  // rendering the OLD position and block all input on the new one.
+  state.variationReplay = null;
+  state.timeline = null;
+  timelineCache = { ply: null, gameId: null, chess: null };
+  // An in-flight coach stream belongs to the outgoing game — abort it rather
+  // than let it keep streaming (and spending tokens) into the new context.
+  activeCoachAbort?.abort();
 }
 
 function shouldOfferRethink(record) {
@@ -2965,6 +3866,18 @@ function resolveRethink(takeBack) {
     state.moves = state.moves.filter((move) => move.id !== record.id);
     const tail = state.moves[state.moves.length - 1];
     state.lastMove = tail ? { from: tail.from, to: tail.to } : null;
+    // Hand the clock back to the player: onMoveClockUpdate already switched
+    // sides and paid the increment for the retracted move. Without this the
+    // opponent's clock runs during the player's rethink and the retracted
+    // move keeps its earned increment.
+    if (state.clocks && !state.clocks.flagged) {
+      const moverKey = record.color === "w" ? "white" : "black";
+      if (state.clocks.incrementMs) {
+        state.clocks[moverKey] = Math.max(0, state.clocks[moverKey] - state.clocks.incrementMs);
+      }
+      state.clocks.side = record.color;
+      state.clocks.lastTick = Date.now();
+    }
     pushChatMessage("assistant", "Take another look. What does your opponent's last move attack or threaten?");
     saveCurrentGame();
     renderAll();
@@ -2986,25 +3899,32 @@ async function maybeOfferRethink(record) {
   state.rethink.active = true;
   state.rethink.record = record;
   state.rethink.remaining -= 1;
-  state.rethink.stage = "ask";
+  // With no coach to talk to, the "tell the coach your idea" stage would
+  // point at a disabled chat box — go straight to the decision.
+  state.rethink.stage = isCoachAvailable() ? "ask" : "decide";
 
   const rethinkDecision = new Promise((resolve) => {
     state.rethink.resolve = resolve;
   });
 
-  if (state.currentTab !== "coach") switchTab("coach");
+  if (state.currentTab !== "play") switchTab("play");
   renderCoachPanel();
 
-  // Ask for the player's idea. Local fallback keeps the flow moving offline.
-  const response = await requestCoachChat("rethink_prompt", momentFromMoveRecord(record));
-  if (!response) {
-    pushChatMessage("assistant", `That drops material or misses something big. What was your idea with ${record.san}?`, { isQuestion: true });
-    state.pendingCoachQuestion = {
-      question: `What was your idea with ${record.san}?`,
-      ply: record.ply,
-      san: record.san,
-      fen: record.beforeFen,
-    };
+  if (isCoachAvailable()) {
+    // Ask for the player's idea. Local fallback keeps the flow moving.
+    const response = await requestCoachChat("rethink_prompt", momentFromMoveRecord(record));
+    if (!response) {
+      pushChatMessage("assistant", `That drops material or misses something big. What was your idea with ${record.san}?`, { isQuestion: true });
+      state.pendingCoachQuestion = {
+        question: `What was your idea with ${record.san}?`,
+        ply: record.ply,
+        san: record.san,
+        fen: record.beforeFen,
+      };
+      renderCoachPanel();
+    }
+  } else {
+    pushChatMessage("assistant", `${record.san} looks costly — it may drop material or miss something big. Want to take another look?`);
     renderCoachPanel();
   }
 
@@ -3014,14 +3934,15 @@ async function maybeOfferRethink(record) {
 // ─────────── Guided review ───────────
 
 function startGuidedReview() {
-  markDailyItemComplete("review");
   const moments = selectKeyMoments(state.moves);
   if (!moments.length) {
-    state.guidedReview = null;
-    pushChatMessage("assistant", "Honestly, no single moment decided that game — your biggest slips were small. Browse the move list if you want, or start another game.");
+    // The explanation must land on the tab the user is looking at — pushing
+    // it into the Coach chat made the button look broken from Review.
+    state.guidedReview = { active: false, noMoments: true };
     renderReviewPanel();
     return;
   }
+  markDailyItemComplete("review");
   state.guidedReview = { active: true, moments, index: 0, step: "ask", lastCoachMessage: "" };
   advanceGuidedReviewMoment();
 }
@@ -3086,11 +4007,20 @@ async function nextGuidedReviewMoment() {
     await advanceGuidedReviewMoment();
     return;
   }
-  state.guidedReview = null;
+  // Show a visible conclusion on the tab the user is on; the full summary
+  // also lands in the Coach chat.
+  state.guidedReview = { active: false, finished: true };
   state.reviewPly = null;
   renderReviewPanel();
   await requestCoachChat("game_summary");
   if (state.currentTab === "review") renderReviewPanel();
+}
+
+// Players read scoresheet move numbers, not plies: ply 24 is Black's 12th
+// move ("12…"), not "move 24".
+function moveNumberLabel(ply) {
+  const num = Math.ceil(ply / 2);
+  return ply % 2 === 1 ? `${num}.` : `${num}…`;
 }
 
 function renderGuidedReviewCard() {
@@ -3099,12 +4029,32 @@ function renderGuidedReviewCard() {
 
   if (!state.guidedReview?.active) {
     if (!gameDone) return "";
+    if (state.guidedReview?.noMoments) {
+      return `
+        <article class="mini-card guided-review-card">
+          <span class="label">Guided review</span>
+          <strong>No single moment decided this game</strong>
+          <p>Your biggest slips were small — a pretty clean game. Browse the move list below, or start another game.</p>
+        </article>
+      `;
+    }
+    if (state.guidedReview?.finished) {
+      return `
+        <article class="mini-card guided-review-card">
+          <span class="label">Guided review</span>
+          <strong>Review complete</strong>
+          <p>Nice work. The coach's summary is waiting in the Coach tab — or jump straight into another game.</p>
+        </article>
+      `;
+    }
+    // The flow has full local fallbacks for every coach prompt, so it works
+    // offline too — never disable the button just because the coach is out.
     return `
       <article class="mini-card guided-review-card">
         <span class="label">Guided review</span>
         <strong>Walk through the key moments</strong>
         <p>The coach picks the 2-3 moments that decided this game, asks what you were thinking, and teaches from there.</p>
-        <button class="primary-action" id="startGuidedReviewButton" type="button" ${isCoachAvailable() ? "" : "disabled"}>${isCoachAvailable() ? "Start guided review" : "Coach offline"}</button>
+        <button class="primary-action" id="startGuidedReviewButton" type="button">Start guided review</button>
       </article>
     `;
   }
@@ -3118,7 +4068,7 @@ function renderGuidedReviewCard() {
   return `
     <article class="mini-card guided-review-card">
       <span class="label">Guided review · moment ${review.index + 1} of ${review.moments.length}</span>
-      <strong>Move ${moment.ply}: ${escapeHtml(moment.san)}</strong>
+      <strong>${moveNumberLabel(moment.ply)} ${escapeHtml(moment.san)}</strong>
       <p>${escapeHtml(moment.reason)}</p>
       ${coachText}
       ${review.step === "ask" && review.lastCoachMessage ? `
@@ -3235,6 +4185,7 @@ function loadGameForReview(gameId) {
   state.guidedReview = null;
   state.pendingCoachQuestion = null;
   state.coachError = "";
+  state.coachRetry = null;
   resetProactiveState();
   resetRethinkState();
   // Unfinished timed games come back with their clock (paused-at-save);
@@ -3253,7 +4204,8 @@ function loadGameForReview(gameId) {
       }
     : null;
   if (state.clocks && !state.clocks.flagged) startClockTicker();
-  saveJson(STORAGE_KEYS.activeGame, record);
+  // Deliberately NOT saved into the activeGame slot: reviewing an old game
+  // must not make a reload boot into it — the slot keeps the live game.
   renderAll();
 
   // Reopening an unfinished game with the bot to move: let it move.
@@ -3276,7 +4228,10 @@ function renderReviewPanel() {
     els.reviewPanel.innerHTML = `
       <h2>Review</h2>
       <div class="stack">
-        <p class="empty-state">${explainer}</p>
+        <div class="empty-state empty-state-mascot">
+          <img src="./assets/squirrel_chess.svg" alt="" aria-hidden="true">
+          <p>${explainer}</p>
+        </div>
         ${renderGamePickerCard()}
       </div>
     `;
@@ -3305,9 +4260,9 @@ function renderReviewPanel() {
     const classText = toTitleCaseLabel(quality ? quality.label : prettyClassification(move.classification));
     const className = quality ? `quality-pill ${qualityClassName(quality.key)}` : reviewClassClass(move.classification);
     return `
-      <div class="move-row ${isSelected ? "selected" : ""}" role="button" tabindex="0" data-ply="${move.ply}">
+      <div class="move-row ${isSelected ? "selected" : ""}" role="button" tabindex="0" data-ply="${escapeAttr(move.ply)}">
         <div class="move-meta">
-          <span class="move-ply">${move.ply}.</span>
+          <span class="move-ply">${moveNumberLabel(move.ply)}</span>
           ${quality ? renderQualityBadgeHtml(move, "row-quality-badge") : ""}
           <span class="move-san">${escapeHtml(move.san)}</span>
           <span class="move-class ${className}">${escapeHtml(classText)}</span>
@@ -3325,8 +4280,8 @@ function renderReviewPanel() {
       <p>The moments where the game swung most against you.</p>
       <div class="candidate-list">
         ${turningPoints.map((point) => `
-          <button type="button" class="candidate turning-point" data-ply="${point.ply}">
-            ${point.ply}. ${escapeHtml(point.san)} <span class="move-eval">-${formatPawns(point.evalDelta)}</span>
+          <button type="button" class="candidate turning-point" data-ply="${escapeAttr(point.ply)}">
+            ${moveNumberLabel(point.ply)} ${escapeHtml(point.san)} <span class="move-eval">-${formatPawns(point.evalDelta)}</span>
           </button>
         `).join("")}
       </div>
@@ -3335,6 +4290,26 @@ function renderReviewPanel() {
 
   const boardCard = renderReviewBoardCard(selectedMove, boardFen);
 
+  // Scrub bar: steps the MAIN board through the game. Mirrors the arrow keys.
+  const timelinePosition = state.timeline ? state.timeline.ply : state.moves.length;
+  const timelineLabel = !state.timeline
+    ? "Final position"
+    : timelinePosition === 0
+      ? "Start"
+      : (() => {
+          const record = state.moves.find((move) => move.ply === timelinePosition);
+          return record ? `After ${moveNumberLabel(record.ply)} ${record.san}` : "";
+        })();
+  const scrubBar = `
+    <div class="timeline-bar" role="group" aria-label="Step through the game">
+      <button type="button" id="timelineStartButton" aria-label="Go to start" ${timelinePosition === 0 ? "disabled" : ""}>⏮</button>
+      <button type="button" id="timelineBackButton" aria-label="Previous move" ${timelinePosition === 0 ? "disabled" : ""}>◀</button>
+      <span class="timeline-label">${escapeHtml(timelineLabel)} <span class="timeline-hint">(arrow keys work too)</span></span>
+      <button type="button" id="timelineForwardButton" aria-label="Next move" ${state.timeline ? "" : "disabled"}>▶</button>
+      <button type="button" id="timelineLiveButton" ${state.timeline ? "" : "disabled"}>Final</button>
+    </div>
+  `;
+
   els.reviewPanel.innerHTML = `
     <h2>Review</h2>
     <div class="stack">
@@ -3342,6 +4317,7 @@ function renderReviewPanel() {
       ${renderVariationReplayCard()}
       ${renderGuidedReviewCard()}
       ${renderEvalGraphCard()}
+      ${scrubBar}
       ${boardCard}
       ${analysisCard}
       ${skillCard}
@@ -3355,19 +4331,31 @@ function renderReviewPanel() {
   bindReplayPvButtons(els.reviewPanel);
   bindEvalGraphCard();
   bindGamePickerCard(els.reviewPanel);
+  document.querySelector("#timelineStartButton")?.addEventListener("click", () => setTimelinePly(0));
+  document.querySelector("#timelineBackButton")?.addEventListener("click", () => stepTimeline(-1));
+  document.querySelector("#timelineForwardButton")?.addEventListener("click", () => stepTimeline(1));
+  document.querySelector("#timelineLiveButton")?.addEventListener("click", () => setTimelinePly(state.moves.length));
 
   els.reviewPanel.querySelectorAll(".move-row[data-ply]").forEach((row) => {
-    row.addEventListener("click", () => {
+    const activate = () => {
       const ply = Number(row.dataset.ply);
-      state.reviewPly = state.reviewPly === ply ? null : ply;
-      renderReviewPanel();
+      // Toggle: selecting an already-selected move returns to the live board.
+      setTimelinePly(state.reviewPly === ply ? state.moves.length : ply);
       paintBoardArrows();
+    };
+    row.addEventListener("click", activate);
+    // These are divs with role="button": unlike real buttons they don't
+    // synthesize clicks from the keyboard, so Enter/Space must be wired up.
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+      }
     });
   });
   els.reviewPanel.querySelectorAll(".turning-point[data-ply]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.reviewPly = Number(button.dataset.ply);
-      renderReviewPanel();
+      setTimelinePly(Number(button.dataset.ply));
       paintBoardArrows();
     });
   });
@@ -3492,7 +4480,7 @@ function renderSelectedMoveAnalysis(move) {
           </div>
         </div>
         <div class="button-row">
-          <button type="button" data-replay-pv="${move.id}">Replay engine line on board</button>
+          <button type="button" data-replay-pv="${escapeAttr(move.id)}">Replay engine line on board</button>
         </div>
       ` : ""}
     </article>
@@ -3536,14 +4524,16 @@ function formatPrincipalVariation(fen, pv) {
 function renderEvalGraphCard() {
   const points = state.moves
     .map((move) => {
+      // Scores are from the side-to-move's perspective in the position AFTER
+      // the move; that side is the OPPOSITE of the mover, so multiplying by
+      // the mover's color gives White-perspective. Mate scores need the same
+      // flip (mateAfter 0 = the side to move is checkmated).
+      const sign = move.color === "w" ? -1 : 1;
       if (typeof move.mateAfter === "number") {
-        return { ply: move.ply, whiteCp: move.mateAfter > 0 ? 1200 : -1200, mate: true };
+        const stmCp = move.mateAfter > 0 ? 1200 : -1200;
+        return { ply: move.ply, whiteCp: stmCp * sign, mate: true };
       }
       if (typeof move.evalAfter === "number") {
-        // evalAfter is from side-to-move's perspective in the position AFTER
-        // the move; that side is the OPPOSITE of the mover, so multiplying by
-        // the mover's color gives White-perspective.
-        const sign = move.color === "w" ? -1 : 1;
         return { ply: move.ply, whiteCp: move.evalAfter * sign, mate: false };
       }
       return null;
@@ -3573,7 +4563,7 @@ function renderEvalGraphCard() {
       if (!quality || !["blunder", "mistake", "missed_win", "inaccuracy"].includes(quality)) return "";
       const cx = (index * step).toFixed(1);
       const cy = scale(point.whiteCp).toFixed(1);
-      return `<circle class="eval-graph-marker ${qualityClassName(quality)}" cx="${cx}" cy="${cy}" r="3" data-ply="${point.ply}"></circle>`;
+      return `<circle class="eval-graph-marker ${qualityClassName(quality)}" cx="${cx}" cy="${cy}" r="3" data-ply="${escapeAttr(point.ply)}"></circle>`;
     })
     .filter(Boolean)
     .join("");
@@ -3581,7 +4571,7 @@ function renderEvalGraphCard() {
   return `
     <article class="mini-card eval-graph-card">
       <span class="label">Evaluation graph</span>
-      <svg id="evalGraphSvg" class="eval-graph" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Evaluation over time">
+      <svg id="evalGraphSvg" class="eval-graph" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Evaluation over time" data-plies="${points.map((point) => point.ply).join(",")}">
         <line x1="0" y1="${midY}" x2="${width}" y2="${midY}" class="eval-graph-mid"></line>
         <path d="${areaD}" class="eval-graph-area"></path>
         <path d="${pathD}" class="eval-graph-line"></path>
@@ -3596,21 +4586,21 @@ function bindEvalGraphCard() {
   if (!svg) return;
   svg.querySelectorAll(".eval-graph-marker").forEach((circle) => {
     circle.addEventListener("click", () => {
-      state.reviewPly = Number(circle.dataset.ply);
-      renderReviewPanel();
+      setTimelinePly(Number(circle.dataset.ply));
     });
   });
   svg.addEventListener("click", (event) => {
     if (event.target.tagName === "circle") return; // handled above
     const rect = svg.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    const totalPoints = state.moves.length;
-    if (!totalPoints) return;
-    const index = Math.round((x / rect.width) * (totalPoints - 1));
-    const move = state.moves[Math.min(Math.max(index, 0), totalPoints - 1)];
-    if (move) {
-      state.reviewPly = move.ply;
-      renderReviewPanel();
+    // The graph only plots moves that have evals — map the click onto that
+    // same list, not state.moves (they diverge whenever a move lacks a grade).
+    const plies = String(svg.dataset.plies || "").split(",").map(Number).filter(Number.isFinite);
+    if (!plies.length) return;
+    const index = Math.round((x / rect.width) * (plies.length - 1));
+    const ply = plies[Math.min(Math.max(index, 0), plies.length - 1)];
+    if (Number.isFinite(ply)) {
+      setTimelinePly(ply);
     }
   });
 }
@@ -3619,12 +4609,20 @@ function bindEvalGraphCard() {
 
 function startVariationReplay(fen, uciList) {
   if (!Array.isArray(uciList) || !uciList.length) return;
-  const chess = new Chess(fen);
+  // Records come from localStorage/cloud sync — a corrupted FEN or PV must
+  // not crash the Review click handler (chess.js throws, not returns null).
+  let chess;
   const moves = [];
-  for (const uci of uciList) {
-    const move = chess.move(moveFromUci(uci));
-    if (!move) break;
-    moves.push({ uci, san: move.san, fenAfter: chess.fen() });
+  try {
+    chess = new Chess(fen);
+    for (const uci of uciList) {
+      const move = chess.move(moveFromUci(uci));
+      if (!move) break;
+      moves.push({ uci, san: move.san, fenAfter: chess.fen() });
+    }
+  } catch (error) {
+    console.warn("Variation replay could not load this line", error);
+    if (!moves.length) return;
   }
   if (!moves.length) return;
   // Rewind the sim to the start position; index tracks how far the user has stepped.
@@ -3637,12 +4635,18 @@ function startVariationReplay(fen, uciList) {
 function stepVariationReplay(direction) {
   const replay = state.variationReplay;
   if (!replay) return;
-  if (direction === "forward" && replay.index < replay.moves.length) {
-    replay.chess.move(moveFromUci(replay.moves[replay.index].uci));
-    replay.index += 1;
-  } else if (direction === "back" && replay.index > 0) {
-    replay.index -= 1;
-    replay.chess.load(replay.index === 0 ? replay.baseFen : replay.moves[replay.index - 1].fenAfter);
+  try {
+    if (direction === "forward" && replay.index < replay.moves.length) {
+      replay.chess.move(moveFromUci(replay.moves[replay.index].uci));
+      replay.index += 1;
+    } else if (direction === "back" && replay.index > 0) {
+      replay.index -= 1;
+      replay.chess.load(replay.index === 0 ? replay.baseFen : replay.moves[replay.index - 1].fenAfter);
+    }
+  } catch (error) {
+    console.warn("Variation replay step failed", error);
+    stopVariationReplay();
+    return;
   }
   renderBoard();
   renderCurrentPanel();
@@ -3716,12 +4720,20 @@ function reviewTagClass(severity) {
 
 function prettyClassification(classification) {
   if (!classification || classification === "neutral") return "OK";
+  // Family mode softens every harsh label — including this fallback path
+  // (legacy records with a classification but no quality key used to leak
+  // "Blunder"/"Mistake" past the softened labels).
+  const softened = isFamilyMode() ? FAMILY_QUALITY_LABELS[classification] : null;
+  if (softened) return softened.label;
   return classification[0].toUpperCase() + classification.slice(1);
 }
 
 function renderMiniBoard(fen, highlights = {}) {
-  const piecesField = fen.split(" ")[0];
+  const piecesField = String(fen || "").split(" ")[0];
   const ranks = piecesField.split("/");
+  // Records come from storage/sync — a malformed FEN must degrade to an
+  // empty tile, not throw and take the whole Review panel down with it.
+  if (ranks.length !== 8) return '<div class="mini-board"></div>';
   let html = '<div class="mini-board">';
   for (let rank = 0; rank < 8; rank++) {
     let file = 0;
@@ -4125,7 +5137,7 @@ function startPracticePuzzle(puzzle, options = {}) {
   teardownBoardInteractions();
 
   if (!state.activeDrill && options.saveCurrent !== false) {
-    saveCurrentGame();
+    state.pausedGameId = savePausedGameForDrill();
   }
   // The saved game keeps its remaining time; the drill itself is untimed.
   state.clocks = null;
@@ -4169,9 +5181,11 @@ function hasLiveGameInProgress() {
 
 function ensurePracticeTrainer(options = {}) {
   if (!isCalibrationComplete() || state.activeDrill) return false;
-  // Never silently replace a game in progress. The Practice panel offers an
-  // explicit "Start practice" button instead (the game is saved + resumable).
-  if (hasLiveGameInProgress() && !options.force) return false;
+  // Never silently replace a board with moves on it — live OR just finished.
+  // (Auto-seating a puzzle right after a game ended vanished the game the
+  // app had just pointed the player at for review.) The Practice panel
+  // offers an explicit "Start practice" button instead.
+  if (state.moves.length > 0 && !options.force) return false;
   const next = selectNextPracticePuzzle();
   return startPracticePuzzle(next, { render: false, switchTab: false });
 }
@@ -4287,11 +5301,55 @@ function renderOpeningDrillCard() {
   `;
 }
 
+// Active checkmate-ladder drill card: shows the drill's live feedback (which
+// used to render only in the Coach tab — invisible from Practice, where the
+// drill actually lives) and always offers a way out.
+function renderMateDrillCard() {
+  if (!isMateDrill()) return "";
+  const drill = state.activeDrill;
+  return `
+    <article class="mini-card practice-trainer-card">
+      <span class="label">Checkmate ladder</span>
+      <strong>${escapeHtml(drill.title)}</strong>
+      <p>${escapeHtml(state.drillMessage || drill.objective)}</p>
+      <div class="button-row">
+        ${drill.solved
+          ? `<button id="nextMateDrillButton" class="primary-action" type="button">Next mate</button>`
+          : ""}
+        <button id="exitMateDrillButton" type="button">${drill.solved ? "Done" : "Exit drill"}</button>
+      </div>
+    </article>
+  `;
+}
+
+function bindMateDrillCard() {
+  document.querySelector("#exitMateDrillButton")?.addEventListener("click", exitMateDrill);
+  document.querySelector("#nextMateDrillButton")?.addEventListener("click", () => {
+    const solvedSet = new Set(state.mateLadder.solved || []);
+    const next = ACTIVE_MATE_POSITIONS.find((position) =>
+      isRungUnlocked(position.rung, state.mateLadder) && !solvedSet.has(position.id));
+    if (next) {
+      startMateDrill(next.id);
+    } else {
+      exitMateDrill();
+    }
+  });
+}
+
+function exitMateDrill() {
+  if (!isMateDrill()) return;
+  state.activeDrill = null;
+  state.drillMessage = "";
+  restorePausedGameOrFreshBoard();
+  restartClocksForRestoredGame();
+  renderAll();
+}
+
 function bindOpeningDrillCard() {
   document.querySelector("#exitOpeningDrillButton")?.addEventListener("click", () => {
     state.activeDrill = null;
     state.drillMessage = "";
-    restoreActiveGame();
+    restorePausedGameOrFreshBoard();
     restartClocksForRestoredGame();
     renderAll();
   });
@@ -4408,29 +5466,63 @@ function bindWeaknessLabsSection() {
 
 function renderPracticePanel() {
   if (!isCalibrationComplete()) {
+    const lessonsPending = state.settings.beginnerMode === true && !allLessonsComplete(state.learn.completed);
     els.practicePanel.innerHTML = `
       <h2>Practice</h2>
       <div class="stack">
         <article class="mini-card calibration-card">
           <span class="label">Practice trainer</span>
-          <strong>Unlocks after your calibration game</strong>
-          <p>Finish your first game so the trainer can match puzzle difficulty to how you actually play.</p>
+          <strong>${lessonsPending ? "Lessons first, then practice" : "Unlocks after your calibration game"}</strong>
+          <p>${lessonsPending
+            ? "Finish the learn-to-play lessons, then play your first game. After that, the trainer builds puzzles matched to how you actually play."
+            : "Finish your first game so the trainer can match puzzle difficulty to how you actually play."}</p>
+          ${lessonsPending ? `<button id="practiceGoToLessonsButton" class="primary-action" type="button">Go to lessons</button>` : ""}
         </article>
       </div>
     `;
+    document.querySelector("#practiceGoToLessonsButton")?.addEventListener("click", () => switchTab("learn"));
+    return;
+  }
+
+  // A lesson owns the board — showing the full catalog here let one stray
+  // click silently kill the lesson mid-step.
+  if (isLessonDrill()) {
+    els.practicePanel.innerHTML = `
+      <h2>Practice</h2>
+      <div class="stack">
+        <article class="mini-card practice-start-card">
+          <span class="label">Lesson in progress</span>
+          <strong>${escapeHtml(getActiveLesson()?.title || "Learn to play")}</strong>
+          <p>Finish (or exit) the lesson first — the practice trainer takes over the same board.</p>
+          <div class="button-row">
+            <button id="practiceBackToLessonButton" class="primary-action" type="button">Back to the lesson</button>
+            <button id="practiceExitLessonButton" type="button">Exit lesson</button>
+          </div>
+        </article>
+      </div>
+    `;
+    document.querySelector("#practiceBackToLessonButton")?.addEventListener("click", () => switchTab("learn"));
+    document.querySelector("#practiceExitLessonButton")?.addEventListener("click", () => {
+      exitLesson();
+      renderPracticePanel();
+    });
     return;
   }
 
   ensurePracticeTrainer();
 
-  const pausedGameCard = !state.activeDrill && hasLiveGameInProgress() ? `
+  const hasLive = hasLiveGameInProgress();
+  const hasFinishedOnBoard = !state.activeDrill && state.moves.length > 0 && !hasLive;
+  const pausedGameCard = !state.activeDrill && (hasLive || hasFinishedOnBoard) ? `
     <article class="mini-card practice-start-card">
       <span class="label">Practice trainer</span>
-      <strong>You have a game in progress</strong>
-      <p>Starting practice pauses your game. It's saved automatically — "Resume game" brings it right back.</p>
+      <strong>${hasLive ? "You have a game in progress" : "Your finished game stays on the board"}</strong>
+      <p>${hasLive
+        ? `Starting practice pauses your game. It's saved automatically — "Resume game" brings it right back.`
+        : "Starting practice clears the board. The game is saved in Review whenever you want it."}</p>
       <div class="button-row">
         <button id="startPracticeSessionButton" class="primary-action" type="button">Start practice</button>
-        <button id="backToGameButton" type="button">Back to my game</button>
+        <button id="backToGameButton" type="button">${hasLive ? "Back to my game" : "Back to review"}</button>
       </div>
     </article>
   ` : "";
@@ -4441,17 +5533,17 @@ function renderPracticePanel() {
   const trainer = renderPracticeTrainer();
   const dueCards = dueItems.map((item) => `
     <article class="practice-card">
-      <span class="label">${escapeHtml(getSkillForPractice(item)?.label || "Skill")} - from your games - ${escapeHtml(nextDueLabel(item))}</span>
+      <span class="label">${escapeHtml(getSkillForPractice(item)?.label || "Skill")} · from your games · ${escapeHtml(nextDueLabel(item))}</span>
       <strong>${escapeHtml(plainPracticeTitleForCategory(item.category))}</strong>
       <p>${escapeHtml(plainPracticeGoalForItem(item))}</p>
       <div class="button-row">
-        <button type="button" data-practice-board="${item.id}">Practice on board</button>
+        <button type="button" data-practice-board="${escapeAttr(item.id)}">Practice on board</button>
       </div>
     </article>
   `).join("");
   const foundationCards = CURATED_PRACTICE_PUZZLES.map((puzzle) => `
     <button class="practice-card practice-select" type="button" data-start-puzzle="${escapeAttr(puzzle.id)}">
-      <span class="label">${escapeHtml(getSkillForPractice(puzzle)?.label || "Foundation")} - difficulty ${puzzle.difficulty}</span>
+      <span class="label">${escapeHtml(getSkillForPractice(puzzle)?.label || "Foundation")} · difficulty ${puzzle.difficulty}</span>
       <strong>${escapeHtml(puzzle.plainTitle)}</strong>
       <span class="card-text">${escapeHtml(puzzle.plainGoal || getPracticeMotifGuide(puzzle.category).plainGoal)}</span>
     </button>
@@ -4463,6 +5555,7 @@ function renderPracticePanel() {
       ${pausedGameCard}
       ${renderDailyPlanCard()}
       ${renderOpeningDrillCard()}
+      ${renderMateDrillCard()}
       ${trainer}
       ${nextFocus ? `
         <article class="mini-card priority-card">
@@ -4492,14 +5585,22 @@ function renderPracticePanel() {
     ensurePracticeTrainer({ force: true });
     renderAll();
   });
-  document.querySelector("#backToGameButton")?.addEventListener("click", () => switchTab("coach"));
+  document.querySelector("#backToGameButton")?.addEventListener("click", () => {
+    switchTab(hasLiveGameInProgress() ? "play" : "review");
+  });
   bindOpeningDrillCard();
+  bindMateDrillCard();
   bindOpeningTrainerSection();
   bindMateLadderSection();
   bindWeaknessLabsSection();
   document.querySelector("#practiceNextButton")?.addEventListener("click", startNextPracticePuzzle);
   document.querySelector("#resumeGameButton")?.addEventListener("click", resumeSavedGame);
   document.querySelector("#startRatedPuzzleButton")?.addEventListener("click", startRatedPuzzle);
+  document.querySelector("#retryPuzzlePackButton")?.addEventListener("click", () => {
+    state.puzzlePack.status = "idle";
+    loadPuzzlePack();
+    renderPracticePanel();
+  });
   els.practicePanel.querySelectorAll("[data-practice-board]").forEach((button) => {
     button.addEventListener("click", () => startQueuedPractice(button.dataset.practiceBoard));
   });
@@ -4518,7 +5619,14 @@ function renderPracticePanel() {
 function renderRatedTacticsSection() {
   const pack = state.puzzlePack;
   if (pack.status === "error") {
-    return "<p class=\"empty-state\">The rated tactics pack could not load. Reload the app to retry.</p>";
+    return `
+      <article class="mini-card rated-tactics-card">
+        <p class="empty-state">The rated tactics pack could not load.</p>
+        <div class="button-row">
+          <button id="retryPuzzlePackButton" type="button">Try again</button>
+        </div>
+      </article>
+    `;
   }
   if (pack.status !== "ready") {
     return "<p class=\"empty-state\">Loading rated tactics...</p>";
@@ -4600,6 +5708,25 @@ function renderProfilePanel() {
   `;
 }
 
+// Tiny inline SVG sparkline from a dimension's recent per-move performance
+// samples (0..1). Purely decorative — aria-hidden, the trend arrow carries
+// the same information for screen readers.
+function sparklineSvg(recent) {
+  const points = (recent || []).filter((value) => Number.isFinite(value));
+  if (points.length < 5) return "";
+  const width = 72;
+  const height = 20;
+  const step = width / (points.length - 1);
+  const path = points
+    .map((value, index) => `${index === 0 ? "M" : "L"}${(index * step).toFixed(1)},${(height - 2 - value * (height - 4)).toFixed(1)}`)
+    .join(" ");
+  return `
+    <svg class="skill-sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true">
+      <path d="${path}" fill="none"></path>
+    </svg>
+  `;
+}
+
 function renderSkillDimensionCard() {
   if (!state.skill?.dims) return "";
   const snapshot = skillSnapshot(state.skill);
@@ -4609,11 +5736,12 @@ function renderSkillDimensionCard() {
     const percent = clamp(Math.round(((entry.rating - 400) / 1400) * 100), 2, 100);
     const trendArrow = entry.trend > 0 ? "▲" : entry.trend < 0 ? "▼" : "•";
     const trendClass = entry.trend > 0 ? "up" : entry.trend < 0 ? "down" : "flat";
+    const spark = sparklineSvg(state.skill.dims[dim]?.recent);
     return `
       <div class="skill-dim-row">
         <div class="skill-dim-head">
           <strong>${escapeHtml(DIMENSION_LABELS[dim] || dim)}</strong>
-          <span class="skill-dim-rating">${entry.rating} <span class="skill-trend ${trendClass}" title="Recent trend">${trendArrow}</span></span>
+          <span class="skill-dim-rating">${spark}${entry.rating} <span class="skill-trend ${trendClass}" title="Recent trend">${trendArrow}</span></span>
         </div>
         <div class="skill-dim-meter"><i style="width: ${percent}%"></i></div>
         <p class="skill-dim-next">Next level: ${escapeHtml(entry.nextLevel)}</p>
@@ -4625,6 +5753,387 @@ function renderSkillDimensionCard() {
     <article class="mini-card skill-dims-card">
       <span class="label">Skill dimensions</span>
       ${rows}
+    </article>
+  `;
+}
+
+// ─────────── Learn tab: lesson engine + panel ───────────
+
+// Persist the learner's position in an unfinished lesson. Reviews of
+// completed lessons never move resume points.
+function persistLessonProgress(lessonId, stepIndex) {
+  if (state.learn.completed.includes(lessonId)) return;
+  state.learn.lessonId = lessonId;
+  state.learn.stepIndex = stepIndex;
+  state.learn.stepByLesson = { ...state.learn.stepByLesson, [lessonId]: stepIndex };
+  state.learn.active = true;
+  saveLearnState();
+}
+
+function setLessonFlash(text, tone = "note") {
+  state.lessonFlash = text ? { text, tone } : null;
+}
+
+// Seats the board for a lesson. Lessons reuse the drill pipeline (scripted
+// boards, no engine replies, no grading) with `isLesson` as the marker.
+function startLesson(lessonId, options = {}) {
+  const lesson = getLessonById(lessonId);
+  if (!lesson) return false;
+  cancelDeepAnalysis();
+  teardownBoardInteractions();
+
+  if (!state.activeDrill) {
+    state.pausedGameId = savePausedGameForDrill();
+  }
+  state.clocks = null;
+  renderClocks();
+
+  // Resume this lesson's own progress unless this is an explicit restart.
+  const resume = options.restart === true
+    ? 0
+    : clamp(state.learn.stepByLesson?.[lessonId] || 0, 0, lesson.steps.length - 1);
+
+  state.activeDrill = {
+    isLesson: true,
+    lessonId,
+    stepIndex: resume,
+    completed: false,
+    awaitingAdvance: false,
+    playerColor: "w",
+    title: lesson.title,
+  };
+  persistLessonProgress(lessonId, resume);
+  setLessonFlash(null);
+  seatLessonStep();
+
+  if (options.switchTab === false) {
+    renderAll();
+  } else {
+    switchTab("learn");
+    renderAll();
+  }
+  return true;
+}
+
+function seatLessonStep() {
+  const step = getActiveLessonStep();
+  if (!step) return;
+  state.game = new Chess(step.fen);
+  state.moves = [];
+  state.selectedSquare = null;
+  state.legalTargets = new Set();
+  state.lastMove = null;
+  state.thinking = false;
+  state.reviewPly = null;
+  state.drillMessage = step.text;
+}
+
+function advanceLessonStep() {
+  const lesson = getActiveLesson();
+  if (!lesson) return;
+  const nextIndex = state.activeDrill.stepIndex + 1;
+  if (nextIndex >= lesson.steps.length) {
+    markActiveLessonComplete(lesson);
+    return;
+  }
+  state.activeDrill.stepIndex = nextIndex;
+  persistLessonProgress(lesson.id, nextIndex);
+  seatLessonStep();
+  renderAll();
+}
+
+function markActiveLessonComplete(lesson) {
+  state.activeDrill.completed = true;
+  if (!state.learn.completed.includes(lesson.id)) {
+    state.learn.completed = [...state.learn.completed, lesson.id];
+  }
+  // Only clear the Continue pointer when it pointed here — completing a
+  // review of lesson A must not orphan in-progress lesson B.
+  if (state.learn.lessonId === lesson.id || !state.learn.lessonId) {
+    state.learn.lessonId = null;
+    state.learn.stepIndex = 0;
+  }
+  state.learn.active = false;
+  const stepByLesson = { ...state.learn.stepByLesson };
+  delete stepByLesson[lesson.id];
+  state.learn.stepByLesson = stepByLesson;
+  saveLearnState();
+  playGameSound("drillSolved");
+  const courseDone = allLessonsComplete(state.learn.completed);
+  celebrate(courseDone ? "milestone" : "lesson");
+  state.drillMessage = courseDone
+    ? "That was the last lesson — you know every rule of chess. Time to play your first real game."
+    : `Lesson complete: ${lesson.title}.`;
+  renderAll();
+}
+
+// Lesson moves never touch grading, history, or sync — the board is a
+// teaching prop. Wrong moves (and any move on an info step) are rolled back.
+async function handleLessonMove(move) {
+  const drill = state.activeDrill;
+  const step = getActiveLessonStep();
+
+  // A move landed during the post-success pause (fast learner): skip straight
+  // to the next step instead of judging the move against the old task.
+  if (drill.awaitingAdvance) {
+    state.game.undo();
+    drill.awaitingAdvance = false;
+    advanceLessonStep();
+    return;
+  }
+
+  if (!step || step.kind !== "task" || drill.completed) {
+    state.game.undo();
+    setLessonFlash(drill.completed
+      ? "Lesson complete — pick your next lesson in the panel."
+      : "Read the card in the Learn panel, then press Next.", "note");
+    renderAll();
+    return;
+  }
+
+  const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
+  if (!step.expectedMoves.includes(playedUci)) {
+    state.game.undo();
+    playGameSound("drillMissed");
+    setLessonFlash(step.fail || "Not quite — try again.", "miss");
+    // Guide the retry: pre-select the piece that should move so its legal
+    // squares light up alongside the ★ target.
+    const hintFrom = step.hintSquares?.[0] || step.expectedMoves[0]?.slice(0, 2);
+    if (hintFrom && state.game.get(hintFrom)?.color === "w") {
+      state.selectedSquare = hintFrom;
+      state.legalTargets = new Set(state.game.moves({ square: hintFrom, verbose: true }).map((m) => m.to));
+    }
+    renderAll();
+    return;
+  }
+
+  state.lastMove = { from: move.from, to: move.to };
+  playGameSound("drillSolved");
+  setLessonFlash(step.success || "Correct!", "success");
+  drill.awaitingAdvance = true;
+  renderAll();
+
+  // Let the success flash and the final position breathe before re-seating.
+  // Clicking the board (or moving again) during the pause skips it.
+  await wait(800);
+  if (state.activeDrill !== drill || !drill.awaitingAdvance) return;
+  drill.awaitingAdvance = false;
+  advanceLessonStep();
+}
+
+function exitLesson() {
+  if (!isLessonDrill()) return;
+  teardownBoardInteractions();
+  state.activeDrill = null;
+  state.drillMessage = "";
+  setLessonFlash(null);
+  state.learn.active = false;
+  saveLearnState();
+  restorePausedGameOrFreshBoard();
+  restartClocksForRestoredGame();
+  renderAll();
+}
+
+// First-launch answer to "have you played chess before?".
+function chooseLearnPath(beginner) {
+  state.learn.pathChosen = true;
+  saveLearnState();
+  if (beginner) {
+    state.settings.beginnerMode = true;
+    saveJson(STORAGE_KEYS.settings, state.settings);
+    const next = getNextLesson(state.learn.completed);
+    if (next) {
+      startLesson(next.id);
+      return;
+    }
+    switchTab("learn");
+  }
+  renderAll();
+}
+
+function startFirstRealGame() {
+  // newGame() clears the lesson drill; no confirm fires because drills are
+  // never counted as games in progress.
+  newGame();
+  switchTab("play");
+}
+
+function getCurrentBeginnerTip() {
+  const tips = beginnerTips();
+  if (!tips.length) return "";
+  return tips[state.learn.completed.length % tips.length];
+}
+
+// The lesson the learner should land in next: their own in-progress lesson
+// first, then the first incomplete one in curriculum order.
+function getResumeLesson() {
+  if (state.learn.lessonId && !state.learn.completed.includes(state.learn.lessonId)) {
+    return getLessonById(state.learn.lessonId);
+  }
+  return getNextLesson(state.learn.completed);
+}
+
+// Static rules reminders shown during beginner pre-calibration games. Rules
+// only — no engine advice — so the calibration measurement stays honest.
+function renderBeginnerCheatSheet() {
+  if (state.learn.cheatSheetDismissed) return "";
+  return `
+    <article class="mini-card lesson-cheat-card dismissible-card">
+      <button class="dismiss-card-button" id="dismissCheatSheetButton" type="button" aria-label="Dismiss reminders">×</button>
+      <span class="label">Quick reminders</span>
+      <ul class="cheat-list">
+        <li>Piece values: pawn 1 · knight 3 · bishop 3 · rook 5 · queen 9.</li>
+        <li>Before every move: what did their last move attack?</li>
+        <li>Before every capture: what takes back?</li>
+        <li>Develop knights and bishops, castle early.</li>
+      </ul>
+    </article>
+  `;
+}
+
+function bindBeginnerCheatSheet() {
+  document.querySelector("#dismissCheatSheetButton")?.addEventListener("click", () => {
+    state.learn.cheatSheetDismissed = true;
+    saveLearnState();
+    renderCoachPanel();
+  });
+}
+
+// A reload mid-lesson should put the lesson back on the board instead of
+// stranding the learner on the paused (usually empty) game. A restored real
+// game with moves always wins over the lesson.
+function maybeResumeLessonOnBoot() {
+  // Anyone can be mid-lesson, not only beginner-mode users — a non-beginner
+  // reloading mid-lesson used to be dumped on their old game with
+  // learn.active stuck true (a surprise auto-resume waiting to happen).
+  if (!state.learn.active || !state.learn.lessonId) return;
+  if (state.learn.completed.includes(state.learn.lessonId)) {
+    state.learn.active = false;
+    saveLearnState();
+    return;
+  }
+  if (state.moves.length) {
+    // A live game takes priority over resuming the lesson; clear the stale
+    // flag so the lesson doesn't resurrect on some future boot.
+    state.learn.active = false;
+    saveLearnState();
+    return;
+  }
+  // Seat the lesson without a tab switch, then apply the Learn tab's classes
+  // via the history-neutral path; boot's replaceState snapshots the result.
+  startLesson(state.learn.lessonId, { switchTab: false });
+  switchTab("learn", { fromHistory: true });
+}
+
+function renderLearnPanel() {
+  const learn = state.learn;
+  const doneCount = LESSONS.filter((lesson) => learn.completed.includes(lesson.id)).length;
+  const allDone = allLessonsComplete(learn.completed);
+  const percent = Math.round((doneCount / LESSONS.length) * 100);
+
+  const progressCard = `
+    <article class="mini-card learn-progress-card">
+      <span class="label">Learn to play</span>
+      <strong>${allDone ? "You know the rules" : "The rules of chess, one board at a time"}</strong>
+      <div class="learn-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${LESSONS.length}" aria-valuenow="${doneCount}" aria-label="Lessons completed">
+        <div class="learn-progress-fill" style="width:${percent}%"></div>
+      </div>
+      <p>${allDone
+        ? "Every rule is covered. You can revisit any lesson below, or start playing — the coach takes it from here."
+        : `${doneCount} of ${LESSONS.length} lessons done. Short interactive boards — you learn by moving the pieces.`}</p>
+      ${allDone ? `<button class="primary-action js-play-first-game" type="button">Play a real game</button>` : ""}
+    </article>
+  `;
+
+  const activeCard = isLessonDrill() ? renderActiveLessonCard() : "";
+
+  const rows = LESSONS.map((lesson, index) => {
+    const done = learn.completed.includes(lesson.id);
+    const isActive = isLessonDrill() && state.activeDrill.lessonId === lesson.id;
+    const resumable = !done && (learn.stepByLesson?.[lesson.id] || 0) > 0;
+    const status = done ? "✓ Done" : resumable ? "In progress" : "";
+    const action = isActive ? "" : `<button type="button" data-lesson-start="${escapeAttr(lesson.id)}">${done ? "Review" : resumable ? "Continue" : "Start"}</button>`;
+    return `
+      <article class="lesson-row${done ? " done" : ""}${isActive ? " active" : ""}">
+        <span class="lesson-index">${index + 1}</span>
+        <div class="lesson-row-body">
+          <strong>${escapeHtml(lesson.title)}</strong>
+          <p>${escapeHtml(lesson.summary)}</p>
+        </div>
+        ${status ? `<span class="lesson-status">${escapeHtml(status)}</span>` : ""}
+        ${action}
+      </article>
+    `;
+  }).join("");
+
+  els.learnPanel.innerHTML = `
+    <h2>Learn</h2>
+    <div class="stack">
+      ${activeCard}
+      ${progressCard}
+      <div class="lesson-list">${rows}</div>
+    </div>
+  `;
+
+  els.learnPanel.querySelectorAll("[data-lesson-start]").forEach((button) => {
+    button.addEventListener("click", () => startLesson(button.dataset.lessonStart));
+  });
+  document.querySelector("#lessonNextButton")?.addEventListener("click", () => {
+    setLessonFlash(null);
+    advanceLessonStep();
+  });
+  document.querySelector("#lessonNextLessonButton")?.addEventListener("click", () => {
+    const next = getNextLesson(state.learn.completed);
+    if (next) startLesson(next.id);
+  });
+  document.querySelector("#lessonRestartButton")?.addEventListener("click", () => {
+    startLesson(state.activeDrill.lessonId, { restart: true });
+  });
+  document.querySelector("#lessonExitButton")?.addEventListener("click", exitLesson);
+  els.learnPanel.querySelectorAll(".js-play-first-game").forEach((button) => {
+    button.addEventListener("click", startFirstRealGame);
+  });
+}
+
+function renderLessonFlashHtml() {
+  const flash = state.lessonFlash;
+  // The element is always present (zero-height when empty) so aria-live
+  // announcements fire when feedback text arrives.
+  return `<p class="lesson-flash${flash ? ` ${flash.tone}` : " empty"}" aria-live="polite">${flash ? escapeHtml(flash.text) : ""}</p>`;
+}
+
+function renderActiveLessonCard() {
+  const lesson = getActiveLesson();
+  if (!lesson) return "";
+  const drill = state.activeDrill;
+  const step = lesson.steps[drill.stepIndex];
+  const completed = drill.completed;
+  const lessonNumber = LESSONS.findIndex((entry) => entry.id === lesson.id) + 1;
+  const allDone = allLessonsComplete(state.learn.completed);
+  const nextLesson = getNextLesson(state.learn.completed);
+
+  const buttons = completed
+    ? `
+      ${allDone
+        ? `<button class="primary-action js-play-first-game" type="button">Play your first game</button>`
+        : `<button id="lessonNextLessonButton" class="primary-action" type="button">Next lesson: ${escapeHtml(nextLesson?.title || "")}</button>`}
+      <button id="lessonRestartButton" type="button">Replay lesson</button>
+      <button id="lessonExitButton" type="button">Exit</button>
+    `
+    : `
+      ${step.kind === "info" ? `<button id="lessonNextButton" class="primary-action" type="button">Next</button>` : ""}
+      <button id="lessonRestartButton" type="button">Restart lesson</button>
+      <button id="lessonExitButton" type="button">Exit</button>
+    `;
+
+  return `
+    <article class="mini-card lesson-active-card${completed ? " solved" : ""}">
+      <span class="label">Lesson ${lessonNumber} of ${LESSONS.length} · Step ${Math.min(drill.stepIndex + 1, lesson.steps.length)} of ${lesson.steps.length}</span>
+      <strong>${escapeHtml(completed ? `Lesson complete: ${lesson.title}` : lesson.title)}</strong>
+      ${renderLessonFlashHtml()}
+      <p>${escapeHtml(completed ? state.drillMessage : step.text)}</p>
+      ${!completed && step.kind === "task" ? `<p class="lesson-task-note">Your move — play it on the board.</p>` : ""}
+      <div class="button-row">${buttons}</div>
     </article>
   `;
 }
@@ -4667,8 +6176,8 @@ function renderSettingsPanel() {
       <label class="field">
         <span>Player color</span>
         <select id="playerColorInput">
-          <option value="w"${state.settings.playerColor === "w" ? " selected" : ""}>White</option>
-          <option value="b"${state.settings.playerColor === "b" ? " selected" : ""}>Black</option>
+          <option value="w"${getPreferredColor() === "w" ? " selected" : ""}>White</option>
+          <option value="b"${getPreferredColor() === "b" ? " selected" : ""}>Black</option>
         </select>
       </label>
       <label class="field">
@@ -4704,10 +6213,13 @@ function renderSettingsPanel() {
         <input id="familyModeInput" type="checkbox"${isFamilyMode() ? " checked" : ""}>
         <span>Family mode — gentle coach, softer feedback</span>
       </label>
+      <label class="field checkbox-field">
+        <input id="beginnerModeInput" type="checkbox"${state.settings.beginnerMode === true ? " checked" : ""}>
+        <span>Beginner mode — learn-to-play lessons, gentle opponent, no clocks</span>
+      </label>
       ${renderAppearanceCards()}
       ${renderPersonaCard()}
       <div class="button-row">
-        <button id="saveSettingsButton" type="button">Save settings</button>
         <button id="testSupabaseButton" type="button">Test cloud sync</button>
       </div>
       ${isFamilyMode() ? "" : `
@@ -4721,22 +6233,40 @@ function renderSettingsPanel() {
           <button id="eraseLocalHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local history</button>
           ${remoteEraseAvailable ? `<button id="eraseRemoteHistoryButton" type="button" class="danger-button"${erase.busy ? " disabled" : ""}>Erase local + cloud history</button>` : ""}
         </div>
-        ${account.status ? `<p class="sync-status-row good-status"><span class="label">Account</span> ${escapeHtml(account.status)}</p>` : ""}
-        ${account.error ? `<p class="sync-status-row danger-status"><span class="label">Account</span> ${escapeHtml(account.error)}</p>` : ""}
       </article>
       `}
     </div>
   `;
 
   bindRequiredServicesCard();
-  document.querySelector("#saveSettingsButton").addEventListener("click", () => saveSettingsFromPanel());
-  document.querySelector("#testOpenAIButton").addEventListener("click", checkOpenAIHealth);
+  // Every field applies on change — the old split model (some fields instant,
+  // others behind a "Save settings" button) silently discarded edits whenever
+  // an instant toggle re-rendered the panel.
+  for (const selector of [
+    "#displayNameInput",
+    "#playerColorInput",
+    "#coachModeInput",
+    "#timeControlInput",
+    "#soundEnabledInput",
+    "#showBestArrowInput",
+    "#showEvalBarInput",
+  ]) {
+    document.querySelector(selector)?.addEventListener("change", () => saveSettingsFromPanel());
+  }
+  document.querySelector("#testOpenAIButton").addEventListener("click", () => checkOpenAIHealth());
   document.querySelector("#testSupabaseButton").addEventListener("click", testSupabaseConnection);
   document.querySelector("#eraseLocalHistoryButton")?.addEventListener("click", eraseLocalHistory);
   document.querySelector("#eraseRemoteHistoryButton")?.addEventListener("click", eraseRemoteHistory);
   document.querySelector("#signOutButton")?.addEventListener("click", signOut);
+  document.querySelector("#signInAgainButton")?.addEventListener("click", () => {
+    signInAgain().catch((error) => console.warn("Sign-in flow failed", error));
+  });
   document.querySelector("#exportDataButton")?.addEventListener("click", exportAccountData);
   document.querySelector("#familyModeInput")?.addEventListener("change", (event) => setFamilyMode(event.target.checked));
+  document.querySelector("#beginnerModeInput")?.addEventListener("change", (event) => setBeginnerMode(event.target.checked));
+  els.settingsPanel.querySelectorAll("[data-app-theme-key]").forEach((button) => {
+    button.addEventListener("click", () => setAppTheme(button.dataset.appThemeKey));
+  });
   els.settingsPanel.querySelectorAll("[data-board-theme-key]").forEach((button) => {
     button.addEventListener("click", () => setBoardTheme(button.dataset.boardThemeKey));
   });
@@ -4750,6 +6280,18 @@ function renderSettingsPanel() {
 
 // Board theme swatches + piece set previews. Both apply instantly on click.
 function renderAppearanceCards() {
+  const activeAppTheme = normalizeAppThemeKey(state.settings.appTheme);
+  const appLooks = APP_THEMES.map((theme) => {
+    const cells = theme.colors.map((color) => `<span style="background:${color}"></span>`).join("");
+    return `
+      <button type="button" class="theme-swatch app-look-option${theme.key === activeAppTheme ? " selected" : ""}" data-app-theme-key="${escapeAttr(theme.key)}">
+        <span class="theme-swatch-preview app-look-preview">${cells}</span>
+        <strong>${escapeHtml(theme.label)}</strong>
+        <span class="app-look-blurb">${escapeHtml(theme.blurb)}</span>
+      </button>
+    `;
+  }).join("");
+
   const activeTheme = normalizeBoardThemeKey(state.settings.boardTheme);
   const swatches = BOARD_THEMES.map((theme) => {
     const cells = [0, 1, 2, 3, 4, 5, 6, 7].map((index) => {
@@ -4776,6 +6318,11 @@ function renderAppearanceCards() {
   `).join("");
 
   return `
+    <article class="mini-card">
+      <strong>App look</strong>
+      <p>How the whole app feels — colors, type, and celebration energy.</p>
+      <div class="theme-swatch-grid app-look-grid">${appLooks}</div>
+    </article>
     <article class="mini-card">
       <strong>Board theme</strong>
       <div class="theme-swatch-grid">${swatches}</div>
@@ -4807,8 +6354,25 @@ function renderPersonaCard() {
   `;
 }
 
+function setAppTheme(key) {
+  const next = normalizeAppThemeKey(key);
+  state.settings.appTheme = next;
+  // Suggest the matching board palette while the board is still on
+  // auto-pilot (the player has never hand-picked one).
+  const suggested = APP_THEME_BOARD_SUGGESTIONS[next];
+  if (state.settings.boardThemeAuto !== false && suggested && !isFamilyMode()) {
+    state.settings.boardTheme = suggested;
+    applyBoardTheme(suggested);
+  }
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  applyAppTheme(next);
+  renderSettingsPanel();
+}
+
 function setBoardTheme(key) {
   state.settings.boardTheme = normalizeBoardThemeKey(key);
+  // A hand-picked board sticks across app-look switches from now on.
+  state.settings.boardThemeAuto = false;
   saveJson(STORAGE_KEYS.settings, state.settings);
   applyBoardTheme(state.settings.boardTheme);
   renderSettingsPanel();
@@ -4831,14 +6395,37 @@ function setCoachPersona(key) {
   renderSettingsPanel();
 }
 
+function setBeginnerMode(enabled) {
+  state.settings.beginnerMode = Boolean(enabled);
+  saveJson(STORAGE_KEYS.settings, state.settings);
+  // The checkbox promises "no clocks" — honor it right away on a board with
+  // no live game (mid-game clocks are left alone; the next game is unclocked).
+  if (enabled && state.clocks && !state.moves.length && !state.activeDrill) {
+    stopClockTicker();
+    state.clocks = null;
+  } else if (!enabled && !state.clocks && !state.moves.length && !state.activeDrill && !state.game.isGameOver()) {
+    initClocksForNewGame();
+  }
+  // Bot strength and clock behavior read this live; repaint everything.
+  renderAll();
+}
+
 function setFamilyMode(enabled) {
   state.settings.familyMode = Boolean(enabled);
   if (state.settings.familyMode) {
+    // Remember the user's persona so turning family mode off restores it
+    // instead of leaving Sunny selected forever.
+    if (state.settings.coachPersona !== "sunny") {
+      state.settings.prevPersona = state.settings.coachPersona;
+    }
     state.settings.coachPersona = "sunny";
     if (normalizeBoardThemeKey(state.settings.boardTheme) === "slate") {
       state.settings.boardTheme = "candy";
       applyBoardTheme("candy");
     }
+  } else if (state.settings.prevPersona) {
+    state.settings.coachPersona = state.settings.prevPersona;
+    state.settings.prevPersona = "";
   }
   saveJson(STORAGE_KEYS.settings, state.settings);
   // Quality labels across every panel change with this toggle.
@@ -4870,10 +6457,37 @@ function renderAccountCard() {
         ${isSignedIn() ? `
           <button id="exportDataButton" type="button"${state.account.busy ? " disabled" : ""}>Export my data</button>
           <button id="signOutButton" type="button">Sign out</button>
-        ` : ""}
+        ` : `
+          <button id="signInAgainButton" class="primary-action" type="button">Sign in</button>
+        `}
       </div>
+      ${state.account.status || state.account.error ? `
+        <p class="${state.account.error ? "auth-error" : "auth-notice"}">${escapeHtml(state.account.error || state.account.status)}</p>
+      ` : ""}
     </article>
   `;
+}
+
+// Signed out with auth configured: re-open the sign-in gate on demand. The
+// card used to be a dead end (reload was the only path back to the gate).
+async function signInAgain() {
+  if (!state.auth.client) {
+    const ready = await initAuthClient();
+    if (!ready) {
+      state.sync.health = state.auth.error || "Sign-in is unavailable right now.";
+      renderSettingsPanel();
+      return;
+    }
+  }
+  state.auth.recovery = false;
+  state.auth.screen = "sign_in";
+  state.auth.allowDismiss = true;
+  await ensureSignedIn();
+  state.auth.allowDismiss = false;
+  if (isSignedIn()) {
+    // A (possibly different) account signed in — reload to re-namespace.
+    window.location.reload();
+  }
 }
 
 function getActivePlayerColor() {
@@ -4904,13 +6518,24 @@ function askForPromotionPiece(color, square) {
 
     const menu = document.createElement("div");
     menu.className = `promotion-menu ${color === "w" ? "for-white" : "for-black"}`;
+    menu.setAttribute("role", "dialog");
+    menu.setAttribute("aria-modal", "true");
+    menu.setAttribute("aria-label", "Choose a piece to promote to");
     const hostRect = host.getBoundingClientRect();
     const squareRect = squareEl.getBoundingClientRect();
     menu.style.left = `${squareRect.left - hostRect.left + squareRect.width / 2}px`;
-    // Anchor above for white (promoting to top rank) and below for black.
-    if (color === "w") {
+    // The menu opens toward the board's center, based on where the square
+    // actually is ON SCREEN — not on piece color. The board is flipped for a
+    // Black player, so their promotion square renders at the TOP; a
+    // color-based rule would place the menu off-board (invisible, clipped by
+    // the host's overflow), leaving an unclickable overlay.
+    const squareInTopHalf =
+      squareRect.top - hostRect.top < hostRect.height / 2;
+    if (squareInTopHalf) {
+      // Extend downward from the square.
       menu.style.top = `${squareRect.bottom - hostRect.top - squareRect.width * 0.2}px`;
     } else {
+      // Extend upward so all four choices stay on the board.
       menu.style.top = `${squareRect.top - hostRect.top - squareRect.width * 3.8}px`;
     }
 
@@ -4947,6 +6572,8 @@ function askForPromotionPiece(color, square) {
 
     overlay.append(menu);
     host.append(overlay);
+    // Keyboard users need focus INSIDE the dialog to reach the choices.
+    menu.querySelector("button")?.focus();
   });
 }
 
@@ -4958,6 +6585,13 @@ function canInteractWithBoard() {
 }
 
 async function handleSquareClick(square) {
+  // A click during the lesson's post-success pause skips straight to the
+  // next step (the pause is just breathing room, never a lock).
+  if (isLessonDrill() && state.activeDrill.awaitingAdvance) {
+    state.activeDrill.awaitingAdvance = false;
+    advanceLessonStep();
+    return;
+  }
   if (!canInteractWithBoard()) return;
 
   const playerColor = getActivePlayerColor();
@@ -4985,6 +6619,7 @@ async function handleSquareClick(square) {
 
 async function attemptPlayerMove(from, to, options = {}) {
   const beforeFen = state.game.fen();
+  const gameId = state.currentGameId;
 
   // Detect a pawn promotion: if any legal move from→to has a promotion flag,
   // ask the player which piece to promote to instead of auto-queening.
@@ -4993,6 +6628,10 @@ async function attemptPlayerMove(from, to, options = {}) {
     clearSelection();
     const choice = await askForPromotionPiece(state.game.turn(), to);
     if (!choice) return false;
+    // The picker is async: the game may have flagged on time, been replaced,
+    // or otherwise moved on while it was open. Never play into that.
+    if (state.currentGameId !== gameId || state.game.fen() !== beforeFen) return false;
+    if (!state.activeDrill && !canInteractWithBoard()) return false;
     return attemptPlayerMove(from, to, { ...options, promotion: choice });
   }
 
@@ -5004,6 +6643,15 @@ async function attemptPlayerMove(from, to, options = {}) {
   }
 
   if (!move) {
+    // Beginners get told why nothing happened; a silent snap-back reads as a
+    // broken app when you don't yet know the movement rules.
+    if (isLessonDrill() && !state.activeDrill.awaitingAdvance && !state.activeDrill.completed
+      && getActiveLessonStep()?.kind === "task") {
+      setLessonFlash("That piece can't move there — aim for the ★ square.", "miss");
+      clearSelection({ render: false });
+      renderAll();
+      return false;
+    }
     clearSelection();
     return false;
   }
@@ -5012,7 +6660,14 @@ async function attemptPlayerMove(from, to, options = {}) {
 
   if (state.activeDrill) {
     clearSelection({ render: false });
-    handleDrillMove(move, beforeFen);
+    // Deliberately not awaited (the caller's return signals "move accepted"),
+    // but a rejection inside the async drill handlers must not become an
+    // unhandled rejection with the board stuck half-updated.
+    handleDrillMove(move, beforeFen).catch((error) => {
+      console.warn("Drill move handling failed", error);
+      state.drillMessage = "Something went wrong with this exercise. Use the exit button to leave it.";
+      renderAll();
+    });
     return true;
   }
 
@@ -5046,8 +6701,12 @@ function clearSelection(options = {}) {
 
 async function maybeEngineMove() {
   // Drills own the board (scripted replies only) and a second concurrent
-  // engine think would double-move — both are hard no-gos.
-  if (state.activeDrill || state.thinking) return;
+  // engine think would double-move — both are hard no-gos. A deactivated
+  // tab (app open elsewhere) must not play moves either.
+  if (state.activeDrill || state.thinking || tabDeactivated) return;
+  // A flagged game is over even though chess.js doesn't know it — the bot
+  // must never move (and overwrite the "wins on time" result) after a flag.
+  if (state.clocks?.flagged) return;
   if (state.game.isGameOver() || state.game.turn() === state.settings.playerColor) {
     await finalizeIfGameOver();
     return;
@@ -5074,10 +6733,17 @@ async function maybeEngineMove() {
       state.engine = null;
       state.engineFallback = true;
     }
+    // A post-boot worker crash returns null without throwing — surface it and
+    // try to recover instead of silently playing the weak heuristic forever.
+    handleEngineCrashIfNeeded();
 
-    if (state.currentGameId !== gameId || state.activeDrill || state.game.fen() !== fen) {
+    if (state.currentGameId !== gameId || state.activeDrill || state.clocks?.flagged || state.game.fen() !== fen) {
       return;
     }
+    // Resignation ends a game without changing the board — never move into
+    // a game whose stored result is already final.
+    const storedResult = state.localGames.find((game) => game.id === gameId)?.result;
+    if (storedResult && storedResult !== "in_progress") return;
 
     const preferredMove = uci ? moveFromUci(uci) : null;
     const fallbackMove = chooseFallbackMove(fen, botDepth);
@@ -5175,25 +6841,47 @@ function recordMove(move, beforeFen, role) {
     createdAt: new Date().toISOString(),
   };
 
+  let pendingWeaknessSyncs = [];
+  let pendingPracticeItem = null;
   if (role === "player") {
     const analysis = analyzePlayerMove(beforeFen, move, afterFen);
     record.classification = analysis.classification;
     record.tags = analysis.tags;
     record.note = analysis.note;
-    updateWeaknessProfile(record);
-    maybeCreatePractice(record, analysis.candidates);
+    pendingWeaknessSyncs = updateWeaknessProfile(record);
+    pendingPracticeItem = maybeCreatePractice(record, analysis.candidates);
     if (record.qualityEligible && !state.engine?.ready) {
       updateMoveQuality(record);
+      // Engine-graded moves update the skill model when the eval resolves;
+      // heuristic-graded moves must not silently skip it.
+      if (record.qualityKey) updateSkillFromMove(record);
     }
   } else {
     record.note = "Engine reply.";
   }
 
   onMoveClockUpdate(record);
+  // Clocks arm at game start but only begin ticking with the first move.
+  if (state.clocks && !state.clocks.flagged && !state.clocks.intervalId && !state.activeDrill) {
+    startClockTicker();
+  }
   state.moves.push(record);
   state.lastMove = { from: move.from, to: move.to };
   saveCurrentGame();
   const moveSyncPromise = syncMove(record);
+
+  // weakness_events and positions carry FKs to this move's row — sending
+  // them before the move insert lands guarantees a rejection.
+  if (pendingWeaknessSyncs.length || pendingPracticeItem) {
+    moveSyncPromise
+      .then(async () => {
+        for (const { tag, aggregate } of pendingWeaknessSyncs) {
+          await syncWeakness(tag, record, aggregate);
+        }
+        if (pendingPracticeItem) await syncPosition(record, pendingPracticeItem);
+      })
+      .catch((error) => console.warn("Weakness/position sync failed", error));
+  }
 
   if (role === "player" && state.engine?.ready) {
     // Non-enumerable so the promise never leaks into localStorage/Supabase.
@@ -5229,6 +6917,9 @@ function updateMoveQuality(record) {
 
 function isKnownOpeningMove(record) {
   if (!record || getPhase(record.beforeFen || state.game.fen()) !== "opening") return false;
+  // An async grade can resolve after the player loaded another game — never
+  // evaluate this record against a different game's live move list.
+  if (record.gameId && record.gameId !== state.currentGameId) return false;
   const moves = state.moves.some((move) => move.id === record.id) ? state.moves : [...state.moves, record];
   const sequence = moves
     .filter((move) => move.ply <= record.ply)
@@ -5338,7 +7029,7 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
     await syncMoveAnalysis(record);
     if (record.gameId !== state.currentGameId) return;
     renderBoard();
-    if (state.currentTab === "coach" || state.currentTab === "review") {
+    if (state.currentTab === "play" || state.currentTab === "review") {
       renderCurrentPanel();
     }
   } catch (error) {
@@ -5349,7 +7040,7 @@ async function enrichPlayerMoveWithEngineEval(record, beforeFen, afterFen, moveS
     await syncMoveAnalysis(record);
     if (record.gameId === state.currentGameId) {
       renderBoard();
-      if (state.currentTab === "coach" || state.currentTab === "review") {
+      if (state.currentTab === "play" || state.currentTab === "review") {
         renderCurrentPanel();
       }
     }
@@ -5374,9 +7065,17 @@ function cancelDeepAnalysis() {
   }
 }
 
+// A request that arrives while a cancelled pass is still winding down (the
+// in-flight eval can take up to its 20s timeout to settle) is remembered and
+// re-run — otherwise the new game would silently stay shallow-graded forever.
+let deepAnalysisRerunQueued = false;
+
 async function runDeepGameAnalysis() {
   if (!state.engine?.ready || state.activeDrill) return;
-  if (state.deepAnalysis?.running) return;
+  if (state.deepAnalysis?.running) {
+    deepAnalysisRerunQueued = true;
+    return;
+  }
 
   const gameId = state.currentGameId;
   const gameResult = state.localGames.find((game) => game.id === gameId)?.result || "in_progress";
@@ -5414,6 +7113,10 @@ async function runDeepGameAnalysis() {
       // A timed-out search must never wipe good shallow numbers.
       if (analysis.analysisStatus === "complete") {
         applyEngineAnalysisToRecord(record, analysis);
+        // Persist each re-grade as it lands. The single save at the end only
+        // runs if the game is still current — switching games mid-pass used
+        // to lose every applied grade locally while the cloud had them.
+        persistRecordOwnedGame(record);
         syncMoveAnalysis(record);
       }
     } catch (error) {
@@ -5428,9 +7131,15 @@ async function runDeepGameAnalysis() {
     saveCurrentGame(gameResult);
     recalibrateFromDeepAnalysis(gameId);
     renderBoard();
-    if (["review", "coach", "profile"].includes(state.currentTab)) {
+    if (["review", "play", "you"].includes(state.currentTab)) {
       renderCurrentPanel();
     }
+  }
+
+  // Another game asked for a deep pass while this one was winding down.
+  if (deepAnalysisRerunQueued) {
+    deepAnalysisRerunQueued = false;
+    runDeepGameAnalysis().catch((error) => console.warn("Queued deep analysis pass failed", error));
   }
 }
 
@@ -5988,7 +7697,12 @@ function buildMoveNote(tags, best) {
   return `${primary.note}${candidateText}`;
 }
 
+// Updates the local weakness profile and returns the (tag, aggregate) pairs
+// that need syncing. The cloud ops are the CALLER's job, chained after the
+// move insert — weakness_events reference moves(id), so syncing them first
+// guarantees a foreign-key rejection.
 function updateWeaknessProfile(record) {
+  const pending = [];
   for (const tag of record.tags) {
     const existing = state.profile[tag.category] || {
       category: tag.category,
@@ -6013,18 +7727,19 @@ function updateWeaknessProfile(record) {
     ].slice(0, 5);
 
     state.profile[tag.category] = existing;
-    syncWeakness(tag, record, existing);
+    pending.push({ tag, aggregate: existing });
   }
+  return pending;
 }
 
 function maybeCreatePractice(record, candidates) {
-  if (!record.tags.length || !candidates.length) return;
+  if (!record.tags.length || !candidates.length) return null;
 
   const primary = record.tags[0];
   const skill = getSkillForCategory(primary.category);
   const sourceKey = `${record.beforeFen}|${primary.category}`;
   const exists = state.practiceQueue.some((item) => item.sourceKey === sourceKey);
-  if (exists) return;
+  if (exists) return null;
 
   const item = {
     id: crypto.randomUUID(),
@@ -6048,7 +7763,9 @@ function maybeCreatePractice(record, candidates) {
   };
 
   state.practiceQueue = [item, ...state.practiceQueue].slice(0, 50);
-  syncPosition(record, item);
+  // Positions reference moves(id) — the caller syncs this after the move
+  // insert lands.
+  return item;
 }
 
 function startQueuedPractice(id) {
@@ -6066,14 +7783,39 @@ function restartClocksForRestoredGame() {
   renderClocks();
 }
 
+// Restores the game this drill paused (matching state.pausedGameId), or seats
+// a fresh board. Never resurrects a stale active-game record from an earlier
+// session — that could bring back a game the player already finished with.
+function restorePausedGameOrFreshBoard() {
+  // Whatever the drill left behind ("thinking", scripted-reply pauses) is
+  // over — the restored board must always be interactive.
+  state.thinking = false;
+  const paused = loadJson(STORAGE_KEYS.activeGame, null);
+  const restorable = Boolean(state.pausedGameId)
+    && paused?.id === state.pausedGameId
+    && Array.isArray(paused.moves)
+    && paused.moves.length > 0;
+  if (!restorable || !restoreActiveGame()) {
+    state.game = new Chess();
+    state.moves = [];
+    state.lastMove = null;
+    state.selectedSquare = null;
+    state.legalTargets = new Set();
+    state.reviewPly = null;
+    state.currentGameId = crypto.randomUUID();
+    state.startedAt = new Date().toISOString();
+  }
+  state.pausedGameId = null;
+}
+
 function resumeSavedGame() {
   state.activeDrill = null;
   state.drillMessage = "";
   resetPracticeTrainerState();
   state.practiceTrainer.status = "idle";
-  restoreActiveGame();
+  restorePausedGameOrFreshBoard();
   restartClocksForRestoredGame();
-  switchTab("coach");
+  switchTab("play");
   renderAll();
 }
 
@@ -6101,7 +7843,12 @@ function startOpeningDrill(lineId) {
   const { opening, line } = found;
 
   teardownBoardInteractions();
-  if (!state.activeDrill) saveCurrentGame();
+  if (!state.activeDrill) {
+    // Like every other drill: remember which game we paused so the exit
+    // paths can restore it (a bare save leaves pausedGameId null and the
+    // guarded restore would seat a fresh board instead).
+    state.pausedGameId = savePausedGameForDrill();
+  }
   state.clocks = null;
   renderClocks();
   state.activeDrill = {
@@ -6133,7 +7880,7 @@ function startOpeningDrill(lineId) {
 
 async function playScriptedOpponentMove() {
   const drill = state.activeDrill;
-  const found = getLineById(drill.openingLineId);
+  const found = getLineById(drill?.openingLineId);
   const entry = found?.line.moves[drill.plyIndex];
   if (!entry) {
     finishOpeningDrill();
@@ -6142,7 +7889,18 @@ async function playScriptedOpponentMove() {
   state.thinking = true;
   renderGameMeta();
   await wait(400);
-  const played = state.game.move(entry.san);
+  // The player may have exited the drill during the pause — playing the
+  // scripted reply now would inject a phantom move into the restored game.
+  if (state.activeDrill !== drill) {
+    state.thinking = false;
+    return;
+  }
+  let played = null;
+  try {
+    played = state.game.move(entry.san);
+  } catch {
+    played = null; // chess.js throws on illegal SAN (diverged position)
+  }
   state.thinking = false;
   if (played) {
     state.lastMove = { from: played.from, to: played.to };
@@ -6161,7 +7919,16 @@ async function playScriptedOpponentMove() {
 
 async function handleOpeningDrillMove(move) {
   const drill = state.activeDrill;
-  const found = getLineById(drill.openingLineId);
+  const found = getLineById(drill?.openingLineId);
+  if (!found?.line) {
+    // Stale/renamed line id: don't crash mid-drill — end it cleanly.
+    state.drillMessage = "This opening line is no longer available.";
+    state.activeDrill = null;
+    restorePausedGameOrFreshBoard();
+    restartClocksForRestoredGame();
+    renderAll();
+    return;
+  }
   const expected = found.line.moves[drill.plyIndex];
 
   if (!expected || move.san !== expected.san) {
@@ -6197,6 +7964,7 @@ function finishOpeningDrill() {
   if (perfect) progress.perfect += 1;
   saveRepertoire();
   syncRepertoireProgress(drill.openingLineId, drill.openingId, progress);
+  if (perfect) celebrate("puzzle");
 
   state.drillMessage = perfect
     ? `Line complete with no mistakes — ${nextDueLabel(progress)} for the next rep.`
@@ -6212,7 +7980,7 @@ function finishOpeningDrill() {
 
   const finishedMessage = state.drillMessage;
   state.activeDrill = null;
-  restoreActiveGame();
+  restorePausedGameOrFreshBoard();
   restartClocksForRestoredGame();
   renderAll();
   state.drillMessage = finishedMessage;
@@ -6239,7 +8007,9 @@ function startMateDrill(positionId) {
   if (!position) return;
   cancelDeepAnalysis();
   teardownBoardInteractions();
-  if (!state.activeDrill) saveCurrentGame();
+  if (!state.activeDrill) {
+    state.pausedGameId = savePausedGameForDrill();
+  }
   state.clocks = null;
   renderClocks();
   state.activeDrill = {
@@ -6271,16 +8041,39 @@ async function handleMateDrillMove(move) {
   const drill = state.activeDrill;
   const expected = drill.expected[drill.stepIndex];
   const playedUci = `${move.from}${move.to}${move.promotion || ""}`;
-  const normalizedExpected = expected.length === 5 ? expected : expected.slice(0, 4);
-  const normalizedPlayed = playedUci.length === 5 ? playedUci : playedUci.slice(0, 4);
+  // When the script specifies a promotion piece it must match exactly;
+  // otherwise compare the from/to squares.
+  const matchesScript = expected.length === 5
+    ? playedUci === expected
+    : playedUci.slice(0, 4) === expected;
 
-  if (normalizedPlayed !== normalizedExpected) {
+  // Any move that delivers checkmate solves the drill — several positions
+  // have more than one valid mate, and a learner who finds a real checkmate
+  // must never be told they're wrong.
+  if (!matchesScript && state.game.isCheckmate()) {
+    drill.solved = true;
+    state.lastMove = { from: move.from, to: move.to };
+    state.drillMessage = "Checkmate — a different mate than the featured one, and just as good.";
+    playGameSound("drillSolved");
+    celebrate("puzzle");
+    state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, true);
+    saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
+    markDailyItemComplete("mate");
+    renderAll();
+    return;
+  }
+
+  if (!matchesScript) {
     state.game.undo();
     drill.hintShown = true;
     state.drillMessage = `Not quite. ${drill.objective}`;
     playGameSound("drillMissed");
-    state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, false);
-    saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
+    // One failed attempt per drill session — not one per wrong keystroke.
+    if (!drill.missRecorded) {
+      drill.missRecorded = true;
+      state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, false);
+      saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
+    }
     renderAll();
     return;
   }
@@ -6293,6 +8086,7 @@ async function handleMateDrillMove(move) {
     drill.solved = true;
     const position = getMatePositionById(drill.matePositionId);
     state.drillMessage = position?.explanation || "Mate delivered.";
+    celebrate("puzzle");
     state.mateLadder = recordMateAttempt(state.mateLadder, drill.matePositionId, drill.rung, true);
     saveJson(STORAGE_KEYS.mateLadder, state.mateLadder);
     markDailyItemComplete("mate");
@@ -6305,8 +8099,16 @@ async function handleMateDrillMove(move) {
   state.drillMessage = "Good — keep going.";
   renderAll();
   await wait(350);
+  // The player may have exited during the pause — never play the scripted
+  // defender move into whatever board owns the game now.
+  if (state.activeDrill !== drill) return;
   const scriptedReply = drill.expected[drill.stepIndex];
-  const reply = state.game.move(moveFromUci(scriptedReply));
+  let reply = null;
+  try {
+    reply = state.game.move(moveFromUci(scriptedReply));
+  } catch {
+    reply = null; // chess.js throws on illegal moves
+  }
   if (reply) {
     state.lastMove = { from: reply.from, to: reply.to };
     drill.stepIndex += 1;
@@ -6334,6 +8136,14 @@ function ensureTodayDaily() {
   return state.daily;
 }
 
+// Local-date "yesterday" via calendar arithmetic — subtracting 24h of wall
+// time breaks on DST-change days (a 25-hour day makes "24 hours ago" still
+// today, silently resetting a legitimate streak).
+function yesterdayLocalKey(now = new Date()) {
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  return todayLocalKey(yesterday);
+}
+
 function markDailyItemComplete(itemKey) {
   const daily = ensureTodayDaily();
   if (daily.todayCompleted?.[itemKey]) return;
@@ -6342,12 +8152,26 @@ function markDailyItemComplete(itemKey) {
   const today = daily.date;
   if (daily.lastCompletedDate !== today) {
     // Streak: extends if last completion was yesterday, otherwise resets to 1.
-    const yesterday = todayLocalKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
-    daily.streak = daily.lastCompletedDate === yesterday ? (daily.streak || 0) + 1 : 1;
+    const extended = daily.lastCompletedDate === yesterdayLocalKey();
+    daily.streak = extended ? (daily.streak || 0) + 1 : 1;
     daily.lastCompletedDate = today;
+    if (extended && daily.streak >= 2) {
+      showToast(`🔥 ${daily.streak}-day streak — nice consistency!`, { tone: "success" });
+    }
   }
   state.daily = daily;
   saveJson(STORAGE_KEYS.daily, state.daily);
+}
+
+// The streak as the player should see it TODAY: a streak whose last
+// completion is older than yesterday is already broken — showing the stale
+// number until the next completion silently "resets" it was misleading.
+function currentStreakForDisplay() {
+  const daily = ensureTodayDaily();
+  const last = daily.lastCompletedDate;
+  if (!last) return 0;
+  if (last === daily.date || last === yesterdayLocalKey()) return daily.streak || 0;
+  return 0;
 }
 
 function getDailyItems() {
@@ -6389,6 +8213,8 @@ const TIME_CONTROLS = {
 };
 
 function getActiveTimeControl() {
+  // Beginners play unclocked no matter what the time-control setting says.
+  if (state.settings.beginnerMode === true) return null;
   return TIME_CONTROLS[state.settings.timeControl] || null;
 }
 
@@ -6409,7 +8235,8 @@ function initClocksForNewGame() {
     intervalId: null,
     flagged: null,
   };
-  startClockTicker();
+  // The ticker starts with the FIRST move (see recordMove) — reading the
+  // coach's pre-game card must not cost game time.
   renderClocks();
 }
 
@@ -6428,11 +8255,19 @@ function stopClockTicker() {
 
 function tickClock() {
   const clocks = state.clocks;
-  if (!clocks || clocks.flagged || state.rethink.active) return;
+  if (!clocks || clocks.flagged) return;
   // Drills borrow the board and a finished game has no time pressure — an
   // orphaned or leftover interval must never drain (and eventually flag) a
-  // clock the player can't see running.
-  if (state.activeDrill || state.game.isGameOver()) return;
+  // clock the player can't see running. Rethink pauses the game too, and so
+  // does the sign-in gate (a session expiring mid-game must not flag the
+  // player while they type their password). In all of these cases lastTick
+  // must keep advancing, otherwise the entire pause is lump-charged to the
+  // side to move the moment ticking resumes.
+  if (state.rethink.active || state.activeDrill || state.game.isGameOver()
+    || document.querySelector("#authGate") || tabDeactivated) {
+    clocks.lastTick = Date.now();
+    return;
+  }
   const now = Date.now();
   const elapsed = now - clocks.lastTick;
   clocks.lastTick = now;
@@ -6452,9 +8287,11 @@ function onMoveClockUpdate(record) {
   const clocks = state.clocks;
   if (!clocks || clocks.flagged) return;
   const moverKey = record.color === "w" ? "white" : "black";
-  // Record time spent on the move for coach context.
+  // Record time spent on the move for coach context. Before the ticker has
+  // started (the game's very first move) no time is charged — the clock
+  // armed at game start but pre-move reading time is free.
   const now = Date.now();
-  const elapsed = now - clocks.lastTick;
+  const elapsed = clocks.intervalId ? now - clocks.lastTick : 0;
   clocks[moverKey] = Math.max(0, clocks[moverKey] - elapsed);
   record.timeSpentMs = elapsed;
   if (clocks.incrementMs) clocks[moverKey] += clocks.incrementMs;
@@ -6504,8 +8341,8 @@ function renderClocks() {
 function renderDailyPlanCard() {
   if (!isCalibrationComplete()) return "";
   const items = getDailyItems();
-  const daily = ensureTodayDaily();
-  const streak = daily.streak || 0;
+  ensureTodayDaily();
+  const streak = currentStreakForDisplay();
   const completedToday = items.filter((item) => item.done).length;
   return `
     <article class="mini-card daily-plan-card">
@@ -6518,7 +8355,173 @@ function renderDailyPlanCard() {
   `;
 }
 
+// ─────────── Today panel ───────────
+//
+// The landing surface: answers "what should I do right now?" instead of six
+// equal tabs. Composes cards that already exist elsewhere.
+
+function todayGreeting() {
+  const hour = new Date().getHours();
+  const part = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const name = getDisplayName();
+  // The default display name is literally "You" — "Good morning, You" reads
+  // like a bug. Greet by name only when they've picked one.
+  return name === DEFAULT_SETTINGS.displayName ? part : `${part}, ${name}`;
+}
+
+// Finished games in the window [from, to) — used for the weekly recap.
+function finishedGamesBetween(fromMs, toMs) {
+  return getCompletedGames().filter((game) => {
+    const at = new Date(game.updatedAt || game.startedAt || 0).getTime();
+    return at >= fromMs && at < toMs;
+  });
+}
+
+function renderWeeklyRecapCard() {
+  const now = Date.now();
+  const week = 7 * 24 * 60 * 60 * 1000;
+  const thisWeek = finishedGamesBetween(now - week, now + 1);
+  if (thisWeek.length < 2) return "";
+
+  let wins = 0;
+  let draws = 0;
+  let losses = 0;
+  const acpls = [];
+  for (const game of thisWeek) {
+    const score = getPlayerResultScore(game.result, game.playerColor);
+    if (score === 1) wins += 1;
+    else if (score === 0.5) draws += 1;
+    else losses += 1;
+    const acpl = computeGameAcpl(game.moves);
+    if (acpl !== null) acpls.push(acpl);
+  }
+  const avgAcpl = acpls.length ? acpls.reduce((sum, value) => sum + value, 0) / acpls.length : null;
+
+  const priorGames = finishedGamesBetween(now - 2 * week, now - week);
+  const priorAcpls = priorGames.map((game) => computeGameAcpl(game.moves)).filter((value) => value !== null);
+  const priorAvg = priorAcpls.length ? priorAcpls.reduce((sum, value) => sum + value, 0) / priorAcpls.length : null;
+
+  let accuracyLine = "";
+  if (avgAcpl !== null && priorAvg !== null) {
+    const delta = priorAvg - avgAcpl; // positive = losing less per move = better
+    if (Math.abs(delta) >= 5) {
+      accuracyLine = delta > 0
+        ? `Your accuracy improved — about ${(delta / 100).toFixed(1)} pawns less given away per move than last week.`
+        : `A little rustier than last week — about ${(Math.abs(delta) / 100).toFixed(1)} pawns more given away per move.`;
+    } else {
+      accuracyLine = "Accuracy held steady vs last week.";
+    }
+  }
+
+  const topWeakness = Object.values(state.profile)
+    .sort((a, b) => b.count * b.severity - a.count * a.severity)[0];
+
+  return `
+    <article class="mini-card weekly-recap-card">
+      <span class="label">This week</span>
+      <strong>${thisWeek.length} ${thisWeek.length === 1 ? "game" : "games"} · ${wins}W ${draws}D ${losses}L</strong>
+      ${accuracyLine ? `<p>${escapeHtml(accuracyLine)}</p>` : ""}
+      ${topWeakness ? `<p>Biggest leak: <strong>${escapeHtml(topWeakness.label)}</strong> — the Practice tab has drills for it.</p>` : ""}
+    </article>
+  `;
+}
+
+function renderTodayPanel() {
+  if (!els.todayPanel) return;
+
+  const header = `
+    <article class="mini-card today-hero">
+      <img src="./assets/squirrel_chess.svg" alt="" aria-hidden="true" class="today-mascot">
+      <div>
+        <strong>${escapeHtml(todayGreeting())}</strong>
+        <p>${isCalibrationComplete() ? "Here's your plan for today." : "Let's find your level first."}</p>
+      </div>
+    </article>
+  `;
+
+  if (!isCalibrationComplete()) {
+    const lesson = getResumeLesson();
+    els.todayPanel.innerHTML = `
+      <h2>Today</h2>
+      <div class="stack">
+        ${header}
+        <article class="mini-card">
+          <span class="label">Start here</span>
+          <strong>${state.settings.beginnerMode === true && lesson ? "Continue learning the moves" : "Play your first game"}</strong>
+          <p>${state.settings.beginnerMode === true && lesson
+            ? "Short interactive lessons — the board shows you everything."
+            : "One casual game sets your starting level. No hints, no pressure — just play."}</p>
+          <div class="button-row">
+            ${state.settings.beginnerMode === true && lesson
+              ? `<button class="primary-action" id="todayLessonButton" type="button">Continue: ${escapeHtml(lesson.title)}</button>`
+              : ""}
+            <button ${state.settings.beginnerMode === true && lesson ? "" : `class="primary-action"`} id="todayPlayButton" type="button">Go to the board</button>
+          </div>
+        </article>
+      </div>
+    `;
+    bindTodayPanel();
+    return;
+  }
+
+  const lesson = !allLessonsComplete(state.learn.completed) ? getResumeLesson() : null;
+  const liveGame = hasLiveGameInProgress();
+  // The review card would load an old game onto the board — never offer it
+  // while a live game is in progress.
+  const lastFinished = liveGame ? null : (getCompletedGames()[0] || null);
+
+  els.todayPanel.innerHTML = `
+    <h2>Today</h2>
+    <div class="stack">
+      ${header}
+      ${renderDailyPlanCard()}
+      <article class="mini-card">
+        <span class="label">Play</span>
+        <strong>${liveGame ? "You have a game in progress" : "Ready for a game?"}</strong>
+        <p>${liveGame ? "Pick up right where you left off." : "The opponent adapts to your level, and the coach watches with you."}</p>
+        <button class="primary-action" id="todayPlayButton" type="button">${liveGame ? "Continue playing" : "Go to the board"}</button>
+      </article>
+      ${lesson ? `
+        <article class="mini-card">
+          <span class="label">Learn</span>
+          <strong>${escapeHtml(lesson.title)}</strong>
+          <p>${escapeHtml(lesson.summary || "Pick up where you left off.")}</p>
+          <button id="todayLessonButton" type="button">Continue lesson</button>
+        </article>
+      ` : ""}
+      ${lastFinished ? `
+        <article class="mini-card">
+          <span class="label">Review</span>
+          <strong>${escapeHtml(lastFinished.result)}</strong>
+          <p>Walk through your latest game's key moments with the coach.</p>
+          <button id="todayReviewButton" type="button" data-game-id="${escapeAttr(lastFinished.id)}">Review it</button>
+        </article>
+      ` : ""}
+      ${renderWeeklyRecapCard()}
+    </div>
+  `;
+  bindTodayPanel();
+}
+
+function bindTodayPanel() {
+  document.querySelector("#todayPlayButton")?.addEventListener("click", () => switchTab("play"));
+  document.querySelector("#todayLessonButton")?.addEventListener("click", () => {
+    const lesson = getResumeLesson();
+    if (lesson) startLesson(lesson.id);
+    else switchTab("learn");
+  });
+  document.querySelector("#todayReviewButton")?.addEventListener("click", (event) => {
+    const gameId = event.currentTarget.dataset.gameId;
+    if (gameId && gameId !== state.currentGameId) loadGameForReview(gameId);
+    switchTab("review");
+  });
+}
+
 async function handleDrillMove(move, beforeFen) {
+  if (isLessonDrill()) {
+    await handleLessonMove(move);
+    return;
+  }
   if (isOpeningDrill()) {
     await handleOpeningDrillMove(move);
     return;
@@ -6561,7 +8564,14 @@ async function handleDrillMove(move, beforeFen) {
     state.thinking = true;
     renderGameMeta();
     await wait(350);
-    const reply = state.game.move(moveFromUci(target.reply));
+    // chess.js THROWS on illegal moves; an uncaught throw here would leave
+    // state.thinking stuck true forever (board locked, New game disabled).
+    let reply = null;
+    try {
+      reply = state.game.move(moveFromUci(target.reply));
+    } catch {
+      reply = null;
+    }
     if (reply) {
       state.lastMove = { from: reply.from, to: reply.to };
     }
@@ -6586,7 +8596,7 @@ async function handlePracticeTrainerMove(move, beforeFen) {
     : null;
   const lineIndex = puzzle.lineIndex || 0;
   const solved = line
-    ? normalizeUciLoose(playedUci) === normalizeUciLoose(line[lineIndex])
+    ? uciMovesMatch(playedUci, line[lineIndex])
     : (puzzle.expectedMoves || []).includes(playedUci);
   trainer.attempts += 1;
 
@@ -6606,12 +8616,17 @@ async function handlePracticeTrainerMove(move, beforeFen) {
     trainer.feedback = `${missText}${hint ? ` ${hint}` : ""}`;
     state.drillMessage = trainer.feedback;
     recordPracticeHistory(puzzle, "missed", beforeFen, playedUci);
-    if (puzzle.queueItemId) {
+    // One SRS grade per puzzle session: the FIRST result wins. Grading every
+    // wrong try was applying a full lapse (−0.2 ease) per keystroke.
+    if (puzzle.queueItemId && !puzzle.srsGraded) {
+      puzzle.srsGraded = true;
       rescheduleQueueItem(puzzle.queueItemId, GRADE_MISSED);
     }
+    // Render immediately — waiting on the network kept the undone wrong move
+    // visible on screen until the sync round-trip returned.
+    renderAll();
     await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "missed", playedUci);
     maybeSendDrillFeedback(puzzle, beforeFen, playedUci);
-    renderAll();
     return;
   }
 
@@ -6628,7 +8643,15 @@ async function handlePracticeTrainerMove(move, beforeFen) {
     renderAll();
 
     await wait(350);
-    const reply = state.game.move(moveFromUci(line[puzzle.lineIndex]));
+    // Exiting mid-pause must not inject the scripted reply into whatever
+    // board owns the game now.
+    if (state.activeDrill !== puzzle) return;
+    let reply = null;
+    try {
+      reply = state.game.move(moveFromUci(line[puzzle.lineIndex]));
+    } catch {
+      reply = null; // chess.js throws on illegal moves
+    }
     if (reply) {
       state.lastMove = { from: reply.from, to: reply.to };
       puzzle.lineIndex += 1;
@@ -6650,20 +8673,31 @@ async function handlePracticeTrainerMove(move, beforeFen) {
   trainer.scoreDelta = !trainer.hadMiss && !trainer.hintIndex ? 10 : 6;
   trainer.feedback = puzzle.successText || "Correct.";
   playGameSound("drillSolved");
+  celebrate("puzzle");
   state.drillMessage = trainer.feedback;
   recordPracticeHistory(puzzle, "solved", beforeFen, playedUci);
+  // The daily "drill" item counts ANY solved practice puzzle — the label
+  // explicitly offers foundation puzzles when nothing from the queue is due.
+  markDailyItemComplete("drill");
 
-  if (puzzle.queueItemId) {
+  if (puzzle.queueItemId && !puzzle.srsGraded) {
+    puzzle.srsGraded = true;
     rescheduleQueueItem(puzzle.queueItemId, GRADE_SOLVED);
   }
 
-  await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "solved", playedUci);
   renderAll();
+  await syncPracticeAttempt(getPracticeAttemptPayload(puzzle, beforeFen), "solved", playedUci);
 }
 
-function normalizeUciLoose(uci) {
-  const value = String(uci || "").toLowerCase();
-  return value.length === 5 ? value : value.slice(0, 4);
+// UCI comparison for scripted lines. A move with a promotion piece must match
+// it exactly — the old "loose" comparison stripped the 5th char from both
+// sides, grading an underpromotion (e7e8n) as the expected queen (e7e8q).
+function uciMovesMatch(played, expected) {
+  const a = String(played || "").toLowerCase();
+  const b = String(expected || "").toLowerCase();
+  if (!a || !b) return false;
+  if (a.length === 5 || b.length === 5) return a === b;
+  return a.slice(0, 4) === b.slice(0, 4);
 }
 
 // One coach nudge per missed practice puzzle: the drill_feedback event
@@ -6787,17 +8821,20 @@ function detectOpening() {
   let best = null;
 
   for (const opening of OPENING_BOOK) {
-    const matchLength = opening.moves.reduce((count, san, index) => {
-      return sans[index] === san ? count + 1 : count;
-    }, 0);
-
-    const prefixMatches = opening.moves.slice(0, matchLength).every((san, index) => sans[index] === san);
-    if (prefixMatches && matchLength > 0 && (!best || matchLength > best.matchLength)) {
+    // Contiguous prefix only: counting scattered index matches let a game
+    // that merely shared 1.e4 e5 claim a 5-move opening's name.
+    let matchLength = 0;
+    while (matchLength < opening.moves.length && sans[matchLength] === opening.moves[matchLength]) {
+      matchLength += 1;
+    }
+    if (matchLength > 0 && (!best || matchLength > best.matchLength)) {
       best = { ...opening, matchLength };
     }
   }
 
-  if (best && best.matchLength >= Math.min(2, best.moves.length)) {
+  // Name the opening only when the game played the book line's defining
+  // moves — either the whole listed line, or at least four plies of it.
+  if (best && best.matchLength >= Math.min(4, best.moves.length)) {
     return best;
   }
 
@@ -6844,21 +8881,33 @@ async function completeGameWithResult(result) {
   recordCompletedGameForCalibration(result);
   updateSkillFromGameResult(result);
   const playerColor = state.settings.playerColor;
-  if (result.includes(`${colorName(playerColor)} wins`)) playGameSound("gameWin");
-  else if (result.startsWith("Draw")) playGameSound("move");
-  else if (result.includes("wins")) playGameSound("gameLoss");
+  const playerWon = result.includes(`${colorName(playerColor)} wins`);
+  // Checkmate already played its win/loss sting on the mating move itself
+  // (playSoundForMove) — don't stack a second fanfare on top.
+  if (!state.game.isCheckmate()) {
+    if (playerWon) playGameSound("gameWin");
+    else if (result.startsWith("Draw")) playGameSound("gameDraw");
+    else if (result.includes("wins")) playGameSound("gameLoss");
+  }
+  if (playerWon) celebrate("win");
   await syncGameEnd(result);
 
   if (wasCalibrating && isCalibrationComplete()) {
+    celebrate("milestone");
     pushChatMessage("assistant", `Nice — first game done. I've set your starting level around ${state.calibration.estimatedScore || "your play"}. From here I'll chat with you during games and everything adapts to how you play. Ready when you are.`);
-    if (state.currentTab === "coach") renderCoachPanel();
+    if (state.currentTab === "play") renderCoachPanel();
   } else if (isCalibrationComplete() && coachModeAllows("postgame")) {
     const moments = selectKeyMoments(state.moves);
     pushChatMessage("assistant", moments.length
       ? `That's ${result}. Want to walk through the ${moments.length === 1 ? "key moment" : `${moments.length} key moments`} together? Hit "Start guided review".`
       : `That's ${result}. A pretty clean game from you — no single moment decided it.`);
-    // Review is post-game: now that the game is over, take the player there.
-    switchTab("review");
+    // Review is post-game: take the player there — but never yank someone
+    // who is mid-sentence in the chat or already reading another tab.
+    const chatInput = document.querySelector("#coachChatInput");
+    const typing = chatInput && document.activeElement === chatInput && chatInput.value.trim();
+    if (!typing && state.currentTab === "play") {
+      switchTab("review");
+    }
   }
 
   // Re-grade the finished game at deep depth on the now-idle engine.
@@ -6866,11 +8915,29 @@ async function completeGameWithResult(result) {
 }
 
 function saveCurrentGame(result = "in_progress") {
+  // Never demote a finished game back to "in_progress". Drill/practice
+  // pauses and post-flag renders call this with the default result, and a
+  // finished game must keep its recorded outcome — calibration, skill
+  // tracking, and history all depend on it.
+  //
+  // Preserve ONLY a previously *stored* final result. Deriving the live
+  // label here would stamp the outcome at recordMove time (the mating move
+  // itself), which pre-empts finalizeIfGameOver's "already finalized" check
+  // and silently skips the entire end-of-game pipeline.
+  if (result === "in_progress") {
+    const existing = state.localGames.find((item) => item.id === state.currentGameId);
+    if (existing?.result && existing.result !== "in_progress") {
+      result = existing.result;
+    }
+  }
   const opening = detectOpening();
   const gameRecord = {
     id: state.currentGameId,
     startedAt: state.startedAt,
     updatedAt: new Date().toISOString(),
+    // Rethinks are per-game; persisting the count stops "reload for two
+    // fresh rethinks".
+    rethinkRemaining: state.rethink?.remaining ?? RETHINKS_PER_GAME,
     playerColor: state.settings.playerColor,
     engineLevel: getCurrentBotDepth(),
     result,
@@ -6885,14 +8952,32 @@ function saveCurrentGame(result = "in_progress") {
           black: state.clocks.black,
           incrementMs: state.clocks.incrementMs,
           flagged: state.clocks.flagged,
+          // Wall-clock timestamp so a reload can charge the time that passed
+          // while the tab was closed — clocks used to silently refund all
+          // think time since the last move ("reload to reset my clock").
+          savedAt: Date.now(),
         }
       : null,
   };
 
   const others = state.localGames.filter((item) => item.id !== state.currentGameId);
-  state.localGames = [gameRecord, ...others].slice(0, 30);
-  saveJson(STORAGE_KEYS.games, state.localGames);
+  // Zero-move games never enter history: they'd pollute the game picker and
+  // eat into the 30-game cap every time a drill/lesson/new-game touches a
+  // fresh board. The active-game slot still updates so boot restores state.
+  if (state.moves.length) {
+    state.localGames = [gameRecord, ...others].slice(0, 30);
+    saveJson(STORAGE_KEYS.games, state.localGames);
+  }
   saveJson(STORAGE_KEYS.activeGame, gameRecord);
+}
+
+// Save the live game so a drill/lesson can offer to restore it on exit.
+// Returns the paused game's id, or null when the board held nothing worth
+// coming back to (no moves yet).
+function savePausedGameForDrill() {
+  if (!state.moves.length) return null;
+  saveCurrentGame();
+  return state.currentGameId;
 }
 
 function restoreActiveGame() {
@@ -6911,6 +8996,12 @@ function restoreActiveGame() {
     state.currentGameId = active.id;
     state.startedAt = active.startedAt || new Date().toISOString();
     state.moves = Array.isArray(active.moves) ? active.moves : [];
+    // Grades that were still in flight when the tab closed will never
+    // resolve — an eternal "Analyzing" badge reads as broken. The deep
+    // post-game pass re-grades them once the game ends.
+    for (const move of state.moves) {
+      if (move.analysisStatus === "pending") move.analysisStatus = "unavailable";
+    }
     state.lastMove = state.moves.length
       ? {
           from: state.moves[state.moves.length - 1].from,
@@ -6921,20 +9012,39 @@ function restoreActiveGame() {
     if (active.playerColor) {
       state.settings.playerColor = active.playerColor;
     }
+    if (Number.isFinite(active.rethinkRemaining)) {
+      state.rethink.remaining = Math.max(0, Math.min(RETHINKS_PER_GAME, active.rethinkRemaining));
+    }
 
     // Restore live clocks (they resume from the last saved move). Any ticker
     // still running belongs to the outgoing clocks object — clear it first or
     // its interval id is lost and the orphan can never be stopped.
     stopClockTicker();
     if (active.clocks && Number.isFinite(active.clocks.white) && Number.isFinite(active.clocks.black)) {
+      let white = Math.max(0, active.clocks.white);
+      let black = Math.max(0, active.clocks.black);
+      let flagged = active.clocks.flagged || null;
+      const sideToMove = restored.turn();
+      // Charge the wall time that passed while the app was closed to the
+      // side to move — a reload must not refund think time.
+      if (!flagged && Number.isFinite(active.clocks.savedAt)) {
+        const elapsed = Math.max(0, Date.now() - active.clocks.savedAt);
+        if (sideToMove === "w") white -= elapsed;
+        else black -= elapsed;
+        if ((sideToMove === "w" ? white : black) <= 0) {
+          if (sideToMove === "w") white = 0;
+          else black = 0;
+          flagged = sideToMove;
+        }
+      }
       state.clocks = {
-        white: Math.max(0, active.clocks.white),
-        black: Math.max(0, active.clocks.black),
+        white: Math.max(0, white),
+        black: Math.max(0, black),
         incrementMs: active.clocks.incrementMs || 0,
-        side: restored.turn(),
+        side: sideToMove,
         lastTick: Date.now(),
         intervalId: null,
-        flagged: active.clocks.flagged || null,
+        flagged,
       };
     } else {
       state.clocks = null;
@@ -6956,6 +9066,62 @@ function restoreActiveGame() {
 
 let authGateResolve = null;
 let resendTimerId = null;
+let userInitiatedSignOut = false;
+let sessionExpiryGateActive = false;
+
+// Session expiry (revoked token, failed refresh, server 401s): re-show the
+// sign-in gate over the app instead of silently failing forever or hard
+// reloading mid-game. Local play keeps working underneath.
+async function handleSessionExpired() {
+  if (sessionExpiryGateActive || userInitiatedSignOut) return;
+  if (!state.server.authRequired || !state.auth.client) return;
+
+  // The client may just be holding a stale access token — try one refresh
+  // before interrupting the player.
+  if (isSignedIn()) {
+    try {
+      const { data, error } = await state.auth.client.auth.refreshSession();
+      if (!error && data?.session) {
+        state.auth.session = data.session;
+        state.auth.user = data.session.user || null;
+        return;
+      }
+    } catch {
+      // fall through to the gate
+    }
+    state.auth.session = null;
+    state.auth.user = null;
+  }
+  if (sessionExpiryGateActive) return;
+  sessionExpiryGateActive = true;
+
+  const previousUserId = String(state.auth.user?.id || localStorageUserHint() || "");
+  state.auth.recovery = false;
+  state.auth.screen = "sign_in";
+  state.auth.notice = "You've been signed out, so cloud sync and the coach are paused. Sign in again to continue — your progress is saved on this device.";
+  // The session-expiry gate is dismissible: local play genuinely continues
+  // without a session (the copy says so), so never hard-block the board.
+  state.auth.allowDismiss = true;
+  await ensureSignedIn();
+  state.auth.allowDismiss = false;
+  sessionExpiryGateActive = false;
+
+  const newUserId = String(state.auth.user?.id || "");
+  if (previousUserId && newUserId && previousUserId !== newUserId) {
+    // A different account signed in: reload so storage is re-namespaced.
+    window.location.reload();
+    return;
+  }
+  state.sync.health = "";
+  verifyCloudSync({ render: false });
+  checkOpenAIHealth({ render: false });
+}
+
+// Which user's storage namespace is active right now (set at boot).
+let activeStorageUserId = "";
+function localStorageUserHint() {
+  return activeStorageUserId;
+}
 
 // The static veil in index.html covers the app shell until we know whether to
 // show the sign-in gate or the app, so neither ever flashes.
@@ -6992,7 +9158,14 @@ async function initAuthClient() {
       state.auth.screen = "recovery";
       renderAuthGate();
     } else if (event === "SIGNED_OUT") {
-      window.location.reload();
+      if (userInitiatedSignOut) {
+        window.location.reload();
+        return;
+      }
+      // A failed token refresh mid-game must NOT hard-reload the page (that
+      // loses the chat draft and any streaming reply with zero explanation).
+      // Show the sign-in gate over the app instead.
+      handleSessionExpired();
     } else if (event === "SIGNED_IN" && authGateResolve && isSignedIn() && !state.auth.recovery) {
       // Covers sessions that arrive outside the form flow, e.g. returning
       // from an email confirmation link with tokens in the URL hash.
@@ -7024,6 +9197,7 @@ function finishAuthGate() {
     resendTimerId = null;
   }
   document.querySelector("#authGate")?.remove();
+  document.querySelector(".shell")?.removeAttribute("inert");
   if (authGateResolve) {
     const resolve = authGateResolve;
     authGateResolve = null;
@@ -7066,6 +9240,12 @@ function switchAuthScreen(screen) {
   state.auth.screen = screen;
   state.auth.error = "";
   state.auth.notice = "";
+  // Leaving a "sent" screen orphans the cooldown poller (it looks for a
+  // button that no longer exists) — stop it.
+  if (resendTimerId) {
+    window.clearInterval(resendTimerId);
+    resendTimerId = null;
+  }
   renderAuthGate();
 }
 
@@ -7123,6 +9303,9 @@ function renderAuthGate() {
     gate = document.createElement("div");
     gate.id = "authGate";
     gate.className = "auth-gate";
+    gate.setAttribute("role", "dialog");
+    gate.setAttribute("aria-modal", "true");
+    gate.setAttribute("aria-label", "Sign in");
     document.body.append(gate);
   }
 
@@ -7174,15 +9357,21 @@ function renderAuthGate() {
 
   const linksHtml = {
     sign_in: `
-      <button type="button" data-auth-screen="sign_up">Create account</button>
-      <button type="button" data-auth-screen="reset">Forgot password?</button>
+      <button type="button" data-auth-screen="sign_up"${busy ? " disabled" : ""}>Create account</button>
+      <button type="button" data-auth-screen="reset"${busy ? " disabled" : ""}>Forgot password?</button>
     `,
-    sign_up: `<button type="button" data-auth-screen="sign_in">Have an account? Sign in</button>`,
+    sign_up: `<button type="button" data-auth-screen="sign_in"${busy ? " disabled" : ""}>Have an account? Sign in</button>`,
     confirm_sent: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
-    reset: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
+    reset: `<button type="button" data-auth-screen="sign_in"${busy ? " disabled" : ""}>Back to sign in</button>`,
     reset_sent: `<button type="button" data-auth-screen="sign_in">Back to sign in</button>`,
-    recovery: "",
+    // The recovery screen used to be an inescapable modal — a stale reset
+    // link left users stuck until a manual reload.
+    recovery: `<button type="button" id="authCancelRecoveryButton"${busy ? " disabled" : ""}>Back to sign in</button>`,
   }[screen] || "";
+
+  const dismissHtml = state.auth.allowDismiss
+    ? `<div class="auth-links"><button type="button" id="authDismissButton">Keep playing without syncing</button></div>`
+    : "";
 
   gate.innerHTML = `
     <div class="auth-card">
@@ -7205,8 +9394,12 @@ function renderAuthGate() {
         <p class="auth-notice" id="authNotice">${escapeHtml(notice)}</p>
       ` : ""}
       <div class="auth-links">${linksHtml}</div>
+      ${dismissHtml}
     </div>
   `;
+
+  // Assistive tech and Tab must not reach the app underneath the modal.
+  document.querySelector(".shell")?.setAttribute("inert", "");
 
   bindAuthGate(gate);
   dismissBootVeil();
@@ -7215,6 +9408,15 @@ function renderAuthGate() {
 function bindAuthGate(gate) {
   gate.querySelector("#authForm")?.addEventListener("submit", handleAuthSubmit);
   gate.querySelector("#authResendButton")?.addEventListener("click", handleResendEmail);
+  gate.querySelector("#authDismissButton")?.addEventListener("click", () => {
+    // Resolve the gate without a session: local play continues, cloud sync
+    // and the coach stay paused until the user signs back in.
+    finishAuthGate();
+  });
+  gate.querySelector("#authCancelRecoveryButton")?.addEventListener("click", () => {
+    state.auth.recovery = false;
+    switchAuthScreen("sign_in");
+  });
 
   for (const button of gate.querySelectorAll("[data-auth-screen]")) {
     button.addEventListener("click", () => switchAuthScreen(button.dataset.authScreen));
@@ -7385,9 +9587,15 @@ async function handleAuthSubmit(event) {
 }
 
 // Resend from the confirm/reset sent screens, throttled to once a minute.
+let resendInFlight = false;
+
 async function handleResendEmail() {
   const { pendingEmail, resendKind, client } = state.auth;
   if (!client || !pendingEmail || Date.now() < state.auth.resendAvailableAt) return;
+  // The cooldown only starts on SUCCESS — without an in-flight guard a
+  // double-click sent two emails.
+  if (resendInFlight) return;
+  resendInFlight = true;
 
   state.auth.error = "";
   state.auth.notice = "";
@@ -7407,6 +9615,8 @@ async function handleResendEmail() {
     startResendCooldown();
   } catch (error) {
     state.auth.error = friendlyAuthError(error).message;
+  } finally {
+    resendInFlight = false;
   }
   renderAuthGate();
 }
@@ -7437,6 +9647,7 @@ function updateResendButton() {
 }
 
 async function signOut() {
+  userInitiatedSignOut = true;
   try {
     await state.auth.client?.auth.signOut();
   } catch (error) {
@@ -7462,6 +9673,7 @@ async function exportAccountData() {
     link.remove();
     URL.revokeObjectURL(url);
     state.account = { busy: false, status: "Export downloaded.", error: "" };
+    showToast("Export downloaded.", { tone: "success" });
   } catch (error) {
     state.account = { busy: false, status: "", error: friendlyServiceMessage(error, "Export didn't go through. Try again in a moment.") };
   }
@@ -7489,6 +9701,32 @@ async function syncGameStart() {
   });
 }
 
+// The game row is created lazily on the first real move (moves reference
+// games). Zero-move boards never reach the cloud — locally they're filtered
+// out of history for the same reason.
+//
+// The latch stores the in-flight promise so a fast engine reply waits for
+// the SAME games upsert instead of racing past it into an FK violation, and
+// it only sticks on success — a signed-out or failed start re-attempts on
+// the next move (the upsert is idempotent, so a duplicate is harmless).
+let gameStartSync = { gameId: null, promise: null };
+
+async function ensureGameStartSynced() {
+  if (gameStartSync.gameId === state.currentGameId && gameStartSync.promise) {
+    return gameStartSync.promise;
+  }
+  const gameId = state.currentGameId;
+  const promise = (async () => {
+    const ok = await syncGameStart();
+    if (!ok && gameStartSync.gameId === gameId) {
+      gameStartSync = { gameId: null, promise: null };
+    }
+    return ok;
+  })();
+  gameStartSync = { gameId, promise };
+  return promise;
+}
+
 async function verifyCloudSync(options = {}) {
   if (!state.server.syncConfigured) {
     state.sync.reachable = false;
@@ -7507,39 +9745,58 @@ async function verifyCloudSync(options = {}) {
   state.sync.health = "Testing cloud sync...";
   if (options.render !== false) renderAll();
 
-  // Saving the active game exercises the whole path: session token, server
-  // validation, and a real database write.
-  const saved = await syncGameStart();
-  state.sync.reachable = saved;
-  if (saved) {
+  // A read-only ping exercises the whole path (session token, server
+  // validation, database reachability) WITHOUT writing anything. The previous
+  // approach — upserting the current game — clobbered finished cloud games
+  // with "in progress" on every boot and every "Check services" click.
+  let reachable = false;
+  try {
+    await api.syncOp({ op: "ping" });
+    reachable = true;
+  } catch (error) {
+    console.warn("Cloud sync ping failed", error);
+    if (error instanceof ApiError && error.status === 401) {
+      state.sync.health = "Your session has expired. Sign in again to keep syncing.";
+    }
+  }
+  state.sync.reachable = reachable;
+  if (reachable) {
     state.sync.health = "Cloud sync is online and writable.";
+    // The connection works again — replay anything that failed while offline.
+    flushSyncOutbox();
   } else if (state.sync.health === "Testing cloud sync...") {
     state.sync.health = "Cloud sync isn't responding right now. Try again in a moment.";
   }
   if (options.render !== false) renderAll();
-  return saved;
+  return reachable;
 }
 
 async function syncGameEnd(result) {
   const opening = detectOpening();
   const savedGame = state.localGames.find((game) => game.id === state.currentGameId);
+  // Upsert (not update): if the game-start sync never landed (offline start),
+  // a bare update would match zero cloud rows and the finished game would
+  // stay missing/"in progress" in the cloud forever.
   await apiSyncOp({
-    op: "update",
+    op: "upsert",
     table: "games",
-    id: state.currentGameId,
-    patch: {
+    rows: [{
+      id: state.currentGameId,
+      started_at: state.startedAt,
       ended_at: new Date().toISOString(),
+      player_color: state.settings.playerColor,
       result,
       engine_level: savedGame?.engineLevel || getCurrentBotDepth(),
       opening_name: opening.name,
       opening_key: state.moves.slice(0, 8).map((move) => normalizeSan(move.san)).join(" "),
       pgn: state.game.pgn(),
       status: "complete",
-    },
+    }],
   });
 }
 
 async function syncMove(record) {
+  await ensureGameStartSynced();
   await apiSyncOp({
     op: "insert",
     table: "moves",
@@ -7594,7 +9851,10 @@ async function syncWeakness(tag, record, aggregate) {
     op: "insert",
     table: "weakness_events",
     rows: [{
-      game_id: state.currentGameId,
+      // The record's own game id — this sync is deferred behind the move
+      // insert, and the player may have started a NEW game by the time it
+      // resolves. state.currentGameId here would cross-reference games.
+      game_id: record.gameId,
       move_id: record.id,
       category: tag.category,
       label: tag.label,
@@ -7643,7 +9903,9 @@ async function syncPosition(record, item) {
     op: "insert",
     table: "positions",
     rows: [{
-      game_id: state.currentGameId,
+      // Deferred behind the move insert — must be the record's game, not
+      // whatever game owns the board when this finally resolves.
+      game_id: record.gameId,
       move_id: record.id,
       fen: item.fen,
       phase: getPhase(item.fen),
@@ -7722,8 +9984,143 @@ async function syncSkillRatings(skill) {
 
 // Sends one sync operation to the server. Quietly no-ops when cloud sync is
 // unavailable (server unconfigured or signed out) so play never blocks.
+//
+// Failed operations are queued in a persistent outbox and replayed in order
+// once the connection recovers — a network blip must never permanently lose
+// moves or leave a finished game marked "in progress" in the cloud.
+const SYNC_OUTBOX_LIMIT = 400;
+const SYNC_OUTBOX_MAX_ATTEMPTS = 12;
+const SYNC_OUTBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+let syncOutboxFlushing = false;
+let syncOutboxTimer = null;
+
+function loadSyncOutbox() {
+  const entries = loadJson(STORAGE_KEYS.syncOutbox, []);
+  return Array.isArray(entries) ? entries : [];
+}
+
+function saveSyncOutbox(entries) {
+  return saveJson(STORAGE_KEYS.syncOutbox, entries.slice(0, SYNC_OUTBOX_LIMIT));
+}
+
+function enqueueSyncOp(payload) {
+  const entries = loadSyncOutbox();
+  entries.push({ payload, attempts: 0, queuedAt: Date.now() });
+  saveSyncOutbox(entries);
+  scheduleSyncOutboxFlush();
+}
+
+function scheduleSyncOutboxFlush(delayMs = 15_000) {
+  if (syncOutboxTimer) return;
+  syncOutboxTimer = window.setTimeout(() => {
+    syncOutboxTimer = null;
+    flushSyncOutbox();
+  }, delayMs);
+}
+
+// Errors that a retry can plausibly fix: network failures (status 0), server
+// hiccups (5xx), and rate limits (429). 4xx validation failures are permanent.
+function isRetriableSyncError(error) {
+  if (!(error instanceof ApiError)) return true;
+  return error.status === 0 || error.status === 429 || error.status >= 500;
+}
+
+// Two entries are the same op if they were queued at the same instant with
+// the same payload — used to make sure concurrent enqueues/erases can never
+// make the flush loop remove the wrong entry.
+function sameOutboxEntry(a, b) {
+  return Boolean(a && b) && a.queuedAt === b.queuedAt && JSON.stringify(a.payload) === JSON.stringify(b.payload);
+}
+
+async function flushSyncOutbox() {
+  if (tabDeactivated || syncOutboxFlushing || !canCloudSync()) return;
+  // Never flush a namespace that doesn't belong to the signed-in user: a
+  // different account signing in through the session-expiry gate must not
+  // replay the previous user's queue under its own token.
+  if (state.server.authRequired && (state.auth.user?.id || "") !== activeStorageUserId) return;
+  syncOutboxFlushing = true;
+  let flushedAny = false;
+  try {
+    // Re-read storage on every iteration. Ops enqueued while we flush (or an
+    // "erase history" clearing the key mid-flight) must never be clobbered
+    // by re-persisting a stale in-memory copy of the queue.
+    //
+    // Every removal/attempt-bump must actually PERSIST: with a full
+    // localStorage the next iteration would reload the identical head and
+    // spin forever (synchronously for expired entries — a frozen tab; one
+    // duplicate network send per iteration otherwise). The iteration cap is
+    // a belt-and-braces backstop.
+    for (let iterations = 0; iterations <= SYNC_OUTBOX_LIMIT + 4; iterations += 1) {
+      const entries = loadSyncOutbox();
+      if (!entries.length) break;
+      const entry = entries[0];
+      const expired = entry.attempts >= SYNC_OUTBOX_MAX_ATTEMPTS
+        || (entry.queuedAt && Date.now() - entry.queuedAt > SYNC_OUTBOX_MAX_AGE_MS);
+      if (expired) {
+        entries.shift();
+        if (!saveSyncOutbox(entries)) return;
+        continue;
+      }
+      try {
+        await api.syncOp(entry.payload);
+        flushedAny = true;
+        const latest = loadSyncOutbox();
+        if (sameOutboxEntry(latest[0], entry)) {
+          latest.shift();
+          if (!saveSyncOutbox(latest)) return;
+        }
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) {
+          // Session expired: the queue is fine, the token isn't. Keep every
+          // entry (signing back in fixes it) and prompt for re-auth.
+          state.sync.reachable = false;
+          state.sync.health = "Your session has expired. Sign in again to keep syncing.";
+          renderGameMeta();
+          handleSessionExpired();
+          return;
+        }
+        if (isRetriableSyncError(error)) {
+          // Stop at the first retriable failure to preserve op order
+          // (a move insert must land before its analysis update).
+          const latest = loadSyncOutbox();
+          if (sameOutboxEntry(latest[0], entry)) {
+            latest[0].attempts = (latest[0].attempts || 0) + 1;
+            saveSyncOutbox(latest);
+          }
+          scheduleSyncOutboxFlush(60_000);
+          return;
+        }
+        // Permanent rejection: drop it so it can't wedge the queue.
+        console.warn("Dropping unsyncable operation", entry.payload?.op, entry.payload?.table, error.message);
+        const latest = loadSyncOutbox();
+        if (sameOutboxEntry(latest[0], entry)) {
+          latest.shift();
+          if (!saveSyncOutbox(latest)) return;
+        }
+      }
+    }
+    if (flushedAny) {
+      state.sync.reachable = true;
+      state.sync.health = "Cloud sync is online and writable.";
+      renderGameMeta();
+      showToast("Cloud sync caught up.", { tone: "success" });
+    }
+  } finally {
+    syncOutboxFlushing = false;
+  }
+}
+
 async function apiSyncOp(payload) {
-  if (!canCloudSync()) return false;
+  if (tabDeactivated || !canCloudSync()) return false;
+
+  // While older operations are still queued, new ones must line up behind
+  // them — moves reference games, analysis updates reference moves.
+  if (loadSyncOutbox().length) {
+    enqueueSyncOp(payload);
+    flushSyncOutbox();
+    return false;
+  }
+
   try {
     await api.syncOp(payload);
     state.sync.reachable = true;
@@ -7734,6 +10131,17 @@ async function apiSyncOp(payload) {
     if (error instanceof ApiError && error.status === 401) {
       state.sync.reachable = false;
       state.sync.health = "Your session has expired. Sign in again to keep syncing.";
+      handleSessionExpired();
+    } else if (isRetriableSyncError(error)) {
+      // The cloud copy is now behind — the UI must stop claiming "Connected"
+      // while writes fail. The op replays from the outbox automatically.
+      state.sync.reachable = false;
+      state.sync.health = "Cloud sync is catching up. Your progress is saved on this device and will sync automatically.";
+      enqueueSyncOp(payload);
+    } else {
+      // Permanent rejection (validation/constraint): the service IS
+      // reachable and nothing will retry — don't promise otherwise.
+      console.warn("Cloud sync permanently rejected an operation", payload?.op, payload?.table);
     }
     renderGameMeta();
     return false;
@@ -7743,19 +10151,55 @@ async function apiSyncOp(payload) {
 async function testSupabaseConnection() {
   await saveSettingsFromPanel();
 
-  await verifyCloudSync({ syncStart: true });
+  await verifyCloudSync();
+}
+
+function getPreferredColor() {
+  return state.settings.preferredColor || state.settings.playerColor || "w";
 }
 
 async function saveSettingsFromPanel() {
-  state.settings.displayName = normalizeDisplayName(document.querySelector("#displayNameInput").value);
-  state.settings.playerColor = document.querySelector("#playerColorInput").value;
-  state.settings.coachMode = document.querySelector("#coachModeInput").value;
+  const displayNameInput = document.querySelector("#displayNameInput");
+  const playerColorInput = document.querySelector("#playerColorInput");
+  const coachModeInput = document.querySelector("#coachModeInput");
+  if (displayNameInput) state.settings.displayName = normalizeDisplayName(displayNameInput.value);
+  if (coachModeInput) state.settings.coachMode = coachModeInput.value;
+  const previousTimeControl = state.settings.timeControl;
   state.settings.timeControl = document.querySelector("#timeControlInput")?.value || "unlimited";
   state.settings.soundEnabled = document.querySelector("#soundEnabledInput")?.checked !== false;
   state.settings.showBestArrow = document.querySelector("#showBestArrowInput")?.checked !== false;
   state.settings.showEvalBar = document.querySelector("#showEvalBarInput")?.checked !== false;
+
+  if (playerColorInput) {
+    state.settings.preferredColor = playerColorInput.value;
+    // Mid-game color swaps used to dead-end the game (board flips, bot never
+    // moves). Apply instantly only on a fresh board; otherwise the choice
+    // takes effect on the next game.
+    if (!state.moves.length && !state.activeDrill && !state.game.isGameOver()) {
+      state.settings.playerColor = playerColorInput.value;
+    } else if (playerColorInput.value !== state.settings.playerColor) {
+      showToast("Color saved — applies to your next game.");
+    }
+  }
+
+  // Time control: apply immediately on a fresh board (it used to silently do
+  // nothing until "New game"); a running game keeps its clock.
+  if (state.settings.timeControl !== previousTimeControl) {
+    if (!state.moves.length && !state.activeDrill && !state.game.isGameOver()) {
+      initClocksForNewGame();
+    } else {
+      showToast("Time control saved — applies to your next game.");
+    }
+  }
+
   saveJson(STORAGE_KEYS.settings, state.settings);
   renderAll();
+
+  // Fresh board flipped to Black: the bot now owns the first move.
+  if (!state.moves.length && !state.activeDrill && !state.game.isGameOver()
+    && state.game.turn() !== state.settings.playerColor) {
+    maybeEngineMove();
+  }
   return true;
 }
 
@@ -7768,6 +10212,14 @@ function clearHistoryStorage() {
   localStorage.removeItem(STORAGE_KEYS.calibration);
   localStorage.removeItem(STORAGE_KEYS.coachChat);
   localStorage.removeItem(STORAGE_KEYS.coachMemory);
+  localStorage.removeItem(STORAGE_KEYS.learn);
+  // Skill/repertoire/mate-ladder/daily are history too. Leaving them behind
+  // used to silently re-upload "deleted" cloud rows on the next move.
+  localStorage.removeItem(STORAGE_KEYS.skill);
+  localStorage.removeItem(STORAGE_KEYS.repertoire);
+  localStorage.removeItem(STORAGE_KEYS.mateLadder);
+  localStorage.removeItem(STORAGE_KEYS.daily);
+  localStorage.removeItem(STORAGE_KEYS.syncOutbox);
 }
 
 function resetHistoryState() {
@@ -7778,6 +10230,13 @@ function resetHistoryState() {
   state.practiceHistory = [];
   state.localGames = [];
   state.calibration = structuredClone(DEFAULT_CALIBRATION);
+  state.skill = null;
+  state.repertoire = { myOpenings: [], lines: {} };
+  state.mateLadder = { solved: [], attempts: {}, rungSolved: {} };
+  state.daily = { streak: 0, lastCompletedDate: null, todayCompleted: {} };
+  state.learn = structuredClone(DEFAULT_LEARN);
+  state.lessonFlash = null;
+  state.pausedGameId = null;
   state.coachChat = { gameId: null, messages: [] };
   state.coachMemory = { notes: [], traces: [] };
   state.pendingCoachQuestion = null;
@@ -7794,6 +10253,7 @@ function resetHistoryState() {
   state.activeDrill = null;
   state.drillMessage = "";
   state.coachError = "";
+  state.coachRetry = null;
   resetProactiveState();
   resetRethinkState();
   resetPracticeTrainerState();
@@ -7806,11 +10266,11 @@ function resetLocalHistoryForErase() {
 }
 
 function confirmHistoryErase(message) {
-  return window.confirm(message);
+  return showConfirmDialog(message, { title: "Erase history", confirmLabel: "Erase", danger: true });
 }
 
 async function eraseLocalHistory() {
-  if (!confirmHistoryErase("Erase local history from this browser? This clears games, calibration, coach memory, profile, and practice history. Settings stay saved.")) {
+  if (!await confirmHistoryErase("Erase local history from this browser? This clears games, calibration, coach memory, profile, lesson progress, and practice history. Settings stay saved.")) {
     return;
   }
 
@@ -7832,7 +10292,7 @@ async function eraseLocalHistory() {
 
 async function eraseRemoteHistory() {
   if (!canCloudSync() && !state.featureFlags.remoteHistoryEraseEnabled) return;
-  if (!confirmHistoryErase("Erase local and cloud history? This permanently deletes your cloud games, moves, calibration, profile, and practice history for this account. Settings stay saved.")) {
+  if (!await confirmHistoryErase("Erase local and cloud history? This permanently deletes your cloud games, moves, calibration, profile, and practice history for this account. Settings stay saved.")) {
     return;
   }
 
@@ -7875,15 +10335,40 @@ async function deleteSupabaseHistory() {
   await api.accountDelete();
 }
 
-function newGame() {
+// Resigning ends the game through the normal end-of-game pipeline, so it
+// counts for calibration, skill, history, and review like any other loss.
+async function resignGame() {
+  if (state.activeDrill || !state.moves.length || state.game.isGameOver() || state.clocks?.flagged) return;
+  const confirmed = await showConfirmDialog(
+    "It counts as a loss and moves to your history for review.",
+    { title: "Resign this game?", confirmLabel: "Resign", danger: true },
+  );
+  if (!confirmed) return;
+  // The dialog is async — the game may have ended (flag, engine mate) while
+  // it was open.
+  if (state.activeDrill || state.game.isGameOver() || state.clocks?.flagged) return;
+  stopClockTicker();
+  const winner = opposite(state.settings.playerColor);
+  await completeGameWithResult(`${colorName(winner)} wins by resignation`);
+  renderAll();
+}
+
+async function newGame() {
   // A live game is wiped by this — ask first. (It stays in history as
   // unfinished thanks to the per-move incremental saves.)
   const inProgress = state.moves.length > 0 && !state.game.isGameOver() && !state.activeDrill && !state.clocks?.flagged;
-  if (inProgress && !window.confirm("Start a new game? Your current game is saved to history as unfinished.")) {
-    return;
+  if (inProgress) {
+    const confirmed = await showConfirmDialog(
+      "Your current game is saved to history as unfinished.",
+      { title: "Start a new game?", confirmLabel: "New game" },
+    );
+    if (!confirmed) return;
   }
   cancelDeepAnalysis();
   teardownBoardInteractions();
+  // A review/resume of an old game may have flipped the working color —
+  // new games always start from the user's saved preference.
+  state.settings.playerColor = getPreferredColor();
   state.game = new Chess();
   state.selectedSquare = null;
   state.legalTargets = new Set();
@@ -7894,18 +10379,26 @@ function newGame() {
   state.currentGameId = crypto.randomUUID();
   state.startedAt = new Date().toISOString();
   state.thinking = false;
+  // Starting a game from inside a lesson is an explicit exit: don't re-open
+  // the lesson on the next reload.
+  if (isLessonDrill()) {
+    state.learn.active = false;
+    saveLearnState();
+  }
   state.activeDrill = null;
   state.drillMessage = "";
+  state.lessonFlash = null;
+  state.pausedGameId = null;
   // The chat transcript is intentionally NOT reset — getCurrentChatMessages()
   // inserts a "New game" divider when it sees the new game id.
   state.pendingCoachQuestion = null;
   state.coachError = "";
+  state.coachRetry = null;
   resetProactiveState();
   resetRethinkState();
   resetPracticeTrainerState();
   state.practiceTrainer.status = "idle";
   saveCurrentGame();
-  syncGameStart();
   initClocksForNewGame();
   renderAll();
 
@@ -7920,13 +10413,27 @@ function switchTab(tab, options = {}) {
   // and Android's back button walks the tab history before leaving the app.
   document.body.dataset.activeTab = tab;
   if (!options.fromHistory && window.history.state?.tab !== tab) {
-    window.history.pushState({ tab }, "", "");
+    // Only touch devices get a history entry per tab (the Android back-button
+    // pattern). On desktop, Back should leave the site, not replay every tab
+    // ever visited.
+    if (window.matchMedia?.("(pointer: coarse)")?.matches) {
+      window.history.pushState({ tab }, "", "");
+    } else {
+      window.history.replaceState({ tab }, "", "");
+    }
   }
   const boardChanged = tab === "practice" && ensurePracticeTrainer();
-  els.tabs.forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
+  if (tab === "play") clearCoachUnread();
+  els.tabs.forEach((button) => {
+    const active = button.dataset.tab === tab;
+    button.classList.toggle("active", active);
+    // Screen readers hear which section is open without relying on a CSS class.
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
   els.panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
   updateCtxHead(tab);
-  if (tab === "practice" || boardChanged) {
+  if (tab === "practice" || tab === "learn" || boardChanged) {
     renderBoard();
     renderGameMeta();
   }
@@ -7953,6 +10460,9 @@ function escapeHtml(value) {
 function escapeAttr(value) {
   return escapeHtml(value).replaceAll("`", "&#096;");
 }
+
+let engineRecoveryAttempts = 0;
+const ENGINE_RECOVERY_MAX_ATTEMPTS = 2;
 
 async function initEngine() {
   const sources = [
@@ -7987,8 +10497,27 @@ async function initEngine() {
   renderGameMeta();
 }
 
+// A worker that crashes AFTER boot used to leave the app silently degraded
+// forever: bestMove() returned null without throwing, so the weak heuristic
+// bot played on with no signal and no recovery. Detect the dead engine, show
+// the fallback state, and try to boot a fresh worker a couple of times.
+function handleEngineCrashIfNeeded() {
+  const engine = state.engine;
+  if (!engine || engine.ready || !engine.crashed) return;
+  engine.destroy();
+  state.engine = null;
+  state.engineFallback = true;
+  renderGameMeta();
+  if (engineRecoveryAttempts < ENGINE_RECOVERY_MAX_ATTEMPTS) {
+    engineRecoveryAttempts += 1;
+    console.warn(`Chess engine crashed — attempting recovery (${engineRecoveryAttempts}/${ENGINE_RECOVERY_MAX_ATTEMPTS})`);
+    initEngine().catch((error) => console.warn("Engine recovery failed", error));
+  }
+}
+
 function bindEvents() {
   els.newGameButton.addEventListener("click", newGame);
+  els.resignButton?.addEventListener("click", resignGame);
   els.opponentSeatName?.addEventListener("click", startOpponentRename);
   els.tabs.forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
@@ -8005,6 +10534,54 @@ function bindEvents() {
   // Leaving the page mid-stream: abort the coach request so the server can
   // cancel its upstream OpenAI call instead of generating into the void.
   window.addEventListener("pagehide", () => activeCoachAbort?.abort());
+
+  // Arrow-key scrubbing through a finished game on the main board.
+  window.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (target instanceof HTMLElement
+      && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) {
+      return;
+    }
+    if (document.querySelector("#authGate") || document.querySelector(".app-dialog-overlay")) return;
+    if (!isCurrentGameFinished() || state.activeDrill || state.variationReplay || !state.moves.length) return;
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      stepTimeline(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      stepTimeline(1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setTimelinePly(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setTimelinePly(state.moves.length);
+    } else if (event.key === "Escape" && isTimelineActive()) {
+      event.preventDefault();
+      setTimelinePly(state.moves.length);
+    }
+  });
+
+  // One clear offline signal instead of a different cryptic failure per
+  // feature. Reconnecting flushes the sync outbox and re-checks services.
+  const updateOfflineBanner = () => {
+    const banner = document.querySelector("#offlineBanner");
+    if (banner) banner.hidden = navigator.onLine !== false;
+  };
+  window.addEventListener("offline", () => {
+    updateOfflineBanner();
+    state.sync.reachable = false;
+    state.sync.health = "You're offline. Progress is saved on this device and syncs when you're back.";
+    renderGameMeta();
+  });
+  window.addEventListener("online", () => {
+    updateOfflineBanner();
+    flushSyncOutbox();
+    verifyRequiredServices();
+  });
+  updateOfflineBanner();
 
   boardDrag = attachDragHandlers(els.board, {
     canDragFrom: (square) => {
@@ -8037,6 +10614,14 @@ function bindEvents() {
   });
 }
 
+// Device-level (never namespaced) keys: the last-known server config and the
+// last signed-in user. Both exist so an OFFLINE boot still knows the server
+// requires auth and which user's storage namespace to open — without them a
+// signed-in user reloading offline was silently dropped into the empty
+// legacy namespace and their history "vanished".
+const SERVER_CONFIG_CACHE_KEY = "chess_teacher_server_config_v1";
+const LAST_USER_CACHE_KEY = "chess_teacher_last_user_v1";
+
 // Loads /api/health before anything renders so the client knows whether the
 // server requires sign-in and where Supabase Auth lives.
 async function fetchServerConfig() {
@@ -8045,10 +10630,129 @@ async function fetchServerConfig() {
     applyServerConfig(data);
     state.openAI.configured = Boolean(data.openaiConfigured);
     state.openAI.model = data.model || "";
+    saveJson(SERVER_CONFIG_CACHE_KEY, {
+      authRequired: state.server.authRequired,
+      syncConfigured: state.server.syncConfigured,
+      supabaseAuth: state.server.supabaseAuth,
+      pieceSets: state.server.pieceSets,
+      openaiConfigured: state.openAI.configured,
+    });
   } catch (error) {
-    console.warn("Could not load server config; continuing in local mode", error);
-    state.server.loaded = false;
+    console.warn("Could not load server config; falling back to the cached one", error);
+    const cached = loadJson(SERVER_CONFIG_CACHE_KEY, null);
+    if (cached) {
+      state.server.loaded = true;
+      state.server.fromCache = true;
+      state.server.authRequired = Boolean(cached.authRequired);
+      state.server.syncConfigured = Boolean(cached.syncConfigured);
+      state.server.supabaseAuth = cached.supabaseAuth || null;
+      if (Array.isArray(cached.pieceSets) && cached.pieceSets.length) {
+        state.server.pieceSets = cached.pieceSets;
+      }
+      state.openAI.configured = Boolean(cached.openaiConfigured);
+    } else {
+      state.server.loaded = false;
+    }
   }
+}
+
+// ─────────── First-run tour ───────────
+//
+// Three anchored tooltips on the very first visit: the board, the coach, and
+// the Today plan. Skipped for anyone who already has games.
+
+const TOUR_STEPS = [
+  {
+    target: ".board-host",
+    title: "Your board",
+    body: "Play right here — tap or drag pieces. The opponent adapts to your level as you play.",
+  },
+  {
+    target: ".ctx-body",
+    title: "Your coach",
+    body: "The coach watches every game, speaks up at important moments, and answers anything you ask.",
+  },
+  {
+    target: '[data-tab="today"]',
+    title: "Today",
+    body: "Your daily plan lives here — a lesson, a puzzle, a game. A few minutes a day adds up fast.",
+  },
+];
+
+function maybeStartTour() {
+  if (loadJson(STORAGE_KEYS.tour, false)) return;
+  if (state.localGames.length || tabDeactivated) return;
+  if (document.querySelector("#authGate")) return;
+  showTourStep(0);
+}
+
+function finishTour() {
+  saveJson(STORAGE_KEYS.tour, true);
+  document.querySelector("#tourOverlay")?.remove();
+}
+
+function showTourStep(index) {
+  const step = TOUR_STEPS[index];
+  const target = step ? document.querySelector(step.target) : null;
+  if (!step || !target) {
+    finishTour();
+    return;
+  }
+
+  let overlay = document.querySelector("#tourOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "tourOverlay";
+    overlay.className = "tour-overlay";
+    document.body.append(overlay);
+    // Non-modal: Escape or any interaction outside the popover ends the tour
+    // (never trap a user who just wants to click around).
+    document.addEventListener("keydown", function onKey(event) {
+      if (!document.querySelector("#tourOverlay")) {
+        document.removeEventListener("keydown", onKey);
+        return;
+      }
+      if (event.key === "Escape") finishTour();
+    });
+    document.addEventListener("pointerdown", function onPointer(event) {
+      const current = document.querySelector("#tourOverlay");
+      if (!current) {
+        document.removeEventListener("pointerdown", onPointer);
+        return;
+      }
+      if (!current.contains(event.target)) finishTour();
+    }, true);
+  }
+
+  const isLast = index === TOUR_STEPS.length - 1;
+  overlay.innerHTML = `
+    <div class="tour-pop" role="dialog" aria-label="${escapeAttr(step.title)}">
+      <strong>${escapeHtml(step.title)}</strong>
+      <p>${escapeHtml(step.body)}</p>
+      <div class="button-row">
+        <button type="button" class="tour-skip">Skip</button>
+        <button type="button" class="tour-next primary-action">${isLast ? "Let's go" : "Next"}</button>
+      </div>
+      <span class="tour-count">${index + 1} / ${TOUR_STEPS.length}</span>
+    </div>
+  `;
+
+  // Position near the target, clamped to the viewport.
+  const pop = overlay.querySelector(".tour-pop");
+  const rect = target.getBoundingClientRect();
+  const popWidth = 280;
+  const left = Math.max(12, Math.min(window.innerWidth - popWidth - 12, rect.left + rect.width / 2 - popWidth / 2));
+  const below = rect.bottom + 12;
+  const top = below + 170 < window.innerHeight ? below : Math.max(12, rect.top - 182);
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+
+  overlay.querySelector(".tour-skip").addEventListener("click", finishTour);
+  overlay.querySelector(".tour-next").addEventListener("click", () => {
+    if (isLast) finishTour();
+    else showTourStep(index + 1);
+  });
+  overlay.querySelector(".tour-next").focus();
 }
 
 async function boot() {
@@ -8057,12 +10761,32 @@ async function boot() {
   if (state.server.authRequired) {
     const authReady = await initAuthClient();
     if (authReady) {
+      // Booting from a cached config (server unreachable): the gate is
+      // dismissible when we know whose device this is — offline users must
+      // be able to reach their local data without a working auth service.
+      const cachedLastUser = loadJson(LAST_USER_CACHE_KEY, "");
+      if (state.server.fromCache && cachedLastUser) {
+        state.auth.allowDismiss = true;
+      }
       await ensureSignedIn();
-      applyStorageNamespace(state.auth.user?.id || "");
+      state.auth.allowDismiss = false;
+      activeStorageUserId = state.auth.user?.id
+        || (state.server.fromCache ? cachedLastUser : "")
+        || "";
+      applyStorageNamespace(activeStorageUserId);
+      if (state.auth.user?.id) saveJson(LAST_USER_CACHE_KEY, activeStorageUserId);
     } else {
-      // Auth module unreachable (e.g. offline dev): fall back to local mode
-      // so the board still works. Cloud sync stays off.
-      state.sync.health = state.auth.error || "Sign-in is unavailable right now.";
+      // Auth module unreachable (offline: supabase-js loads from a CDN).
+      // Open the LAST signed-in user's namespace so their history is still
+      // there — the legacy namespace would show a blank fresh profile.
+      const lastUser = loadJson(LAST_USER_CACHE_KEY, "");
+      if (lastUser) {
+        activeStorageUserId = lastUser;
+        applyStorageNamespace(lastUser);
+        state.sync.health = "You're offline — playing from this device. Sync resumes when you're back.";
+      } else {
+        state.sync.health = state.auth.error || "Sign-in is unavailable right now.";
+      }
     }
   }
 
@@ -8072,12 +10796,27 @@ async function boot() {
     railFoot.innerHTML = `v ${APP_VERSION}<br>plays locally &middot; syncs with your account`;
   }
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+  // Users who never saved settings have no explicit color preference yet —
+  // capture the current one BEFORE restoreActiveGame can mutate playerColor
+  // (resuming a Black game must not silently become the new-game default).
+  if (!state.settings.preferredColor) {
+    state.settings.preferredColor = state.settings.playerColor || "w";
+  }
   // coachMode was a dead setting before v0.7 — stored values were never a
   // deliberate choice. Reset once to the live default ("hints").
   if (!state.settings.coachModeV2) {
     state.settings.coachMode = "hints";
     state.settings.coachModeV2 = true;
     saveJson(STORAGE_KEYS.settings, state.settings);
+  }
+  applyAppTheme(state.settings.appTheme);
+  // A fresh profile on the default look gets the matching board palette too.
+  // Never touches a hand-picked board (boardThemeAuto flips off on pick).
+  if (state.settings.boardThemeAuto !== false && state.settings.boardTheme === "slate") {
+    const suggested = APP_THEME_BOARD_SUGGESTIONS[normalizeAppThemeKey(state.settings.appTheme)];
+    if (suggested && suggested !== state.settings.boardTheme) {
+      state.settings.boardTheme = suggested;
+    }
   }
   applyBoardTheme(state.settings.boardTheme);
   seedDisplayNameFromAccount();
@@ -8086,15 +10825,34 @@ async function boot() {
   if (isCalibrationComplete()) ensureSkillState();
   state.startedAt = new Date().toISOString();
   restoreActiveGame();
+  maybeResumeLessonOnBoot();
   bindEvents();
-  document.body.dataset.activeTab = state.currentTab;
+  initTabLock();
+  // Calibrated users land on Today (what should I do now?); new users land
+  // on Play, where the first-run and calibration guidance lives; a live
+  // game in progress goes straight back to the board. A lesson auto-resume
+  // may already have chosen the Learn tab — leave it alone.
+  if (state.currentTab === "play" && !state.activeDrill && isCalibrationComplete() && !hasLiveGameInProgress()) {
+    state.currentTab = "today";
+  }
+  switchTab(state.currentTab, { fromHistory: true });
   window.history.replaceState({ tab: state.currentTab }, "", "");
   renderAll();
   dismissBootVeil();
+  maybeStartTour();
   verifyRequiredServices();
-  initEngine();
+  const engineBoot = initEngine();
   // Clocks: resume a restored live clock, or start fresh ones for a new game.
-  if (state.clocks && !state.clocks.flagged && !state.game.isGameOver()) {
+  if (state.clocks?.flagged && !state.activeDrill) {
+    // The clock ran out while the app was closed (restore charged the
+    // elapsed wall time). Finalize it like a live flag so the result counts.
+    const stored = state.localGames.find((game) => game.id === state.currentGameId);
+    if (!stored?.result || stored.result === "in_progress") {
+      completeGameWithResult(`${colorName(opposite(state.clocks.flagged))} wins on time`)
+        .catch((error) => console.warn("Could not finalize the timed-out game", error));
+    }
+    renderClocks();
+  } else if (state.clocks && !state.clocks.flagged && !state.game.isGameOver()) {
     startClockTicker();
     renderClocks();
   } else if (!state.game.isGameOver() && !state.moves.length) {
@@ -8104,7 +10862,12 @@ async function boot() {
   }
 
   if (!state.game.isGameOver() && state.game.turn() !== state.settings.playerColor) {
-    maybeEngineMove();
+    // Bot to move at boot (reload mid-game, or a fresh game as Black): give
+    // Stockfish a moment to finish booting first, otherwise the weak
+    // heuristic fallback silently plays the move at the wrong strength.
+    Promise.race([engineBoot, wait(4000)])
+      .catch(() => {})
+      .then(() => maybeEngineMove());
   }
 }
 
@@ -8123,5 +10886,30 @@ function seedDisplayNameFromAccount() {
 
 boot().catch((error) => {
   console.error("Boot failed", error);
-  dismissBootVeil();
+  // A mid-boot failure used to dismiss the veil onto a dead blank shell.
+  // Show what happened and offer a retry instead.
+  const veil = document.querySelector("#bootVeil");
+  const inner = veil?.querySelector(".boot-veil-inner");
+  if (inner) {
+    inner.innerHTML = `
+      <img src="./assets/squirrel_chess.svg" alt="">
+      <strong>Personal Chess Teacher</strong>
+      <p class="boot-error">Something went wrong while starting up. Check your connection and try again.</p>
+      <button id="bootRetryButton" class="primary-action" type="button">Try again</button>
+    `;
+    inner.querySelector("#bootRetryButton")?.addEventListener("click", () => window.location.reload());
+    veil.removeAttribute("aria-label");
+  } else {
+    dismissBootVeil();
+  }
 });
+
+// Offline shell for the installed PWA (see sw.js). Registration failures are
+// non-fatal — the app works identically without it, just not offline.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((error) => {
+      console.warn("Service worker registration failed", error);
+    });
+  });
+}

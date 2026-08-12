@@ -544,3 +544,102 @@ test("oversized request bodies receive a JSON 400 instead of a connection reset"
   assert.equal(response.status, 400);
   assert.match(response.body.error, /too large/i);
 });
+
+// ─────────── New hardening regressions ───────────
+
+test("sync ping is read-only and verifies the full path", async () => {
+  await withSupabase({
+    "/auth/v1/user": authOk,
+    "/rest/v1/games": (url, init) => {
+      assert.equal(init.method ?? "GET", "GET", "ping must never write");
+      return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  }, async (calls) => {
+    const response = await request("/api/sync", {
+      method: "POST",
+      headers: { authorization: "Bearer good-token" },
+      payload: { op: "ping" },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { ok: true });
+    const rest = calls.filter((call) => call.url.includes("/rest/v1/"));
+    assert.ok(rest.length >= 1);
+    assert.ok(rest.every((call) => (call.init.method ?? "GET") === "GET"), "no writes during ping");
+  });
+});
+
+test("cross-origin POSTs to the API are rejected (drive-by spend guard)", async () => {
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  try {
+    const response = await request("/api/coach/chat", {
+      method: "POST",
+      headers: { origin: "https://evil.example" },
+      payload: { event: "user_message", messages: [], game: { fen: "x" } },
+    });
+    assert.equal(response.status, 403);
+    assert.match(response.body.error, /cross-origin/i);
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("same-origin POSTs with a matching Origin header pass the guard", async () => {
+  const response = await request("/api/sync", {
+    method: "POST",
+    headers: { origin: "http://localhost" },
+    payload: { op: "ping" },
+  });
+  // Unconfigured Supabase → 503 (not 403): the origin guard let it through.
+  assert.equal(response.status, 503);
+});
+
+test("a zero-row sync update is a detectable failure, not silent success", async () => {
+  await withSupabase({
+    "/auth/v1/user": authOk,
+    "/rest/v1/moves": (url, init) => {
+      assert.equal(init.method, "PATCH");
+      // PostgREST: PATCH matching no rows returns 200 with an empty array.
+      return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  }, async () => {
+    const response = await request("/api/sync", {
+      method: "POST",
+      headers: { authorization: "Bearer good-token" },
+      payload: { op: "update", table: "moves", id: TEST_GAME_ID, patch: { note: "n" } },
+    });
+    assert.equal(response.status, 409, "client must learn the write did not land");
+  });
+});
+
+test("static responses carry nosniff", async () => {
+  const response = await requestPath("/app.js");
+  assert.equal(response.headers["X-Content-Type-Options"], "nosniff");
+});
+
+test("the service worker is served from the allowlist", async () => {
+  const response = await requestPath("/sw.js");
+  assert.equal(response.status, 200);
+  assert.match(response.headers["Content-Type"] || "", /text\/javascript/);
+});
+
+test("foreign-key sync failures are retriable (503), not client-fatal", async () => {
+  await withSupabase({
+    "/auth/v1/user": authOk,
+    "/rest/v1/moves": () => new Response(
+      JSON.stringify({ code: "23503", message: "insert or update on table \"moves\" violates foreign key constraint" }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ),
+  }, async () => {
+    const response = await request("/api/sync", {
+      method: "POST",
+      headers: { authorization: "Bearer good-token" },
+      payload: { op: "insert", table: "moves", rows: [{ id: TEST_GAME_ID, san: "e4" }] },
+    });
+    // 23503 means the parent row hasn't landed yet — the client must retry
+    // from its outbox, so it may not be reported as a permanent 409.
+    assert.equal(response.status, 503);
+    assert.match(response.body.error, /retry/i);
+  });
+});

@@ -47,3 +47,10 @@ test("uciToArrow parses UCI or returns null", () => {
   assert.equal(uciToArrow("", "best"), null);
   assert.equal(uciToArrow("e2", "best"), null);
 });
+
+test("squareCenter rejects out-of-range ranks", () => {
+  assert.equal(squareCenter("a9", false), null);
+  assert.equal(squareCenter("a0", false), null);
+  assert.equal(squareCenter("i5", false), null);
+  assert.equal(squareCenter("", false), null);
+});

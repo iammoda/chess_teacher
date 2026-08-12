@@ -57,3 +57,10 @@ test("exports a sane minimum length", () => {
   const atFloor = scorePassword("Zk4!mQ9x");
   assert.equal(atFloor.requirements.length, true);
 });
+
+test("blocklist catches digit passwords with symbols and leading digits", () => {
+  assert.equal(isCommonPassword("12345678!"), true);
+  assert.equal(isCommonPassword("123456789!!"), true);
+  assert.equal(isCommonPassword("2024password"), true);
+  assert.equal(isCommonPassword("correct-horse-battery"), false);
+});

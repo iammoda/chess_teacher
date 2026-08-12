@@ -33,6 +33,7 @@ The platform is a personal chess teacher rather than a generic chessboard.
 - Uses one quick calibration game to establish a baseline, then blends the first three games for placement and calibrates continuously from every graded move.
 - Trains rated multi-move tactics imported from the Lichess puzzle database (CC0), matched to the player's level and weakness profile, alongside a three-rung checkmate ladder (mate in 1, 2, and 3).
 - Personalizes the experience: eight board themes, swappable piece sets (drop-in custom sets supported), five coach personas (voice only — the pedagogy never changes), and a Family mode with a gentle locked persona and softened feedback language.
+- Teaches complete beginners with a Learn tab: ten interactive learn-to-play lessons (the board, every piece, check, checkmate and stalemate, castling/promotion/en passant, piece values) played directly on the board, plus a first-launch "Have you played chess before?" prompt and a Beginner mode that pins the opponent to its gentlest level and removes clocks until calibration completes.
 - Runs Stockfish from bundled local assets when available, with CDN and heuristic fallbacks; opponent strength is Elo-limited (`UCI_LimitStrength`) for human-like play.
 - Adapts opponent strength from a per-dimension skill model (tactics, openings, endgames, calculation), recent results, and mistake severity.
 - Reviews learner moves live with heuristics, Stockfish eval deltas, best alternatives, and principal variations — then re-grades every move at depth 18 once the game ends, cross-checking each heuristic tactic tag against the engine and dropping false positives.
@@ -44,6 +45,16 @@ The platform is a personal chess teacher rather than a generic chessboard.
 - Runs a guided post-game review: the coach picks 2-3 key moments, asks what you were thinking, then teaches.
 - Trains openings from a built-in repertoire (12 openings, every learner move explained) with SM-2-lite spaced repetition on both opening lines and mistake drills.
 - Stores games and learning data locally, and syncs to Supabase when configured.
+
+## Beginner Mode And The Learn Tab
+
+New players get a guided on-ramp instead of a silent calibration game.
+
+- On a fresh profile the Coach panel asks "Have you played chess before?". Choosing "I'm new — teach me" turns on Beginner mode and opens the Learn tab; choosing "I know how to play" goes straight to the calibration flow.
+- The Learn tab holds ten interactive lessons (`lib/learn-lessons.mjs`): the board, pawns, rooks, bishops, queen, knights, the king and check, checkmate and stalemate, special moves (castling, promotion, en passant), and piece values with safe captures. Info steps highlight squares and advance with Next; task steps ask for a real move on the board — wrong moves are rolled back with gentle feedback, and multi-capture sequences (like the knight pawn-collection drill) are scripted step by step.
+- Lesson progress persists per account (`chess_teacher_learn_v1`), lessons resume mid-step, and finishing the course offers "Play your first game", which runs the normal calibration flow.
+- Beginner mode (also a Settings toggle) pins the opponent to its gentlest strength until calibration completes and forces untimed games. Lesson content and rules coaching never depend on the OpenAI coach — everything runs locally.
+- Lesson data is validated by `tests/learn-lessons.test.mjs`: every FEN parses, every expected move is legal, the mate task really mates, and the stalemate example is a genuine stalemate.
 
 ## OpenAI Setup
 

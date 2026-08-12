@@ -12,16 +12,19 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="modulepreload" href="https://esm.sh/@supabase/supabase-js@2.105.4?bundle" crossorigin="anonymous">
-    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Nunito:wght@400;600;700;800&family=Baloo+2:wght@500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <div id="bootVeil" class="boot-veil" aria-hidden="true">
+    <div id="bootVeil" class="boot-veil" role="status" aria-label="Loading Personal Chess Teacher">
       <div class="boot-veil-inner">
         <img src="./assets/squirrel_chess.svg" alt="">
         <strong>Personal Chess Teacher</strong>
         <span class="boot-spinner" aria-hidden="true"></span>
       </div>
+    </div>
+    <div id="offlineBanner" class="offline-banner" role="status" hidden>
+      You're offline. Play continues on this device — the coach and cloud sync will reconnect automatically.
     </div>
     <div class="shell">
       <aside class="rail" aria-label="Primary navigation">
@@ -30,13 +33,14 @@
         </div>
 
         <div class="rail-section">Train</div>
-        <button class="nav-item tab active" type="button" data-tab="coach"><span class="nav-mono">C</span><span class="nav-label">Coach</span></button>
-        <button class="nav-item tab" type="button" data-tab="review"><span class="nav-mono">R</span><span class="nav-label">Review</span></button>
-        <button class="nav-item tab" type="button" data-tab="practice"><span class="nav-mono">P</span><span class="nav-label">Practice</span><span class="nav-badge" id="practiceBadge" hidden>0</span></button>
+        <button class="nav-item tab" type="button" data-tab="today" aria-label="Today"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.4v1.8M8 12.8v1.8M1.4 8h1.8M12.8 8h1.8M3.3 3.3l1.3 1.3M11.4 11.4l1.3 1.3M12.7 3.3l-1.3 1.3M4.6 11.4l-1.3 1.3"/></svg></span><span class="nav-label">Today</span></button>
+        <button class="nav-item tab active" type="button" data-tab="play" aria-label="Play"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.8a2.3 2.3 0 0 1 1.2 4.26l.95 3.14h1.05l.9 2.3H3.9l.9-2.3h1.05l.95-3.14A2.3 2.3 0 0 1 8 1.8ZM3.2 12.5h9.6l.6 1.7H2.6l.6-1.7Z"/></svg></span><span class="nav-label">Play</span><span class="nav-badge nav-dot" id="coachUnreadBadge" hidden aria-label="New coach message"></span></button>
+        <button class="nav-item tab" type="button" data-tab="learn" aria-label="Learn"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4.2C6.9 3.3 5.4 3 3.6 3a1 1 0 0 0-1 1v7.2a1 1 0 0 0 1 1c1.8 0 3.3.3 4.4 1.2 1.1-.9 2.6-1.2 4.4-1.2a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1c-1.8 0-3.3.3-4.4 1.2Z"/><path d="M8 4.2v9.2"/></svg></span><span class="nav-label">Learn</span></button>
+        <button class="nav-item tab" type="button" data-tab="practice" aria-label="Practice"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="2.8"/><circle cx="8" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg></span><span class="nav-label">Practice</span><span class="nav-badge" id="practiceBadge" hidden>0</span></button>
+        <button class="nav-item tab" type="button" data-tab="review" aria-label="Review"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.6 13.6"/></svg></span><span class="nav-label">Review</span></button>
 
         <div class="rail-section">You</div>
-        <button class="nav-item tab" type="button" data-tab="profile"><span class="nav-mono">P</span><span class="nav-label">Profile</span></button>
-        <button class="nav-item tab" type="button" data-tab="settings"><span class="nav-mono">S</span><span class="nav-label">Settings</span></button>
+        <button class="nav-item tab" type="button" data-tab="you" aria-label="Profile and settings"><span class="nav-mono"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="5.4" r="2.7"/><path d="M2.9 13.7a5.3 5.3 0 0 1 10.2 0"/></svg></span><span class="nav-label">You</span></button>
 
         <div class="rail-foot">
           v 0.7<br>
@@ -45,6 +49,8 @@
       </aside>
 
       <main class="stage" aria-label="Chess board">
+        <div class="stage-marquee" aria-hidden="true"><span>play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; </span><span>play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; play &middot; learn &middot; practice &middot; win &middot; </span></div>
+        <div id="gameStatusAnnouncer" class="visually-hidden" aria-live="polite"></div>
         <div class="seat opponent" id="seatOpponent">
           <div class="avatar" id="opponentAvatar">O</div>
           <div class="who">
@@ -92,19 +98,28 @@
         </header>
 
         <div class="ctx-body">
-          <section id="coachPanel" class="panel active" data-panel="coach"></section>
+          <section id="todayPanel" class="panel" data-panel="today"></section>
+          <section id="coachPanel" class="panel active" data-panel="play"></section>
+          <section id="learnPanel" class="panel" data-panel="learn"></section>
           <section id="reviewPanel" class="panel" data-panel="review"></section>
           <section id="practicePanel" class="panel" data-panel="practice"></section>
-          <section id="profilePanel" class="panel" data-panel="profile"></section>
-          <section id="settingsPanel" class="panel" data-panel="settings"></section>
+          <section id="profilePanel" class="panel" data-panel="you"></section>
+          <section id="settingsPanel" class="panel" data-panel="you"></section>
         </div>
 
         <footer class="ctx-foot">
           <div class="spacer"></div>
+          <button class="new-btn resign-btn" id="resignButton" type="button" hidden>Resign</button>
           <button class="new-btn" id="newGameButton" type="button">New game</button>
         </footer>
       </aside>
     </div>
+
+    <!-- Arcade look: floating emoji decorations. Purely decorative — hidden
+         from assistive tech, no pointer events, only shown in the arcade
+         app look. Spans are generated and randomly placed by app.js, which
+         keeps them off the board and reshuffles them every minute or so. -->
+    <div class="arcade-float" aria-hidden="true"></div>
 
     <script type="module" src="./app.js"></script>
   </body>

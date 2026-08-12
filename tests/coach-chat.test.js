@@ -282,3 +282,59 @@ test("oversized moment/candidate strings are truncated in the context", () => {
   const contextMessage = input[input.length - 1].content;
   assert.ok(contextMessage.length < 10_000, `bounded, got ${contextMessage.length}`);
 });
+
+test("malformed optional context blocks are rejected before quota is spent", () => {
+  const base = { event: "user_message", messages: [], game: { fen: "x" } };
+  assert.match(validateChatPayload({ ...base, candidates: [null] }) || "", /candidate/i);
+  assert.match(validateChatPayload({ ...base, candidates: "e4" }) || "", /candidates/i);
+  assert.match(validateChatPayload({ ...base, weaknesses: [42] }) || "", /weakness/i);
+  assert.match(validateChatPayload({ ...base, moment: [1, 2] }) || "", /moment/i);
+  assert.match(validateChatPayload({ ...base, coachMemory: { recentTraces: ["hi"] } }) || "", /trace/i);
+  // Well-formed optional blocks still pass.
+  assert.equal(validateChatPayload({
+    ...base,
+    candidates: [{ san: "e4", reason: "center" }],
+    weaknesses: [{ category: "hanging_piece", label: "Hanging piece", count: 2, severity: 3 }],
+    moment: null,
+    coachMemory: { notes: [], recentTraces: [{ san: "e4", question: "?", answer: "!", takeaway: "" }] },
+  }), null);
+});
+
+test("buildChatInput survives sparse candidate objects", () => {
+  const input = buildChatInput({
+    event: "user_message",
+    messages: [],
+    game: { fen: "x" },
+    candidates: [{}],
+    weaknesses: [{}],
+    coachMemory: { notes: [], recentTraces: [{}] },
+  });
+  assert.ok(Array.isArray(input));
+});
+
+// ── Server wiring: coach replies must not get starved or discarded ──
+// gpt-5.1 is a reasoning model: reasoning tokens spend from max_output_tokens,
+// so a small ceiling truncates replies (response.incomplete) even for short
+// questions. These source-contract checks pin the fixes in place.
+test("coach output budget is generous, configurable, and used everywhere", () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "server.js"), "utf8");
+  assert.match(src, /COACH_MAX_OUTPUT_TOKENS = \(\(\) => \{/);
+  assert.match(src, /process\.env\.COACH_MAX_OUTPUT_TOKENS \?\? 3000/);
+  // Both Responses API call sites use the shared knob — no stray literals.
+  assert.equal(src.match(/max_output_tokens: COACH_MAX_OUTPUT_TOKENS/g)?.length, 2);
+  assert.ok(!src.includes("max_output_tokens: 900"));
+});
+
+test("a truncated streamed reply is salvaged, not discarded", () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "server.js"), "utf8");
+  const incompleteBlock = src.slice(src.indexOf('event.type === "response.incomplete"'));
+  // Partial text goes out as a done event flagged incomplete so the client
+  // keeps it and offers a retry; the hard error is only for empty streams.
+  assert.match(incompleteBlock, /sendEvent\("done", \{ \.\.\.normalizeChatResponse\(fullText\), incomplete: true \}\)/);
+  assert.match(incompleteBlock, /sendEvent\("error", \{ message: "The coach's reply got cut short\. Try again\." \}\)/);
+});
+
+test("a truncated non-streaming reply is flagged incomplete", () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "server.js"), "utf8");
+  assert.match(src, /if \(data\.status === "incomplete"\) reply\.incomplete = true;/);
+});

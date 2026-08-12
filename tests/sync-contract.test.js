@@ -154,3 +154,9 @@ test("normal-sized structured values still pass", () => {
   assert.equal(result.error, undefined);
   assert.equal(result.rows.length, 1);
 });
+
+test("ping is a valid, argument-free sync op", () => {
+  assert.deepEqual(validateSyncPayload({ op: "ping" }), { op: "ping" });
+  // Ping ignores stray fields — nothing else is honored.
+  assert.deepEqual(validateSyncPayload({ op: "ping", table: "games", rows: [{}] }), { op: "ping" });
+});

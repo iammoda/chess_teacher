@@ -8,6 +8,75 @@ async function source(path) {
   return readFile(new URL(path, root), "utf8");
 }
 
+test("app looks, celebration confetti, and nav icons are wired in", async () => {
+  const app = await source("app.js");
+  const html = await source("index.html");
+  const css = await source("styles.css");
+  const confetti = await source("lib/confetti.mjs");
+
+  // App looks: token overrides selected by a data attribute, chosen from a
+  // Settings card, persisted like every other setting.
+  assert.match(app, /const APP_THEMES = \[/);
+  assert.match(app, /function applyAppTheme/);
+  assert.match(app, /function setAppTheme/);
+  assert.match(app, /dataset\.appTheme/);
+  assert.match(app, /data-app-theme-key/);
+  for (const theme of ["woodland", "arcade"]) {
+    assert.match(css, new RegExp(`\\[data-app-theme="${theme}"\\]`), theme);
+  }
+  // Components read tokens so looks stay cheap to add.
+  assert.match(css, /--font-ui:/);
+  assert.match(css, /--font-display:/);
+  assert.match(css, /--radius-card:/);
+  assert.match(css, /var\(--body-bg\)/);
+  // A hand-picked board theme must survive app-look switches.
+  assert.match(app, /boardThemeAuto/);
+  // The looks ship their fonts.
+  assert.match(html, /family=Nunito/);
+  assert.match(html, /family=Baloo\+2/);
+  assert.match(html, /family=Space\+Grotesk/);
+
+  // Arcade look: candy-pop design language — butter page, colour-block rail,
+  // tilted sticker cards, marquee ticker, doodle accents, sorbet board, and
+  // a floating emoji layer that stays decorative and off the board.
+  assert.match(html, /class="stage-marquee" aria-hidden="true"/);
+  assert.match(css, /\.stage-marquee/);
+  assert.match(css, /@keyframes marquee-scroll/);
+  assert.match(css, /\[data-board-theme="sorbet"\]/);
+  assert.match(app, /key: "sorbet"/);
+  assert.match(app, /arcade: "sorbet"/);
+  assert.match(html, /class="arcade-float" aria-hidden="true"/);
+  assert.match(css, /\.arcade-float \{/);
+  assert.match(css, /@keyframes float-bob/);
+  assert.match(css, /@keyframes ufo-drift/);
+  assert.match(css, /@keyframes emoji-pop/);
+  assert.match(css, /@keyframes emoji-zap/);
+  // JS owns placement: random spots that never touch the board, reshuffled
+  // on a timer, zapped away on click, and torn down outside the arcade look.
+  assert.match(app, /function placeArcadeEmojis/);
+  assert.match(app, /function syncArcadeEmojis/);
+  assert.match(app, /ARCADE_EMOJI_SHUFFLE_MS/);
+  assert.match(app, /getArcadeBoardRect/);
+  assert.match(app, /classList\.add\("zapped"\)/);
+  // Decorative only: the layer never intercepts clicks (spans opt back in
+  // just for the zap), gone under reduced motion.
+  const floatBlock = css.slice(css.indexOf('[data-app-theme="arcade"] .arcade-float'));
+  assert.match(floatBlock, /pointer-events: none/);
+  assert.match(app, /prefers-reduced-motion/);
+
+  // Celebrations: dependency-free confetti that honors reduced motion.
+  assert.match(confetti, /export function burstConfetti/);
+  assert.match(confetti, /prefers-reduced-motion/);
+  assert.match(app, /from "\.\/lib\/confetti\.mjs"/);
+  assert.match(app, /function celebrate\(/);
+  assert.match(app, /celebrate\("milestone"\)/);
+  assert.match(app, /celebrate\("puzzle"\)/);
+  assert.match(app, /celebrate\("win"\)/);
+
+  // Real icons in the rail, not bare serif letters.
+  assert.match(html, /<span class="nav-mono"><svg/);
+});
+
 test("live game seats expose turn and capture UI", async () => {
   const html = await source("index.html");
 
@@ -377,7 +446,7 @@ test("mobile layout, touch hardening, and PWA metadata are wired in", async () =
   assert.match(css, /env\(safe-area-inset-bottom/);
   assert.match(css, /touch-action: none/);
   assert.match(css, /@media \(pointer: coarse\)/);
-  assert.match(css, /body\[data-active-tab="settings"\] \.stage/);
+  assert.match(css, /body\[data-active-tab="you"\] \.stage/);
 
   // Tab state + Android back navigation.
   assert.match(app, /document\.body\.dataset\.activeTab = tab/);
@@ -423,4 +492,100 @@ test("small pill and chip labels share title-case formatting", async () => {
   assert.match(css, /min-height: 24px;/);
   assert.match(css, /line-height: 1;/);
   assert.match(css, /text-transform: none;/);
+});
+
+test("saveCurrentGame never derives the live result label", async () => {
+  const app = await source("app.js");
+  const start = app.indexOf("function saveCurrentGame(");
+  const end = app.indexOf("\nfunction ", start + 1);
+  const body = app.slice(start, end);
+  // Regression guard: deriving the result via getResultLabel() at save time
+  // stamps the outcome on the mating move itself, which makes
+  // finalizeIfGameOver think the game was already finalized and silently
+  // skips the entire end-of-game pipeline (calibration, skill, sync, coach).
+  assert.doesNotMatch(body, /getResultLabel\(\)/);
+});
+
+test("drill scripted replies guard against exits during their pause", async () => {
+  const app = await source("app.js");
+  // Every scripted-reply path that awaits must recheck drill ownership.
+  assert.match(app, /if \(state\.activeDrill !== drill\) \{\n    state\.thinking = false;\n    return;\n  \}/);
+  assert.match(app, /if \(state\.activeDrill !== puzzle\) return;/);
+});
+
+test("deferred move-dependent syncs use the record's own game id", async () => {
+  const app = await source("app.js");
+  // syncWeakness/syncPosition run after the move insert resolves — reading
+  // state.currentGameId there cross-references a NEW game's id with an OLD
+  // game's move (regression from the deferral change).
+  assert.doesNotMatch(app, /game_id: state\.currentGameId,\s*\n\s*move_id: record\.id/);
+  assert.match(app, /game_id: record\.gameId,\s*\n\s*move_id: record\.id/);
+});
+
+test("the outbox flush cannot spin when storage writes fail", async () => {
+  const app = await source("app.js");
+  const start = app.indexOf("async function flushSyncOutbox(");
+  const body = app.slice(start, app.indexOf("\nasync function apiSyncOp", start));
+  // Iteration cap + abort-on-failed-persist: a full localStorage must never
+  // freeze the tab (expired-entry branch) or resend the same op forever.
+  assert.match(body, /for \(let iterations = 0/);
+  assert.match(body, /if \(!saveSyncOutbox\(entries\)\) return;/);
+});
+
+test("only one tab may be active (multi-tab clobber guard)", async () => {
+  const app = await source("app.js");
+  assert.match(app, /new BroadcastChannel\("chess_teacher_tab_v1"\)/);
+  assert.match(app, /if \(tabDeactivated\) return false;/, "saveJson refuses writes from a deactivated tab");
+  assert.match(app, /initTabLock\(\);/);
+});
+
+test("saved clocks carry a wall-clock timestamp (no reload time refund)", async () => {
+  const app = await source("app.js");
+  assert.match(app, /savedAt: Date\.now\(\)/);
+  assert.match(app, /Date\.now\(\) - active\.clocks\.savedAt/);
+});
+
+test("the settings panel applies every field on change (no save button)", async () => {
+  const app = await source("app.js");
+  assert.doesNotMatch(app, /id="saveSettingsButton"/);
+  assert.match(app, /#timeControlInput[\s\S]{0,400}addEventListener\("change"/);
+});
+
+test("native window.confirm is fully replaced by styled dialogs", async () => {
+  const app = await source("app.js");
+  assert.doesNotMatch(app, /window\.confirm\(/);
+  assert.match(app, /function showConfirmDialog\(/);
+  assert.match(app, /function showToast\(/);
+});
+
+test("the Today home and You panel are wired into the tab system", async () => {
+  const html = await source("index.html");
+  const app = await source("app.js");
+  assert.match(html, /data-tab="today"/);
+  assert.match(html, /data-tab="play"/);
+  assert.match(html, /data-tab="you"/);
+  // Old tab keys must be gone from navigation.
+  assert.doesNotMatch(html, /data-tab="coach"/);
+  assert.doesNotMatch(html, /data-tab="profile"/);
+  assert.doesNotMatch(html, /data-tab="settings"/);
+  // Profile + Settings stack inside the You panel.
+  assert.match(html, /id="profilePanel" class="panel" data-panel="you"/);
+  assert.match(html, /id="settingsPanel" class="panel" data-panel="you"/);
+  assert.match(app, /function renderTodayPanel\(/);
+  // No stale switchTab targets.
+  assert.doesNotMatch(app, /switchTab\("coach"\)/);
+  assert.doesNotMatch(app, /switchTab\("settings"\)/);
+  assert.doesNotMatch(app, /switchTab\("profile"\)/);
+});
+
+test("finished games are scrubbable on the main board", async () => {
+  const app = await source("app.js");
+  assert.match(app, /function setTimelinePly\(/);
+  assert.match(app, /function stepTimeline\(/);
+  // Teardown must clear the timeline or an old game's position would linger.
+  const teardown = app.slice(app.indexOf("function teardownBoardInteractions("), app.indexOf("function shouldOfferRethink("));
+  assert.match(teardown, /state\.timeline = null/);
+  // Arrow keys are bound.
+  assert.match(app, /event\.key === "ArrowLeft"/);
+  assert.match(app, /event\.key === "ArrowRight"/);
 });

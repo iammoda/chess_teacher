@@ -69,3 +69,18 @@ test("health can request the deep check", async () => {
   await api.health(true);
   assert.equal(calls[0].url, "/api/health?check=1");
 });
+
+test("health requests carry a timeout signal so boot can never hang", async () => {
+  let capturedInit = null;
+  const client = createApiClient({
+    getToken: () => null,
+    fetchImpl: async (url, init) => {
+      capturedInit = init;
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  await client.health();
+  if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) {
+    assert.ok(capturedInit.signal, "health fetch is abortable");
+  }
+});

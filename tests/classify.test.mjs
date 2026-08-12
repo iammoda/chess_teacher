@@ -141,6 +141,23 @@ test("classifyMoveQuality handles book and heuristic fallback cues", () => {
 });
 
 test("classifyMoveQuality detects missed forced mate from mate scores", () => {
-  assert.equal(classifyMoveQuality({ mateBefore: 2, mateAfter: null }).key, "missed_win");
+  // Genuinely let the mate slip: had mate-in-2, now just +1 for the player.
+  assert.equal(classifyMoveQuality({ mateBefore: 2, mateAfter: null, evalDelta: 100 }).key, "missed_win");
+  // Kept the forced mate (mate scores are side-to-move; negative = opponent
+  // is getting mated).
   assert.equal(classifyMoveQuality({ mateBefore: 2, mateAfter: -3, evalDelta: 0 }).key, "excellent");
+});
+
+test("delivering checkmate is never graded a missed win", () => {
+  // mateAfter 0 = the opponent (side to move after the move) is checkmated:
+  // the move ENDED the game in the player's favor.
+  const quality = classifyMoveQuality({ mateBefore: 1, mateAfter: 0, evalDelta: 0, playedUci: "h6h7", bestMoveUci: "h6h7" });
+  assert.notEqual(quality.key, "missed_win");
+  assert.equal(quality.key, "best");
+});
+
+test("an eval timeout on a mating line is not graded a missed win", () => {
+  // mateBefore known, but the after-eval never resolved (mateAfter null, no
+  // evalDelta): grading it MW would punish a possibly perfect move.
+  assert.notEqual(classifyMoveQuality({ mateBefore: 2, mateAfter: null, evalDelta: null }).key, "missed_win");
 });

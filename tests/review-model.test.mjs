@@ -60,14 +60,27 @@ test("adjacent plies dedupe to one moment", () => {
 });
 
 test("eval sign flips count as moments and engine/retracted moves are ignored", () => {
+  // Eval scores are side-to-move: evalBefore is the player's perspective,
+  // evalAfter the opponent's. evalBefore 120 / evalAfter 140 means the player
+  // went from +120 to -140 — a real reversal (loss 260).
   const moves = [
-    move({ ply: 13, san: "f4", evalBefore: 120, evalAfter: -140, evalDelta: 260, qualityKey: "mistake" }),
+    move({ ply: 13, san: "f4", evalBefore: 120, evalAfter: 140, evalDelta: 260, qualityKey: "mistake" }),
     move({ ply: 20, role: "engine", qualityKey: "blunder", evalDelta: 900 }),
     move({ ply: 21, qualityKey: "blunder", evalDelta: 900, retracted: true }),
   ];
   const moments = selectKeyMoments(moves);
   assert.equal(moments.length, 1);
   assert.equal(moments[0].ply, 13);
+});
+
+test("a steady advantage is never mistaken for a reversal", () => {
+  // Player holds ~+2 throughout: evalBefore +200 (player to move), evalAfter
+  // -210 (opponent to move, i.e. still -2.1 for the opponent). The raw signs
+  // differ, but nothing changed hands — this must NOT be a key moment.
+  const moves = [
+    move({ ply: 13, san: "Rd1", evalBefore: 200, evalAfter: -210, evalDelta: 0, qualityKey: "good" }),
+  ];
+  assert.deepEqual(selectKeyMoments(moves), []);
 });
 
 test("moment shape carries teaching context", () => {

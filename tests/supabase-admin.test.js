@@ -117,7 +117,7 @@ test("deleteForUser and selectForUser scope to the user", async () => {
 
   assert.equal(calls[0].url, `https://project.supabase.co/rest/v1/games?user_id=eq.${USER_ID}`);
   assert.equal(calls[0].init.method, "DELETE");
-  assert.equal(calls[1].url, `https://project.supabase.co/rest/v1/games?select=*&user_id=eq.${USER_ID}&limit=5`);
+  assert.equal(calls[1].url, `https://project.supabase.co/rest/v1/games?select=*&user_id=eq.${USER_ID}&limit=5&offset=0&order=id.asc`);
   assert.deepEqual(rows, [{ id: "g1" }]);
 });
 
@@ -133,4 +133,26 @@ test("ping probes the games table", async () => {
   const { admin, calls } = makeAdmin(() => jsonResponse(200, []));
   await admin.ping();
   assert.equal(calls[0].url, "https://project.supabase.co/rest/v1/games?select=id&limit=1");
+});
+
+test("update detects zero-row matches instead of reporting silent success", async () => {
+  const { admin } = makeAdmin(() => jsonResponse(200, []));
+  await assert.rejects(
+    () => admin.update("moves", { id: "m1", userId: USER_ID, patch: { note: "n" } }),
+    (error) => error instanceof SupabaseRequestError && error.status === 404,
+  );
+});
+
+test("selectAllForUser paginates past a single page", async () => {
+  const pageSize = 3;
+  const rows = Array.from({ length: 7 }, (_, i) => ({ id: `row-${i}` }));
+  const { admin, calls } = makeAdmin((url) => {
+    const offset = Number(url.match(/offset=(\d+)/)[1]);
+    return jsonResponse(200, rows.slice(offset, offset + pageSize));
+  });
+
+  const all = await admin.selectAllForUser("moves", USER_ID, { pageSize });
+  assert.equal(all.length, 7);
+  assert.equal(calls.length, 3, "three pages fetched");
+  assert.deepEqual(all[6], { id: "row-6" });
 });

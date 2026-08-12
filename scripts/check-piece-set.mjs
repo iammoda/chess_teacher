@@ -25,6 +25,7 @@ const BOARD_THEMES = [
   { key: "ocean", light: "#e6eef5", dark: "#88a8c3" },
   { key: "rosewood", light: "#f0e0dd", dark: "#ab7168" },
   { key: "candy", light: "#fdf1f7", dark: "#eda3c9" },
+  { key: "sorbet", light: "#fbf1d7", dark: "#66c2ae" },
   { key: "nebula", light: "#6b7a99", dark: "#3d4a66" },
   { key: "middle-realm", light: "#e8e0c0", dark: "#7d8a5c" },
 ];

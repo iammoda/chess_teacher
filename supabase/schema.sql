@@ -219,6 +219,44 @@ $$;
 
 revoke all on function increment_coach_usage(uuid, date) from public, anon, authenticated;
 
+-- Durable fixed-window rate counters (see migrations/002_rate_limits.sql).
+-- In-memory limits reset on every serverless cold start; expensive buckets
+-- (coach, account, health) get a cross-instance budget here instead.
+create table if not exists rate_counters (
+  key text not null,
+  window_start timestamptz not null,
+  count integer not null default 0,
+  primary key (key, window_start)
+);
+
+create or replace function increment_rate_counter(p_key text, p_window_seconds integer)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_window_start timestamptz;
+  v_count integer;
+begin
+  v_window_start := to_timestamp(floor(extract(epoch from now()) / p_window_seconds) * p_window_seconds);
+
+  delete from rate_counters
+  where key = p_key
+    and window_start < now() - make_interval(secs => p_window_seconds * 2);
+
+  insert into rate_counters (key, window_start, count)
+  values (p_key, v_window_start, 1)
+  on conflict (key, window_start)
+  do update set count = rate_counters.count + 1
+  returning count into v_count;
+
+  return v_count;
+end;
+$$;
+
+revoke all on function increment_rate_counter(text, integer) from public, anon, authenticated;
+
 -- Lock everything down: service-role-only access.
 alter table games               enable row level security;
 alter table moves               enable row level security;
@@ -233,6 +271,7 @@ alter table coach_memory        enable row level security;
 alter table skill_ratings       enable row level security;
 alter table repertoire_progress enable row level security;
 alter table usage_daily         enable row level security;
+alter table rate_counters       enable row level security;
 
 revoke all on all tables    in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;

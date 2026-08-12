@@ -82,7 +82,7 @@ try {
   await page.waitForFunction(() => !document.querySelector("#bootVeil"), null, { timeout: 5000 });
 
   // Board themes, piece sets, and personas: switching must take effect live.
-  await page.locator('[data-tab="settings"]').click();
+  await page.locator('[data-tab="you"]').click();
   await page.locator('[data-board-theme-key="walnut"]').click();
   const themeApplied = await page.evaluate(() => document.documentElement.dataset.boardTheme);
   if (themeApplied !== "walnut") {
@@ -250,7 +250,7 @@ async function checkMobileLayout(engineBrowser, engineName, profileName, device)
       throw new Error(`${label}: bottom tab bar not pinned (${JSON.stringify(rail)})`);
     }
 
-    const navBox = await page.locator('[data-tab="settings"]').boundingBox();
+    const navBox = await page.locator('[data-tab="you"]').boundingBox();
     if (!navBox || navBox.height < 40) {
       throw new Error(`${label}: nav touch target too small (${navBox?.height}px)`);
     }
@@ -265,7 +265,7 @@ async function checkMobileLayout(engineBrowser, engineName, profileName, device)
     );
 
     // Settings: the board stage frees the screen, inputs never trigger iOS zoom.
-    await page.tap('[data-tab="settings"]');
+    await page.tap('[data-tab="you"]');
     await page.waitForFunction(
       () => getComputedStyle(document.querySelector(".stage")).display === "none",
       null,
@@ -277,7 +277,7 @@ async function checkMobileLayout(engineBrowser, engineName, profileName, device)
 
     // Back button walks tab history instead of leaving the app.
     await page.goBack();
-    await page.waitForFunction(() => document.body.dataset.activeTab === "coach", null, { timeout: 3000 });
+    await page.waitForFunction(() => document.body.dataset.activeTab === "play", null, { timeout: 3000 });
   } else {
     const railPosition = await page.evaluate(() => getComputedStyle(document.querySelector(".rail")).position);
     if (railPosition === "fixed") {
