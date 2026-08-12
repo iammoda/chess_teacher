@@ -179,9 +179,7 @@ function placeArcadeEmojis({ pop = false } = {}) {
 }
 
 function syncArcadeEmojis() {
-  const arcadeActive = document.documentElement.dataset.appTheme === "arcade"
-    && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-  if (!arcadeActive) {
+  if (!arcadeEmojisActive()) {
     clearTimeout(arcadeEmojiTimer);
     arcadeEmojiTimer = null;
     document.querySelector(".arcade-float")?.replaceChildren();
@@ -189,20 +187,35 @@ function syncArcadeEmojis() {
   }
   if (arcadeEmojiTimer) return;
   placeArcadeEmojis();
-  // ±10s jitter so the shuffle never feels metronomic.
+  // ±10s jitter so the shuffle never feels metronomic. Re-check activity per
+  // tick: reduced-motion can be toggled on mid-session, and shuffling an
+  // invisible layer forever would be pure waste.
   const tick = () => {
-    if (!document.hidden) placeArcadeEmojis({ pop: true });
+    if (!document.hidden && arcadeEmojisActive()) placeArcadeEmojis({ pop: true });
     arcadeEmojiTimer = setTimeout(tick, ARCADE_EMOJI_SHUFFLE_MS + (Math.random() * 20000 - 10000));
   };
   arcadeEmojiTimer = setTimeout(tick, ARCADE_EMOJI_SHUFFLE_MS + (Math.random() * 20000 - 10000));
 }
 
 let arcadeEmojiResizeTimer = null;
-window.addEventListener("resize", () => {
-  if (document.documentElement.dataset.appTheme !== "arcade") return;
+
+// True while the arcade look is active for a user who is OK with motion —
+// the only state in which the emoji layer exists.
+function arcadeEmojisActive() {
+  return document.documentElement.dataset.appTheme === "arcade"
+    && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+}
+
+// Layout changed under the emojis (resize, tab switch showing/hiding the
+// board): re-scatter so none of them sit where the board now is. Skipped
+// when the layer doesn't exist so it never re-creates spans uselessly.
+function refreshArcadeEmojiPlacement() {
+  if (!arcadeEmojisActive()) return;
   clearTimeout(arcadeEmojiResizeTimer);
   arcadeEmojiResizeTimer = setTimeout(() => placeArcadeEmojis(), 250);
-});
+}
+
+window.addEventListener("resize", refreshArcadeEmojiPlacement);
 
 // Clicking an emoji zaps it — it shrinks away and stays gone until the next
 // shuffle tops the layer back up. Delegated so re-created spans keep working.
@@ -8303,6 +8316,10 @@ function onMoveClockUpdate(record) {
 async function onClockFlagged(side) {
   // A flag is a real game result: run the same end-of-game pipeline as a
   // checkmate so calibration, skill, sync, and deep analysis all count it.
+  // The ticker can race the chess ending (mate delivered as the clock hits
+  // zero finalizes via finalizeIfGameOver first) — never complete twice.
+  const existing = state.localGames.find((game) => game.id === state.currentGameId);
+  if (existing?.result && existing.result !== "in_progress") return;
   const winner = side === "w" ? "b" : "w";
   const label = `${colorName(winner)} wins on time`;
   state.game.header?.("Result", "*");
@@ -10441,6 +10458,9 @@ function switchTab(tab, options = {}) {
   // Arrows depend on the current tab (played+best in Review, only-on-mistake
   // in play) so tab switches must repaint them.
   paintBoardArrows();
+  // On mobile, tab switches show/hide the board stage — re-scatter the arcade
+  // emojis so none placed while the board was hidden now sit on top of it.
+  refreshArcadeEmojiPlacement();
   // Back/forward navigation restores a previously-visited tab — don't yank
   // its reading position back to the top.
   if (!options.fromHistory) {
